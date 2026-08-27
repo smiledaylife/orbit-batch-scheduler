@@ -1,93 +1,39 @@
-# ---------------------------------------------------------------------------
-# 应用配置（ConfigMap 外置化）：挂载为 /app/config/application.yml
-# 凭据类（DB 用户名/密码）不放这里，见 02-secret.yaml
-# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: orbit-scheduler-config
+  name: orbit-config
   namespace: orbit-system
-  labels:
-    app: orbit-scheduler
 data:
-  application.yml: |
-    spring:
-      profiles:
-        # 数据库后端切换：postgresql（默认）| gaussdb | mysql
-        # 三种模式代码与表结构一致，仅连接串/驱动不同（同一镜像双库运行）
-        active: postgresql
-      application:
-        name: orbit-scheduler
-      lifecycle:
-        timeout-per-shutdown-phase: 30s
-      quartz:
-        job-store-type: jdbc
-        jdbc:
-          initialize-schema: never
-        properties:
-          org.quartz.scheduler.instanceName: orbit-scheduler
-          org.quartz.scheduler.instanceId: AUTO
-          # driverDelegateClass 由框架按方言自动注入：
-          #   postgresql → PostgreSQLDelegate；gaussdb → GaussDBDelegate(继承PG)
-          #   mysql → 保持默认 StdJDBCDelegate（如需可显式配置覆盖自动注入）
-          org.quartz.jobStore.isClustered: true
-          org.quartz.jobStore.clusterCheckinInterval: 15000
-          org.quartz.jobStore.misfireThreshold: 60000
-          org.quartz.threadPool.threadCount: 10
-          org.quartz.threadPool.threadNamePrefix: orbit-quartz-
-      sql:
-        init:
-          mode: never
-
+  admin.yml: |
     server:
       port: 8080
-      shutdown: graceful
-
+    spring:
+      datasource:
+        url: jdbc:h2:file:/app/data/orbit-admin;MODE=MySQL;DB_CLOSE_DELAY=-1
+        driver-class-name: org.h2.Driver
+        username: sa
+        password:
+      sql:
+        init:
+          mode: always
+          schema-locations: classpath:schema.sql
+      quartz:
+        job-store-type: memory
     orbit:
-      scheduler:
-        enabled: true
-        group: ORBIT
-        node-id: ${POD_NAME:}
+      admin:
+        access-token: ""
+        heartbeat-timeout-seconds: 90
         timezone: Asia/Shanghai
-        annotation-scan: true
-        api-enabled: true
-        database:
-          # auto：按 URL/元数据/sql_compatibility 三级自动探测（PG/GaussDB 二选一自动识别）；
-          # 探测不可靠时可显式指定 postgresql / gaussdb
-          dialect: auto
-        storage:
-          type: database
-        lock:
-          enabled: true
-          type: auto
-          lease: 10m
-          redis:
-            address: ${REDIS_ADDRESS:redis.orbit-system.svc.cluster.local:6379}
-        http-dispatch:
-          enabled: true
-          service-name: orbit-scheduler
-          discovery-mode: service-dns
-          port: 8080
-          path: /api/scheduler/execute
-          connect-timeout: 3s
-          read-timeout: 300s
-          default-timeout-seconds: 300
-          # 生产环境建议开启派发令牌
-          # secret: ${DISPATCH_SECRET:}
-        log:
-          storage: database
-
-    management:
-      endpoints:
-        web:
-          exposure:
-            include: health,info
-      endpoint:
-        health:
-          show-details: always
-          probes:
-            enabled: true
-
-    logging:
-      level:
-        com.orbit.scheduler: INFO
+  executor.yml: |
+    server:
+      port: 8081
+    orbit:
+      executor:
+        enabled: true
+        app-name: demo-executor
+        admin-addresses: http://orbit-admin:8080
+        port: 8081
+        # K8s 下 address 留空，用 POD_IP 自动注册
+        address: ""
+        heartbeat-interval-ms: 20000
+        node-id: ${POD_NAME:}

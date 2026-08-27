@@ -2,5 +2,3 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: orbit-system
-  labels:
-    app.kubernetes.io/part-of: orbit-batch-scheduler

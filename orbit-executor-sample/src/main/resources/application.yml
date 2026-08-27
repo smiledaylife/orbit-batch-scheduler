@@ -1,0 +1,30 @@
+server:
+  port: 8081
+  shutdown: graceful
+
+spring:
+  application:
+    name: orbit-executor-sample
+
+orbit:
+  executor:
+    enabled: true
+    app-name: demo-executor
+    # 调度中心地址（本地默认 8080；K8s 改为 http://orbit-admin:8080）
+    admin-addresses: http://127.0.0.1:8080
+    # 空则自动用 POD_IP / 本机 IP + port
+    address: ""
+    port: ${server.port}
+    access-token: ""
+    heartbeat-interval-ms: 20000
+    node-id: ${POD_NAME:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+logging:
+  level:
+    com.orbit: INFO

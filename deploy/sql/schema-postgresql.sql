@@ -1,230 +1,34 @@
--- ===========================================================================
--- Orbit Batch Scheduler :: PostgreSQL 初始化脚本（postgresql profile）
--- 适用：PostgreSQL 10+（含各云厂商托管 PG）
--- 包含：Quartz 2.5.x 官方 11 张集群表（tables_postgres.sql 结构）+ 框架业务表 + 演示种子
--- 幂等：可重复执行（IF NOT EXISTS / NOT EXISTS 种子插入）
---
--- 建库（DBA 一次性执行，脚本内不建库）：
---   CREATE DATABASE orbit_scheduler ENCODING 'UTF8';
---   \c orbit_scheduler
---   \i schema-postgresql.sql
--- ===========================================================================
-
--- ---------------------------------------------------------------------------
--- Quartz 集群表（官方 tables_postgres.sql 结构；驱动适配器 PostgreSQLDelegate
--- 由框架按方言自动注入，无需在 spring.quartz.properties 配置 driverDelegateClass）
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS QRTZ_JOB_DETAILS (
-    SCHED_NAME        VARCHAR(120) NOT NULL,
-    JOB_NAME          VARCHAR(200) NOT NULL,
-    JOB_GROUP         VARCHAR(200) NOT NULL,
-    DESCRIPTION       VARCHAR(250) NULL,
-    JOB_CLASS_NAME    VARCHAR(250) NOT NULL,
-    IS_DURABLE        BOOL         NOT NULL,
-    IS_NONCONCURRENT  BOOL         NOT NULL,
-    IS_UPDATE_DATA    BOOL         NOT NULL,
-    REQUESTS_RECOVERY BOOL         NOT NULL,
-    JOB_DATA          BYTEA        NULL,
-    PRIMARY KEY (SCHED_NAME, JOB_NAME, JOB_GROUP)
+CREATE TABLE IF NOT EXISTS orbit_job (
+    id               BIGSERIAL PRIMARY KEY,
+    job_name         VARCHAR(64)  NOT NULL,
+    description      VARCHAR(256),
+    app_name         VARCHAR(64)  NOT NULL,
+    handler          VARCHAR(128) NOT NULL,
+    cron_expr        VARCHAR(64),
+    params           VARCHAR(2000),
+    timeout_seconds  INT DEFAULT 300,
+    route_strategy   VARCHAR(16) DEFAULT 'ROUND',
+    enabled          BOOLEAN DEFAULT TRUE,
+    version          INT DEFAULT 1,
+    created_at       TIMESTAMP,
+    updated_at       TIMESTAMP,
+    CONSTRAINT uk_orbit_job_name UNIQUE (job_name)
 );
 
-CREATE TABLE IF NOT EXISTS QRTZ_TRIGGERS (
-    SCHED_NAME     VARCHAR(120) NOT NULL,
-    TRIGGER_NAME   VARCHAR(200) NOT NULL,
-    TRIGGER_GROUP  VARCHAR(200) NOT NULL,
-    JOB_NAME       VARCHAR(200) NOT NULL,
-    JOB_GROUP      VARCHAR(200) NOT NULL,
-    DESCRIPTION    VARCHAR(250) NULL,
-    NEXT_FIRE_TIME BIGINT       NULL,
-    PREV_FIRE_TIME BIGINT       NULL,
-    PRIORITY       INTEGER      NULL,
-    TRIGGER_STATE  VARCHAR(16)  NOT NULL,
-    TRIGGER_TYPE   VARCHAR(8)   NOT NULL,
-    START_TIME     BIGINT       NOT NULL,
-    END_TIME       BIGINT       NULL,
-    CALENDAR_NAME  VARCHAR(200) NULL,
-    MISFIRE_INSTR  SMALLINT     NULL,
-    JOB_DATA       BYTEA        NULL,
-    PRIMARY KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP),
-    FOREIGN KEY (SCHED_NAME, JOB_NAME, JOB_GROUP)
-        REFERENCES QRTZ_JOB_DETAILS (SCHED_NAME, JOB_NAME, JOB_GROUP)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_SIMPLE_TRIGGERS (
-    SCHED_NAME      VARCHAR(120) NOT NULL,
-    TRIGGER_NAME    VARCHAR(200) NOT NULL,
-    TRIGGER_GROUP   VARCHAR(200) NOT NULL,
-    REPEAT_COUNT    BIGINT       NOT NULL,
-    REPEAT_INTERVAL BIGINT       NOT NULL,
-    TIMES_TRIGGERED BIGINT       NOT NULL,
-    PRIMARY KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP),
-    FOREIGN KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP)
-        REFERENCES QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_CRON_TRIGGERS (
-    SCHED_NAME      VARCHAR(120) NOT NULL,
-    TRIGGER_NAME    VARCHAR(200) NOT NULL,
-    TRIGGER_GROUP   VARCHAR(200) NOT NULL,
-    CRON_EXPRESSION VARCHAR(120) NOT NULL,
-    TIME_ZONE_ID    VARCHAR(80),
-    PRIMARY KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP),
-    FOREIGN KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP)
-        REFERENCES QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_SIMPROP_TRIGGERS (
-    SCHED_NAME    VARCHAR(120)   NOT NULL,
-    TRIGGER_NAME  VARCHAR(200)   NOT NULL,
-    TRIGGER_GROUP VARCHAR(200)   NOT NULL,
-    STR_PROP_1    VARCHAR(512)   NULL,
-    STR_PROP_2    VARCHAR(512)   NULL,
-    STR_PROP_3    VARCHAR(512)   NULL,
-    INT_PROP_1    INTEGER        NULL,
-    INT_PROP_2    INTEGER        NULL,
-    LONG_PROP_1   BIGINT         NULL,
-    LONG_PROP_2   BIGINT         NULL,
-    DEC_PROP_1    NUMERIC(13, 4) NULL,
-    DEC_PROP_2    NUMERIC(13, 4) NULL,
-    BOOL_PROP_1   BOOL           NULL,
-    BOOL_PROP_2   BOOL           NULL,
-    PRIMARY KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP),
-    FOREIGN KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP)
-        REFERENCES QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_BLOB_TRIGGERS (
-    SCHED_NAME    VARCHAR(120) NOT NULL,
-    TRIGGER_NAME  VARCHAR(200) NOT NULL,
-    TRIGGER_GROUP VARCHAR(200) NOT NULL,
-    BLOB_DATA     BYTEA        NULL,
-    PRIMARY KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP),
-    FOREIGN KEY (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP)
-        REFERENCES QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_CALENDARS (
-    SCHED_NAME    VARCHAR(120) NOT NULL,
-    CALENDAR_NAME VARCHAR(200) NOT NULL,
-    CALENDAR      BYTEA        NOT NULL,
-    PRIMARY KEY (SCHED_NAME, CALENDAR_NAME)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_PAUSED_TRIGGER_GRPS (
-    SCHED_NAME    VARCHAR(120) NOT NULL,
-    TRIGGER_GROUP VARCHAR(200) NOT NULL,
-    PRIMARY KEY (SCHED_NAME, TRIGGER_GROUP)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_FIRED_TRIGGERS (
-    SCHED_NAME        VARCHAR(120) NOT NULL,
-    ENTRY_ID          VARCHAR(95)  NOT NULL,
-    TRIGGER_NAME      VARCHAR(200) NOT NULL,
-    TRIGGER_GROUP     VARCHAR(200) NOT NULL,
-    INSTANCE_NAME     VARCHAR(200) NOT NULL,
-    FIRED_TIME        BIGINT       NOT NULL,
-    SCHED_TIME        BIGINT       NOT NULL,
-    PRIORITY          INTEGER      NOT NULL,
-    STATE             VARCHAR(16)  NOT NULL,
-    JOB_NAME          VARCHAR(200) NULL,
-    JOB_GROUP         VARCHAR(200) NULL,
-    IS_NONCONCURRENT  BOOL         NOT NULL,
-    REQUESTS_RECOVERY BOOL         NULL,
-    PRIMARY KEY (SCHED_NAME, ENTRY_ID)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_SCHEDULER_STATE (
-    SCHED_NAME        VARCHAR(120) NOT NULL,
-    INSTANCE_NAME     VARCHAR(200) NOT NULL,
-    LAST_CHECKIN_TIME BIGINT       NOT NULL,
-    CHECKIN_INTERVAL  BIGINT       NOT NULL,
-    PRIMARY KEY (SCHED_NAME, INSTANCE_NAME)
-);
-
-CREATE TABLE IF NOT EXISTS QRTZ_LOCKS (
-    SCHED_NAME VARCHAR(120) NOT NULL,
-    LOCK_NAME  VARCHAR(40)  NOT NULL,
-    PRIMARY KEY (SCHED_NAME, LOCK_NAME)
-);
-
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_J_REQ_RECOVERY ON QRTZ_JOB_DETAILS (SCHED_NAME, REQUESTS_RECOVERY);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_J_GRP ON QRTZ_JOB_DETAILS (SCHED_NAME, JOB_GROUP);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_J ON QRTZ_TRIGGERS (SCHED_NAME, JOB_NAME, JOB_GROUP);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_JG ON QRTZ_TRIGGERS (SCHED_NAME, JOB_GROUP);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_C ON QRTZ_TRIGGERS (SCHED_NAME, CALENDAR_NAME);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_G ON QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_GROUP);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_STATE ON QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_STATE);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_N_STATE ON QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP, TRIGGER_STATE);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_N_G_STATE ON QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_GROUP, TRIGGER_STATE);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_NEXT_FIRE_TIME ON QRTZ_TRIGGERS (SCHED_NAME, NEXT_FIRE_TIME);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_NFT_ST ON QRTZ_TRIGGERS (SCHED_NAME, TRIGGER_STATE, NEXT_FIRE_TIME);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_NFT_MISFIRE ON QRTZ_TRIGGERS (SCHED_NAME, MISFIRE_INSTR, NEXT_FIRE_TIME);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_NFT_ST_MISFIRE ON QRTZ_TRIGGERS (SCHED_NAME, MISFIRE_INSTR, NEXT_FIRE_TIME, TRIGGER_STATE);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_T_NFT_ST_MISFIRE_GRP ON QRTZ_TRIGGERS (SCHED_NAME, MISFIRE_INSTR, NEXT_FIRE_TIME, TRIGGER_GROUP, TRIGGER_STATE);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_FT_TRIG_INST_NAME ON QRTZ_FIRED_TRIGGERS (SCHED_NAME, INSTANCE_NAME);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_FT_INST_JOB_REQ_RCVRY ON QRTZ_FIRED_TRIGGERS (SCHED_NAME, REQUESTS_RECOVERY);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_FT_J_G ON QRTZ_FIRED_TRIGGERS (SCHED_NAME, JOB_NAME, JOB_GROUP);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_FT_JG ON QRTZ_FIRED_TRIGGERS (SCHED_NAME, JOB_GROUP);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_FT_T_G ON QRTZ_FIRED_TRIGGERS (SCHED_NAME, TRIGGER_NAME, TRIGGER_GROUP);
-CREATE INDEX IF NOT EXISTS IDX_QRTZ_FT_TG ON QRTZ_FIRED_TRIGGERS (SCHED_NAME, TRIGGER_GROUP);
-
--- ---------------------------------------------------------------------------
--- 框架业务表（与 GaussDB 版结构完全一致，实现"同一套 DAO 双库运行"）
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS t_job_config (
+CREATE TABLE IF NOT EXISTS orbit_job_log (
     id                BIGSERIAL PRIMARY KEY,
-    task_name         VARCHAR(128) NOT NULL,
-    task_group        VARCHAR(64) DEFAULT 'ORBIT',
-    description       VARCHAR(512),
-    cron_expression   VARCHAR(64),
-    dispatch_type     VARCHAR(16) NOT NULL DEFAULT 'LOCAL',
-    http_service_name VARCHAR(128),
-    http_path         VARCHAR(256),
-    timeout_seconds   INT DEFAULT 300,
-    params            TEXT,
-    enabled           BOOLEAN NOT NULL DEFAULT TRUE,
-    version           INT DEFAULT 1,
-    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uk_job_config_task_name UNIQUE (task_name)
+    log_id            VARCHAR(64) NOT NULL,
+    job_id            BIGINT,
+    job_name          VARCHAR(64),
+    app_name          VARCHAR(64),
+    handler           VARCHAR(128),
+    executor_address  VARCHAR(256),
+    status            VARCHAR(16),
+    message           VARCHAR(2000),
+    cost_ms           BIGINT,
+    start_time        TIMESTAMP,
+    end_time          TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS t_job_log (
-    id            BIGSERIAL PRIMARY KEY,
-    request_id    VARCHAR(64),
-    task_name     VARCHAR(128) NOT NULL,
-    task_group    VARCHAR(64),
-    dispatch_type VARCHAR(16),
-    dispatch_node VARCHAR(128),
-    worker_node   VARCHAR(128),
-    status        VARCHAR(16) NOT NULL,
-    start_time    TIMESTAMP,
-    end_time      TIMESTAMP,
-    cost_ms       BIGINT,
-    message       TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_job_log_task_start ON t_job_log (task_name, start_time);
-CREATE INDEX IF NOT EXISTS idx_job_log_status ON t_job_log (status);
-
-CREATE TABLE IF NOT EXISTS t_cluster_lock (
-    lock_name   VARCHAR(128) NOT NULL,
-    owner       VARCHAR(128),
-    expire_at   BIGINT,
-    update_time BIGINT,
-    PRIMARY KEY (lock_name)
-);
-
--- ---------------------------------------------------------------------------
--- 演示种子数据（幂等；时间列走 DDL 默认值，规避方言时间函数差异）
--- ---------------------------------------------------------------------------
-INSERT INTO t_job_config
-    (task_name, task_group, description, cron_expression, dispatch_type, timeout_seconds, params, enabled, version)
-SELECT 'remoteDataSync', 'ORBIT', '跨节点数据同步（HTTP派发演示，cron由DB覆盖为3分钟）',
-       '0 */3 * * * ?', 'HTTP', 300, '{"bizDate":"auto"}', TRUE, 1
-WHERE NOT EXISTS (SELECT 1 FROM t_job_config WHERE task_name = 'remoteDataSync');
-
-INSERT INTO t_job_config
-    (task_name, task_group, description, cron_expression, dispatch_type, timeout_seconds, params, enabled, version)
-SELECT 'futureTask', 'ORBIT', '预留任务（禁用状态示例，可随时启用）',
-       '0 0 5 * * ?', 'LOCAL', 600, '{}', FALSE, 1
-WHERE NOT EXISTS (SELECT 1 FROM t_job_config WHERE task_name = 'futureTask');
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);

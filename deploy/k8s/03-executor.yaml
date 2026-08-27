@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: orbit-executor
+  namespace: orbit-system
+spec:
+  # 调度中心通过执行器自注册的 Pod IP 直连，Service 主要用于调试
+  selector:
+    app: orbit-executor
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orbit-executor
+  namespace: orbit-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orbit-executor
+  template:
+    metadata:
+      labels:
+        app: orbit-executor
+    spec:
+      containers:
+        - name: executor
+          image: orbit-executor-sample:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: ORBIT_EXECUTOR_ADMIN_ADDRESSES
+              value: http://orbit-admin:8080
+            - name: ORBIT_EXECUTOR_APP_NAME
+              value: demo-executor
+          volumeMounts:
+            - name: conf
+              mountPath: /app/config
+          args: ["--spring.config.additional-location=file:/app/config/executor.yml"]
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            initialDelaySeconds: 8
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: conf
+          configMap:
+            name: orbit-config
+            items:
+              - key: executor.yml
+                path: executor.yml
