@@ -177,11 +177,13 @@ CREATE TABLE IF NOT EXISTS t_job_config (
     task_group        VARCHAR(64)  DEFAULT 'ORBIT' COMMENT '任务分组',
     description       VARCHAR(512) COMMENT '任务描述',
     cron_expression   VARCHAR(64) COMMENT 'Quartz Cron；空=仅手动触发',
-    dispatch_type     VARCHAR(16)  NOT NULL DEFAULT 'LOCAL' COMMENT 'LOCAL/HTTP',
-    http_service_name VARCHAR(128) COMMENT 'HTTP派发目标服务（空=全局默认）',
-    http_path         VARCHAR(256) COMMENT 'HTTP派发远端执行路径（空=全局默认）',
+    dispatch_type     VARCHAR(16)  NOT NULL DEFAULT 'LOCAL' COMMENT 'LOCAL/HTTP/REMOTE/WORKFLOW',
+    http_service_name VARCHAR(128) COMMENT 'HTTP/REMOTE派发目标服务（空=全局默认）',
+    http_path         VARCHAR(256) COMMENT 'HTTP/REMOTE远端路径（空=全局默认）',
+    http_method       VARCHAR(16)  COMMENT 'REMOTE HTTP方法（GET/POST/...）',
     timeout_seconds   INT          DEFAULT 300 COMMENT '任务超时秒数',
     params            TEXT COMMENT '任务参数 JSON',
+    workflow_def      TEXT COMMENT 'WORKFLOW编排定义JSON',
     enabled           TINYINT(1)   DEFAULT 1 COMMENT '是否启用',
     version           INT          DEFAULT 1 COMMENT '乐观锁版本',
     created_at        DATETIME(3),
@@ -230,3 +232,20 @@ INSERT INTO t_job_config
 SELECT 'futureTask', 'ORBIT', '预留任务（禁用状态示例，可随时启用）',
        '0 0 5 * * ?', 'LOCAL', 600, '{}', 0, 1, NOW(3), NOW(3)
 WHERE NOT EXISTS (SELECT 1 FROM t_job_config WHERE task_name = 'futureTask');
+
+INSERT INTO t_job_config
+    (task_name, task_group, description, cron_expression, dispatch_type,
+     http_service_name, http_path, http_method, timeout_seconds, params, enabled, version, created_at, updated_at)
+SELECT 'remoteOrderSettle', 'ORBIT', '跨服务订单结算（REMOTE 派发到 order-service）',
+       '0 0 2 * * ?', 'REMOTE', 'order-service', '/api/batch/settle', 'POST', 300,
+       '{"bizDate":"yesterday"}', 0, 1, NOW(3), NOW(3)
+WHERE NOT EXISTS (SELECT 1 FROM t_job_config WHERE task_name = 'remoteOrderSettle');
+
+INSERT INTO t_job_config
+    (task_name, task_group, description, cron_expression, dispatch_type,
+     timeout_seconds, workflow_def, enabled, version, created_at, updated_at)
+SELECT 'nightlyBatchPipeline', 'ORBIT', '夜间批量流水线（WORKFLOW 跨服务编排）',
+       '0 30 1 * * ?', 'WORKFLOW', 1800,
+       '{"mode":"SEQUENTIAL","failFast":true,"steps":[{"name":"settle","dispatchType":"REMOTE","service":"order-service","path":"/api/batch/settle","method":"POST","params":{"bizDate":"yesterday"}},{"name":"sync-stock","dispatchType":"REMOTE","service":"inventory-service","path":"/api/batch/sync","method":"POST"},{"name":"report","dispatchType":"LOCAL","taskName":"dailyOrderReport"}]}',
+       0, 1, NOW(3), NOW(3)
+WHERE NOT EXISTS (SELECT 1 FROM t_job_config WHERE task_name = 'nightlyBatchPipeline');

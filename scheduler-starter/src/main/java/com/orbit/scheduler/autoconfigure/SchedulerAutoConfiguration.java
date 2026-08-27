@@ -7,10 +7,12 @@ import com.orbit.scheduler.core.TaskRegistry;
 import com.orbit.scheduler.dialect.DialectResolver;
 import com.orbit.scheduler.dialect.SchedulerDialect;
 import com.orbit.scheduler.discovery.HeadlessDnsServiceEndpointResolver;
+import com.orbit.scheduler.discovery.RemoteServiceRegistry;
 import com.orbit.scheduler.discovery.ServiceDnsServiceEndpointResolver;
 import com.orbit.scheduler.discovery.StaticServiceEndpointResolver;
 import com.orbit.scheduler.health.OrbitSchedulerHealthIndicator;
 import com.orbit.scheduler.http.HttpDispatchClient;
+import com.orbit.scheduler.http.RemoteServiceClient;
 import com.orbit.scheduler.lock.JdbcLockProvider;
 import com.orbit.scheduler.lock.NoOpLockProvider;
 import com.orbit.scheduler.lock.RedissonLockProvider;
@@ -305,12 +307,13 @@ public class SchedulerAutoConfiguration {
                                       TaskRegistry taskRegistry,
                                       LockProvider lockProvider,
                                       ObjectProvider<HttpDispatchClient> httpDispatchClient,
+                                      ObjectProvider<RemoteServiceClient> remoteServiceClient,
                                       JobLogRepository jobLogRepository,
                                       SchedulerProperties properties,
                                       ObjectProvider<ObjectMapper> objectMapper) {
         return new JobManager(scheduler, taskRepository, taskRegistry, lockProvider,
-                httpDispatchClient.getIfAvailable(), jobLogRepository, properties,
-                objectMapper.getIfAvailable());
+                httpDispatchClient.getIfAvailable(), remoteServiceClient.getIfAvailable(),
+                jobLogRepository, properties, objectMapper.getIfAvailable());
     }
 
     /** 启动引导：注解种子落库 + Quartz 触发器对账 */
@@ -400,7 +403,7 @@ public class SchedulerAutoConfiguration {
     }
 
     // ==================================================================
-    // HTTP 调度客户端（需 spring-web）
+    // HTTP 调度客户端 + 跨服务 REMOTE 客户端（需 spring-web）
     // ==================================================================
 
     @Configuration(proxyBeanMethods = false)
@@ -412,6 +415,27 @@ public class SchedulerAutoConfiguration {
         public HttpDispatchClient orbitHttpDispatchClient(SchedulerProperties properties,
                                                           ServiceEndpointResolver endpointResolver) {
             return new HttpDispatchClient(properties, endpointResolver);
+        }
+
+        /**
+         * 远程业务服务注册表：从 orbit.scheduler.remote-services.* 加载，
+         * 供 REMOTE / WORKFLOW 跨服务批量调度使用。
+         */
+        @Bean
+        @ConditionalOnMissingBean
+        public RemoteServiceRegistry orbitRemoteServiceRegistry(SchedulerProperties properties) {
+            return new RemoteServiceRegistry(properties);
+        }
+
+        /**
+         * 跨服务调用客户端：将定时任务派发到其他微服务的业务 HTTP 接口
+         * （目标服务无需接入 orbit-scheduler）。
+         */
+        @Bean
+        @ConditionalOnMissingBean
+        public RemoteServiceClient orbitRemoteServiceClient(SchedulerProperties properties,
+                                                            RemoteServiceRegistry remoteServiceRegistry) {
+            return new RemoteServiceClient(properties, remoteServiceRegistry);
         }
     }
 
@@ -428,8 +452,10 @@ public class SchedulerAutoConfiguration {
         @ConditionalOnMissingBean
         @ConditionalOnProperty(prefix = "orbit.scheduler", name = "api-enabled", havingValue = "true", matchIfMissing = true)
         public JobController orbitJobController(JobManager jobManager, TaskRegistry taskRegistry,
-                                                ObjectProvider<HttpDispatchClient> httpDispatchClient) {
-            return new JobController(jobManager, taskRegistry, httpDispatchClient.getIfAvailable());
+                                                ObjectProvider<HttpDispatchClient> httpDispatchClient,
+                                                ObjectProvider<RemoteServiceClient> remoteServiceClient) {
+            return new JobController(jobManager, taskRegistry,
+                    httpDispatchClient.getIfAvailable(), remoteServiceClient.getIfAvailable());
         }
 
         @Bean

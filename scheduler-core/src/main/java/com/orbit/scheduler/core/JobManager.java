@@ -3,6 +3,7 @@ package com.orbit.scheduler.core;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.orbit.scheduler.annotation.DispatchType;
 import com.orbit.scheduler.http.HttpDispatchClient;
+import com.orbit.scheduler.http.RemoteServiceClient;
 import com.orbit.scheduler.lock.NoOpLockProvider;
 import com.orbit.scheduler.model.HttpDispatchResponse;
 import com.orbit.scheduler.model.JobConfig;
@@ -50,7 +51,8 @@ import java.util.concurrent.TimeUnit;
  * 调度引擎核心：
  * <ul>
  *   <li>启动同步：注解任务种子落库 → Quartz 触发器对账（新增/重排/清理）</li>
- *   <li>运行时派发：分布式锁 → 本地执行 or HTTP 远程派发（LOCAL 无执行器自动回退 HTTP）→ 执行日志</li>
+ *   <li>运行时派发：分布式锁 → LOCAL / HTTP / REMOTE / WORKFLOW → 执行日志</li>
+ *   <li>跨服务编排：REMOTE 调用外部业务 HTTP 接口；WORKFLOW 串行/并行编排多步骤</li>
  *   <li>管理操作：CRUD / 暂停 / 恢复 / 立即触发 / 同步执行，均与 Quartz 实时联动</li>
  * </ul>
  *
@@ -81,6 +83,8 @@ public class JobManager {
     private final TaskRegistry taskRegistry;
     private final LockProvider lockProvider;
     private final HttpDispatchClient httpDispatchClient;
+    private final RemoteServiceClient remoteServiceClient;
+    private final WorkflowExecutor workflowExecutor;
     private final JobLogRepository jobLogRepository;
     private final SchedulerProperties properties;
     private final ObjectMapper objectMapper;
@@ -93,22 +97,42 @@ public class JobManager {
                       LockProvider lockProvider, HttpDispatchClient httpDispatchClient,
                       JobLogRepository jobLogRepository, SchedulerProperties properties,
                       ObjectMapper objectMapper) {
+        this(scheduler, taskRepository, taskRegistry, lockProvider, httpDispatchClient,
+                null, jobLogRepository, properties, objectMapper);
+    }
+
+    public JobManager(Scheduler scheduler, TaskRepository taskRepository, TaskRegistry taskRegistry,
+                      LockProvider lockProvider, HttpDispatchClient httpDispatchClient,
+                      RemoteServiceClient remoteServiceClient,
+                      JobLogRepository jobLogRepository, SchedulerProperties properties,
+                      ObjectMapper objectMapper) {
         this.scheduler = scheduler;
         this.taskRepository = taskRepository;
         this.taskRegistry = taskRegistry;
         this.lockProvider = lockProvider == null ? new NoOpLockProvider() : lockProvider;
         this.httpDispatchClient = httpDispatchClient;
+        this.remoteServiceClient = remoteServiceClient;
         this.jobLogRepository = jobLogRepository == null
                 ? new InMemoryJobLogRepository(properties.getLog().getMemoryCapacity())
                 : jobLogRepository;
         this.properties = properties;
         this.objectMapper = objectMapper == null ? new ObjectMapper() : objectMapper;
         this.nodeId = NodeIdProvider.resolve(properties.getNodeId());
+        this.workflowExecutor = new WorkflowExecutor(taskRegistry, httpDispatchClient,
+                remoteServiceClient, this.objectMapper, this.nodeId);
         this.lockKeeper = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "orbit-lock-keeper");
             t.setDaemon(true);
             return t;
         });
+    }
+
+    public RemoteServiceClient getRemoteServiceClient() {
+        return remoteServiceClient;
+    }
+
+    public WorkflowExecutor getWorkflowExecutor() {
+        return workflowExecutor;
     }
 
     public String getNodeId() {
@@ -156,9 +180,19 @@ public class JobManager {
                     cfg.setDescription(def.getDescription());
                     cfg.setCronExpression(def.getCron());
                     cfg.setDispatchType(def.getDispatchType() == null ? DispatchType.LOCAL : def.getDispatchType());
+                    if (def.getHttpService() != null && !def.getHttpService().trim().isEmpty()) {
+                        cfg.setHttpServiceName(def.getHttpService().trim());
+                    }
+                    if (def.getHttpPath() != null && !def.getHttpPath().trim().isEmpty()) {
+                        cfg.setHttpPath(def.getHttpPath().trim());
+                    }
+                    if (def.getHttpMethod() != null && !def.getHttpMethod().trim().isEmpty()) {
+                        cfg.setHttpMethod(def.getHttpMethod().trim());
+                    }
                     cfg.setEnabled(true);
                     taskRepository.save(cfg);
-                    log.info("[orbit-scheduler] seeded annotated task '{}'", def.getName());
+                    log.info("[orbit-scheduler] seeded annotated task '{}' (dispatchType={})",
+                            def.getName(), cfg.getDispatchType());
                 } else if (def.isOverwrite()) {
                     boolean changed = false;
                     if (!equalsOrNull(existing.getCronExpression(), emptyToNull(def.getCron()))) {
@@ -167,6 +201,20 @@ public class JobManager {
                     }
                     if (!equalsOrNull(existing.getDescription(), def.getDescription())) {
                         existing.setDescription(def.getDescription());
+                        changed = true;
+                    }
+                    if (def.getDispatchType() != null && def.getDispatchType() != existing.getDispatchType()) {
+                        existing.setDispatchType(def.getDispatchType());
+                        changed = true;
+                    }
+                    if (def.getHttpService() != null && !def.getHttpService().trim().isEmpty()
+                            && !equalsOrNull(existing.getHttpServiceName(), def.getHttpService().trim())) {
+                        existing.setHttpServiceName(def.getHttpService().trim());
+                        changed = true;
+                    }
+                    if (def.getHttpPath() != null && !def.getHttpPath().trim().isEmpty()
+                            && !equalsOrNull(existing.getHttpPath(), def.getHttpPath().trim())) {
+                        existing.setHttpPath(def.getHttpPath().trim());
                         changed = true;
                     }
                     if (changed) {
@@ -264,13 +312,26 @@ public class JobManager {
         String message = null;
         try {
             logId = jobLogRepository.appendStart(JobLog.startOf(requestId, taskName, cfg.getTaskGroup(),
-                    cfg.getDispatchType().name(), nodeId));
-            if (cfg.getDispatchType() == DispatchType.HTTP) {
+                    cfg.getDispatchType() == null ? DispatchType.LOCAL.name() : cfg.getDispatchType().name(),
+                    nodeId));
+            DispatchType dtype = cfg.getDispatchType() == null ? DispatchType.LOCAL : cfg.getDispatchType();
+            if (dtype == DispatchType.HTTP) {
                 HttpDispatchResponse resp = httpDispatch(cfg, params, requestId);
                 workerNode = resp.getWorkerNode();
                 status = resp.isSuccess() ? DispatchSummary.STATUS_SUCCESS : DispatchSummary.STATUS_FAILED;
                 message = resp.getMessage();
+            } else if (dtype == DispatchType.REMOTE) {
+                HttpDispatchResponse resp = remoteDispatch(cfg, params, requestId);
+                workerNode = resp.getWorkerNode();
+                status = resp.isSuccess() ? DispatchSummary.STATUS_SUCCESS : DispatchSummary.STATUS_FAILED;
+                message = resp.getMessage();
+            } else if (dtype == DispatchType.WORKFLOW) {
+                WorkflowExecutor.WorkflowResult wr = workflowExecutor.execute(cfg, params, requestId, fireTime);
+                workerNode = nodeId;
+                status = wr.isSuccess() ? DispatchSummary.STATUS_SUCCESS : DispatchSummary.STATUS_FAILED;
+                message = wr.getMessage();
             } else {
+                // LOCAL：本节点执行器优先；无执行器时回退 HTTP（同框架节点）
                 if (taskRegistry.hasTask(taskName)) {
                     Object ret = taskRegistry.execute(taskName, buildContext(cfg, params, fireTime, requestId));
                     message = ret == null ? null : String.valueOf(ret);
@@ -314,6 +375,21 @@ public class JobManager {
                     "(spring-web missing or orbit.scheduler.http-dispatch.enabled=false)");
         }
         return httpDispatchClient.dispatch(cfg, params, requestId);
+    }
+
+    /** 跨服务 REMOTE 派发：调用外部业务微服务 HTTP 接口 */
+    private HttpDispatchResponse remoteDispatch(JobConfig cfg, Map<String, Object> params, String requestId) {
+        if (remoteServiceClient == null) {
+            throw new IllegalStateException("RemoteServiceClient is not available " +
+                    "(spring-web missing). Cannot dispatch REMOTE task '" + cfg.getTaskName() + "'");
+        }
+        if ((cfg.getHttpServiceName() == null || cfg.getHttpServiceName().trim().isEmpty())
+                && (cfg.getHttpPath() == null || !(cfg.getHttpPath().startsWith("http://")
+                || cfg.getHttpPath().startsWith("https://")))) {
+            throw new IllegalStateException("REMOTE task '" + cfg.getTaskName()
+                    + "' requires httpServiceName (registered remote service) or absolute httpPath URL");
+        }
+        return remoteServiceClient.invoke(cfg, params, requestId);
     }
 
     private TaskContext buildContext(JobConfig cfg, Map<String, Object> params, long fireTime, String requestId) {
@@ -574,6 +650,12 @@ public class JobManager {
         map.put("logStorage", jobLogRepository.type());
         map.put("quartzClustered", isQuartzClustered());
         map.put("httpDispatchEnabled", properties.getHttpDispatch().isEnabled());
+        map.put("remoteServiceEnabled", remoteServiceClient != null);
+        if (remoteServiceClient != null) {
+            map.put("remoteServiceCount", remoteServiceClient.getRegistry().listAll().size());
+        } else {
+            map.put("remoteServiceCount", 0);
+        }
         // 性能优化：count() 替代 findAll().size()，避免全表加载
         map.put("taskCount", safeCount());
         try {
@@ -624,6 +706,26 @@ public class JobManager {
         }
         if (cfg.getDispatchType() == null) {
             cfg.setDispatchType(DispatchType.LOCAL);
+        }
+        if (cfg.getDispatchType() == DispatchType.REMOTE) {
+            boolean hasService = cfg.getHttpServiceName() != null && !cfg.getHttpServiceName().trim().isEmpty();
+            boolean hasAbsUrl = cfg.getHttpPath() != null
+                    && (cfg.getHttpPath().startsWith("http://") || cfg.getHttpPath().startsWith("https://"));
+            if (!hasService && !hasAbsUrl) {
+                throw new IllegalArgumentException(
+                        "REMOTE task requires httpServiceName or absolute httpPath (http://...)");
+            }
+        }
+        if (cfg.getDispatchType() == DispatchType.WORKFLOW) {
+            boolean hasDef = cfg.getWorkflowDef() != null && !cfg.getWorkflowDef().trim().isEmpty();
+            if (!hasDef) {
+                Map<String, Object> p = cfg.getParamsView();
+                hasDef = p.containsKey("__workflow") || p.containsKey("steps");
+            }
+            if (!hasDef) {
+                throw new IllegalArgumentException(
+                        "WORKFLOW task requires workflowDef JSON (or params.__workflow / params.steps)");
+            }
         }
     }
 

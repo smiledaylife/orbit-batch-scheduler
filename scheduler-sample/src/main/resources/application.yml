@@ -36,6 +36,25 @@ orbit:
       connect-timeout: 3s
       read-timeout: 300s
       default-timeout-seconds: 300
+    # 跨服务批量调度：注册可被 REMOTE / WORKFLOW 编排的外部业务服务
+    # 生产环境将 service-name 改为 K8s Service DNS；本地联调可用 base-url / static-endpoints
+    remote-services:
+      order-service:
+        service-name: order-service
+        port: 8080
+        path-prefix: ""
+        default-method: POST
+        # base-url: http://order-service:8080   # 可选，优先于 DNS
+        # static-endpoints:                     # 本地联调
+        #   - http://127.0.0.1:8081
+      inventory-service:
+        service-name: inventory-service
+        port: 8080
+        default-method: POST
+      report-service:
+        service-name: report-service
+        port: 8080
+        default-method: POST
     log:
       storage: auto             # auto | database | memory
       memory-capacity: 1000

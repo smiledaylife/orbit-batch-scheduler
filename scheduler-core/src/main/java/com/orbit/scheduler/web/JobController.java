@@ -3,12 +3,14 @@ package com.orbit.scheduler.web;
 import com.orbit.scheduler.core.DispatchSummary;
 import com.orbit.scheduler.core.JobManager;
 import com.orbit.scheduler.core.TaskRegistry;
+import com.orbit.scheduler.http.HttpDispatchClient;
+import com.orbit.scheduler.http.RemoteServiceClient;
 import com.orbit.scheduler.model.ApiResult;
 import com.orbit.scheduler.model.JobConfig;
 import com.orbit.scheduler.model.JobLog;
 import com.orbit.scheduler.model.PageResult;
+import com.orbit.scheduler.model.RemoteServiceDefinition;
 import com.orbit.scheduler.model.ServiceEndpoint;
-import com.orbit.scheduler.http.HttpDispatchClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -32,11 +34,11 @@ import java.util.Map;
  *
  * <p>生产环境建议通过 K8s NetworkPolicy / Ingress 鉴权限制访问。
  *
- * <p><b>性能优化</b>：
+ * <p>跨服务批量调度相关接口：
  * <ul>
- *   <li>{@code detail} 接口直接调用 {@code findByName} 替代 page(name,1,1)+filter 二次过滤，
- *       避免无意义的 LIMIT 1 + 流式过滤</li>
- *   <li>{@code guessSelfIp} 缓存到字段，避免每请求一次 InetAddress.getLocalHost 调用</li>
+ *   <li>{@code GET /remote-services} —— 已注册的外部业务服务</li>
+ *   <li>{@code POST /remote-services} —— 运行时注册远程服务</li>
+ *   <li>创建任务时 {@code dispatchType=REMOTE|WORKFLOW} 即可编排外部服务</li>
  * </ul>
  *
  * @author orbit
@@ -50,13 +52,22 @@ public class JobController {
     private final JobManager jobManager;
     private final TaskRegistry taskRegistry;
     private final HttpDispatchClient httpDispatchClient;
+    private final RemoteServiceClient remoteServiceClient;
     /** 自身 IP 缓存（节点级不变，启动时解析一次） */
     private final String cachedSelfIp;
 
-    public JobController(JobManager jobManager, TaskRegistry taskRegistry, HttpDispatchClient httpDispatchClient) {
+    public JobController(JobManager jobManager, TaskRegistry taskRegistry,
+                         HttpDispatchClient httpDispatchClient) {
+        this(jobManager, taskRegistry, httpDispatchClient, null);
+    }
+
+    public JobController(JobManager jobManager, TaskRegistry taskRegistry,
+                         HttpDispatchClient httpDispatchClient,
+                         RemoteServiceClient remoteServiceClient) {
         this.jobManager = jobManager;
         this.taskRegistry = taskRegistry;
         this.httpDispatchClient = httpDispatchClient;
+        this.remoteServiceClient = remoteServiceClient;
         this.cachedSelfIp = resolveSelfIpOnce();
     }
 
@@ -71,7 +82,6 @@ public class JobController {
 
     @GetMapping("/jobs/{name}")
     public ApiResult<Map<String, Object>> detail(@PathVariable("name") String name) {
-        // 性能优化：直接 findByName 替代 page(name,1,1) 的模糊匹配 + 二次过滤
         JobConfig cfg = jobManager.findOneJob(name).orElse(null);
         if (cfg == null) {
             return ApiResult.notFound("task '" + name + "' not found");
@@ -128,6 +138,67 @@ public class JobController {
         return ApiResult.ok(jobManager.executeSync(name, params));
     }
 
+    // ---------------- 远程服务注册（跨服务批量调度） ----------------
+
+    @GetMapping("/remote-services")
+    public ApiResult<Map<String, Object>> remoteServices() {
+        if (remoteServiceClient == null) {
+            return ApiResult.ok(emptyRemoteOverview());
+        }
+        return ApiResult.ok(remoteServiceClient.overview());
+    }
+
+    @GetMapping("/remote-services/{name}")
+    public ApiResult<Map<String, Object>> remoteServiceDetail(@PathVariable("name") String name) {
+        if (remoteServiceClient == null) {
+            return ApiResult.notFound("RemoteServiceClient not available");
+        }
+        RemoteServiceDefinition def = remoteServiceClient.getRegistry().get(name);
+        if (def == null) {
+            return ApiResult.notFound("remote service '" + name + "' not registered");
+        }
+        Map<String, Object> data = new LinkedHashMap<String, Object>();
+        data.put("definition", def);
+        data.put("endpoints", remoteServiceClient.getRegistry()
+                .resolveEndpoints(name, def.getPort() > 0 ? def.getPort() : 8080));
+        return ApiResult.ok(data);
+    }
+
+    /**
+     * 运行时注册/更新远程业务服务。
+     * <pre>
+     * POST /api/scheduler/remote-services
+     * {
+     *   "name": "order-service",
+     *   "serviceName": "order-service",
+     *   "port": 8080,
+     *   "pathPrefix": "/api",
+     *   "baseUrl": "",
+     *   "defaultMethod": "POST"
+     * }
+     * </pre>
+     */
+    @PostMapping("/remote-services")
+    public ApiResult<RemoteServiceDefinition> registerRemoteService(@RequestBody RemoteServiceDefinition def) {
+        if (remoteServiceClient == null) {
+            return ApiResult.serverError("RemoteServiceClient not available (spring-web missing?)");
+        }
+        if (def.getName() == null || def.getName().trim().isEmpty()) {
+            throw new IllegalArgumentException("remote service name is required");
+        }
+        remoteServiceClient.getRegistry().register(def);
+        return ApiResult.ok(remoteServiceClient.getRegistry().get(def.getName()));
+    }
+
+    @DeleteMapping("/remote-services/{name}")
+    public ApiResult<Void> unregisterRemoteService(@PathVariable("name") String name) {
+        if (remoteServiceClient == null) {
+            return ApiResult.serverError("RemoteServiceClient not available");
+        }
+        remoteServiceClient.getRegistry().unregister(name);
+        return ApiResult.ok();
+    }
+
     // ---------------- 日志 / 集群 ----------------
 
     @GetMapping("/logs")
@@ -179,6 +250,13 @@ public class JobController {
 
     private int normalize(int v) {
         return v <= 0 ? 10 : Math.min(v, 200);
+    }
+
+    private static Map<String, Object> emptyRemoteOverview() {
+        Map<String, Object> m = new LinkedHashMap<String, Object>();
+        m.put("count", 0);
+        m.put("services", new ArrayList<Object>());
+        return m;
     }
 
     /** 启动期一次性解析本机 IP，避免每请求一次 InetAddress.getLocalHost */

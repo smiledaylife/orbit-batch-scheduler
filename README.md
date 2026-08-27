@@ -14,12 +14,15 @@
 | **数据库存储** | 任务元数据存于 `t_job_config`，集群共享、动态增删改、乐观锁并发控制 |
 | **本地存储** | `storage.type=memory` 内存注册表，零外部依赖，适合单机轻量场景 |
 | **本地调度** | Quartz 触发 → 进程内反射执行（本节点无执行器时自动降级 HTTP 派发） |
-| **HTTP 调度** | 经 K8s **Headless Service DNS** 解析全部 Pod 端点，轮询路由 + 故障转移 |
+| **HTTP 调度** | 经 K8s Service DNS 派发到**同框架**节点执行（目标需接入 orbit-scheduler） |
+| **REMOTE 跨服务调度** | 定时调用**其他微服务**的业务 HTTP 接口（目标服务无需接入本框架） |
+| **WORKFLOW 编排** | 串行/并行编排多个 LOCAL / HTTP / REMOTE 步骤，实现跨服务批量流水线 |
+| **远程服务注册表** | `orbit.scheduler.remote-services.*` 配置 + 运行时 API 注册外部业务服务 |
 | **分布式锁** | 可插拔 SPI：**Redisson**（watchdog 续期）/ **数据库行锁**（过期抢占）/ 无锁 |
 | **集群防重** | Quartz JDBC 集群（触发层防重）+ 分布式锁（任务层防重）双层保障 |
 | **执行日志** | `t_job_log` 记录每次执行的调度节点、执行节点、状态、耗时，支持分页检索 |
 | **多数据库兼容** | **PostgreSQL / GaussDB / MySQL** 同一构建产物直接运行：方言自动探测 + Quartz delegate 自动注入 + 主键策略分流 + 空串语义归一化 |
-| **管理 API** | 任务 CRUD / 暂停恢复 / 立即触发 / 同步执行 / 日志查询 / 集群总览 |
+| **管理 API** | 任务 CRUD / 暂停恢复 / 立即触发 / 同步执行 / 远程服务注册 / 日志查询 / 集群总览 |
 | **云原生** | ConfigMap 外置配置、POD_NAME 节点标识、就绪/存活探针、优雅停机 |
 | **健康检查** | Actuator `orbitScheduler` 指标：存储/锁类型、集群状态、端点数 |
 
@@ -64,7 +67,11 @@
 1. **触发层**：Quartz JDBC 集群模式（`isClustered=true`）保证同一触发时刻只有一个 Pod 的 Quartz 线程触发任务（数据库行锁 + 检入机制）。
 2. **任务层**：`LockProvider` 分布式锁保证同一任务同一时刻全局只有一个执行体（覆盖 Quartz 内存模式、手动触发、API 同步执行等场景）。
 
-**HTTP 派发路由**：默认通过普通 Kubernetes Service DNS（如 `orbit-scheduler`）访问服务 → Kubernetes Service/EndpointSlice 负责 Pod 负载均衡与故障摘除 → `POST /api/scheduler/execute` → 目标 Pod 本地执行 → 返回结果。框架仍支持显式 `headless-dns` 模式，在该模式下由客户端获取 Pod IP 并执行轮询/故障转移。
+**HTTP 派发路由**（同框架节点）：默认通过普通 Kubernetes Service DNS 访问服务 → Kubernetes Service/EndpointSlice 负责 Pod 负载均衡 → `POST /api/scheduler/execute` → 目标 Pod 本地执行。
+
+**REMOTE 跨服务路由**（外部业务服务）：调度中心按 `remote-services` 注册表解析目标 → `POST/GET {path}` 调用业务接口（JSON body = 任务 params）→ 按 HTTP 状态码判定成功。目标服务**无需**接入 orbit-scheduler，只需暴露普通 REST 接口。
+
+**WORKFLOW 编排**：一次定时触发按定义串行或并行执行多个步骤（可混用 LOCAL / HTTP / REMOTE），支持 `failFast`、`dependsOn`、`continueOnFailure`。
 
 ## 3. 模块结构
 
@@ -73,13 +80,13 @@ orbit-batch-scheduler
 ├── scheduler-core          # 核心框架（无强依赖侵入，可选依赖全部条件化装配）
 │   └── com.orbit.scheduler
 │       ├── annotation      # @BatchTask / DispatchType
-│       ├── core            # TaskRegistry(扫描) / JobManager(派发引擎) / TaskContext
+│       ├── core            # TaskRegistry / JobManager / WorkflowExecutor(编排) / TaskContext
 │       ├── quartz          # QuartzJobDispatcher(统一入口 Job) / GaussDBDelegate
 │       ├── dialect         # SchedulerDialect / DialectResolver(三级自动探测)
 │       ├── lock            # RedissonLockProvider / JdbcLockProvider / NoOpLockProvider
 │       ├── storage         # Jdbc*/InMemory* 任务存储与执行日志
-│       ├── discovery       # ServiceDns / HeadlessDns / Static 端点解析
-│       ├── http            # HttpDispatchClient(轮询+故障转移)
+│       ├── discovery       # ServiceDns / HeadlessDns / Static / RemoteServiceRegistry
+│       ├── http            # HttpDispatchClient + RemoteServiceClient(跨服务调用)
 │       ├── web             # JobController(管理API) / HttpDispatchController(远端执行)
 │       ├── health          # Actuator 健康指标
 │       ├── spi             # LockProvider / TaskRepository / JobLogRepository / ServiceEndpointResolver
@@ -172,12 +179,23 @@ public class OrderTasks {
         return "报表生成完成: " + bizDate;   // 返回值记入执行日志
     }
 
-    /** HTTP 调度：经 Headless Service 派发到任意 Pod 执行 */
+    /** HTTP 调度：经 Service 派发到同框架任意 Pod 执行 */
     @BatchTask(name = "remoteDataSync", cron = "0 */5 * * * ?",
                dispatchType = DispatchType.HTTP)
     public String remoteDataSync(Map<String, Object> params) {
         return "同步完成";
     }
+
+    /**
+     * REMOTE 跨服务：定时调用其他微服务的业务接口。
+     * 目标服务无需接入本框架；本地方法体不会被执行。
+     */
+    @BatchTask(name = "remoteOrderSettle", cron = "0 0 2 * * ?",
+               dispatchType = DispatchType.REMOTE,
+               httpService = "order-service",
+               httpPath = "/api/batch/settle",
+               httpMethod = "POST")
+    public void remoteOrderSettle() { /* REMOTE：业务在 order-service 执行 */ }
 
     /** 手动任务：无 cron，仅通过 REST API 触发 */
     @BatchTask(name = "manualArchive", cron = "")
@@ -187,7 +205,115 @@ public class OrderTasks {
 
 方法签名支持：无参 / `TaskContext` / `Map<String,Object>` 任意组合；参数由触发时传入与任务配置 `params` 合并而成。
 
-### 4.4 管理接口（默认 `/api/scheduler`）
+### 4.5 跨服务批量调度（REMOTE / WORKFLOW）
+
+**场景**：调度中心统一编排，业务逻辑分散在 order / inventory / report 等微服务上。
+
+#### 1）注册外部业务服务
+
+```yaml
+orbit:
+  scheduler:
+    remote-services:
+      order-service:
+        service-name: order-service   # K8s Service DNS
+        port: 8080
+        default-method: POST
+        # base-url: http://order-service:8080   # 也可直接写 Base URL
+        # static-endpoints:                      # 本地联调
+        #   - http://127.0.0.1:8081
+      inventory-service:
+        service-name: inventory-service
+        port: 8080
+```
+
+或运行时注册：
+
+```bash
+curl -X POST http://localhost:8080/api/scheduler/remote-services \
+  -H "Content-Type: application/json" \
+  -d '{"name":"order-service","serviceName":"order-service","port":8080,"defaultMethod":"POST"}'
+```
+
+#### 2）创建 REMOTE 任务（定时调外部接口）
+
+```bash
+curl -X POST http://localhost:8080/api/scheduler/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskName": "nightlyOrderSettle",
+    "cronExpression": "0 0 2 * * ?",
+    "dispatchType": "REMOTE",
+    "httpServiceName": "order-service",
+    "httpPath": "/api/batch/settle",
+    "httpMethod": "POST",
+    "params": {"bizDate": "yesterday"},
+    "timeoutSeconds": 300,
+    "enabled": true
+  }'
+```
+
+目标服务只需实现普通 REST：
+
+```java
+@PostMapping("/api/batch/settle")
+public Map<String, Object> settle(@RequestBody Map<String, Object> body) {
+    // body 含业务 params + _requestId / _dispatchNode
+    return Collections.singletonMap("status", "OK");
+}
+```
+
+#### 3）创建 WORKFLOW 编排（跨服务流水线）
+
+```bash
+curl -X POST http://localhost:8080/api/scheduler/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskName": "nightlyBatchPipeline",
+    "cronExpression": "0 30 1 * * ?",
+    "dispatchType": "WORKFLOW",
+    "timeoutSeconds": 1800,
+    "workflowDef": {
+      "mode": "SEQUENTIAL",
+      "failFast": true,
+      "steps": [
+        {
+          "name": "settle",
+          "dispatchType": "REMOTE",
+          "service": "order-service",
+          "path": "/api/batch/settle",
+          "method": "POST",
+          "params": {"bizDate": "yesterday"}
+        },
+        {
+          "name": "sync-stock",
+          "dispatchType": "REMOTE",
+          "service": "inventory-service",
+          "path": "/api/batch/sync"
+        },
+        {
+          "name": "report",
+          "dispatchType": "LOCAL",
+          "taskName": "dailyOrderReport"
+        }
+      ]
+    },
+    "enabled": true
+  }'
+```
+
+| 编排字段 | 说明 |
+|----------|------|
+| `mode` | `SEQUENTIAL` 串行（默认）/ `PARALLEL` 并行（支持 `dependsOn`） |
+| `failFast` | 任一步失败是否中止后续（默认 true） |
+| `steps[].dispatchType` | `LOCAL` / `HTTP` / `REMOTE` |
+| `steps[].service` | REMOTE 目标服务注册名 |
+| `steps[].path` | 接口路径（或完整 URL） |
+| `steps[].taskName` | LOCAL/HTTP 同框架任务名 |
+| `steps[].continueOnFailure` | 本步失败仍继续 |
+| `steps[].dependsOn` | 并行模式下的前置步骤名列表 |
+
+### 4.6 管理接口（默认 `/api/scheduler`）
 
 ```bash
 # 集群总览
@@ -220,9 +346,12 @@ curl "http://localhost:8080/api/scheduler/logs?taskName=dailyOrderReport&page=1&
 
 # 任务详情（含 Quartz 触发器状态 / 下次触发时间 / 本节点执行器有无）
 curl http://localhost:8080/api/scheduler/jobs/dailyOrderReport
+
+# 已注册的远程业务服务（跨服务调度目标）
+curl http://localhost:8080/api/scheduler/remote-services
 ```
 
-### 4.5 接入自己的业务应用
+### 4.7 接入自己的业务应用
 
 ```xml
 <dependency>
@@ -314,17 +443,27 @@ curl "http://localhost:8080/api/scheduler/logs?taskName=remoteDataSync" | python
 | `http-dispatch.read-timeout` | `300s` | 读超时（兜底，任务级 `timeoutSeconds` 优先） |
 | `http-dispatch.secret` | 空 | 派发令牌（`X-Scheduler-Token` 校验） |
 | `http-dispatch.static-endpoints` | `[]` | `discovery-mode=static` 时使用的静态端点 |
-
-> **远程派发路由语义**：推荐使用普通 Kubernetes `ClusterIP Service`。`service-dns` 模式只访问 Service 地址，Pod 级负载均衡和故障摘除交给 Kubernetes `Service/EndpointSlice`；Scheduler 不再做应用层 Pod 轮询。只有 `headless-dns` / `static` 模式才由 Scheduler 在多个实例端点之间选择。对于多实例端点，只有“任务不存在”或明确的网络连接失败才切换下一端点，普通业务执行失败不会自动重试，以避免重复执行。
+| `remote-services.<name>.service-name` | — | 外部业务服务 DNS 名（K8s Service） |
+| `remote-services.<name>.base-url` | — | 固定 Base URL（优先于 DNS） |
+| `remote-services.<name>.port` | `8080` | 服务端口 |
+| `remote-services.<name>.path-prefix` | — | 路径前缀，拼到任务 httpPath 前 |
+| `remote-services.<name>.default-method` | `POST` | 默认 HTTP 方法 |
+| `remote-services.<name>.static-endpoints` | `[]` | 静态端点列表（本地联调） |
+| `remote-services.<name>.secret` | — | 调用令牌（写入 secret-header） |
+| `remote-services.<name>.secret-header` | `X-Scheduler-Token` | 令牌头名称 |
 | `log.storage` | `auto` | `database` / `memory` / `auto` |
 | `log.memory-capacity` | `1000` | 内存日志环形队列容量 |
+
+> **同框架 HTTP 派发**：推荐普通 Kubernetes `ClusterIP Service`。`service-dns` 由 K8s 负责负载均衡；`headless-dns` / `static` 由客户端选择端点。只有“任务不存在”或网络连接失败才切换下一端点。
+>
+> **跨服务 REMOTE 派发**：目标为外部业务接口，按 HTTP 2xx 判定成功；多端点时仅连接失败才故障转移，业务 4xx/5xx 不重试（at-least-once，下游需幂等）。
 
 ## 7. 数据库表
 
 | 表 | 用途 |
 |----|------|
 | `QRTZ_*`（11 张） | Quartz 官方集群表（触发层防重、misfire 恢复） |
-| `t_job_config` | 任务配置（cron/调度方式/参数/启停/乐观锁版本） |
+| `t_job_config` | 任务配置（cron / LOCAL\|HTTP\|REMOTE\|WORKFLOW / http_method / workflow_def / 参数 / 启停 / 乐观锁） |
 | `t_job_log` | 执行日志（请求ID/调度节点/执行节点/状态/耗时/消息） |
 | `t_cluster_lock` | 数据库分布式锁（毫秒时间戳租约，规避时钟不一致） |
 
@@ -338,6 +477,7 @@ curl "http://localhost:8080/api/scheduler/logs?taskName=remoteDataSync" | python
 | `TaskRepository` | Jdbc / InMemory | 配置中心（Nacos/Apollo）存储任务元数据 |
 | `JobLogRepository` | Jdbc / InMemory | ES / Kafka 审计投递 |
 | `ServiceEndpointResolver` | ServiceDns / HeadlessDns / Static | 对接其他注册中心、Service Mesh 或自定义服务发现 |
+| `RemoteServiceRegistry` | 配置 + 运行时注册 | 对接 Nacos/Eureka 服务发现填充端点 |
 
 ## 9. 设计说明
 
@@ -370,3 +510,6 @@ curl "http://localhost:8080/api/scheduler/logs?taskName=remoteDataSync" | python
 
 **Q: 在 GaussDB 上遇到驱动兼容问题怎么办？**
 按服务端版本选择驱动：openGauss 5.x 对应 `org.opengauss:opengauss-jdbc:5.1.0-og`（父 POM 属性可改 6.x），华为云 GaussDB 也可替换官方 `gaussdbjdbc`（`com.huawei.gaussdb.jdbc.Driver`，URL 前缀 `jdbc:gaussdb://`）。若个别 GaussDB 版本对 boolean 绑定/锁语法有差异，继承覆写 `GaussDBDelegate` 对应方法即可，无需改动框架其他代码。
+
+**Q: 如何定时调度其他微服务上的业务函数？**
+使用 `dispatchType=REMOTE`：在 `orbit.scheduler.remote-services` 注册目标服务，任务配置 `httpServiceName` + `httpPath`（+ 可选 `httpMethod`）。目标服务**不必**接入本框架，只需暴露普通 HTTP 接口；请求体为任务 `params`（额外注入 `_requestId` / `_dispatchNode`）。多服务流水线用 `dispatchType=WORKFLOW` + `workflowDef` 串行/并行编排。已有库升级请执行 `deploy/sql/migration-v1.1-cross-service.sql` 增加 `http_method` / `workflow_def` 列。

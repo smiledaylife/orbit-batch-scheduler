@@ -43,7 +43,8 @@ public class JdbcTaskRepository implements TaskRepository {
     private static final Logger log = LoggerFactory.getLogger(JdbcTaskRepository.class);
 
     private static final String COLS = "id, task_name, task_group, description, cron_expression, " +
-            "dispatch_type, http_service_name, http_path, timeout_seconds, params, enabled, version, created_at, updated_at";
+            "dispatch_type, http_service_name, http_path, http_method, timeout_seconds, params, workflow_def, " +
+            "enabled, version, created_at, updated_at";
 
     /** GaussDB 主键序列名（与 deploy/sql/schema-gaussdb.sql 保持一致） */
     static final String ID_SEQUENCE = "seq_job_config_id";
@@ -62,9 +63,11 @@ public class JdbcTaskRepository implements TaskRepository {
         c.setDispatchType(dt == null || dt.isEmpty() ? DispatchType.LOCAL : DispatchType.valueOf(dt));
         c.setHttpServiceName(rs.getString("http_service_name"));
         c.setHttpPath(rs.getString("http_path"));
+        c.setHttpMethod(rs.getString("http_method"));
         int timeout = rs.getInt("timeout_seconds");
         c.setTimeoutSeconds(rs.wasNull() ? 300 : timeout);
         c.setParamsJson(rs.getString("params"));
+        c.setWorkflowDef(rs.getString("workflow_def"));
         c.setEnabled(rs.getBoolean("enabled"));
         c.setVersion(rs.getInt("version"));
         Timestamps.fill(c, rs);
@@ -115,14 +118,15 @@ public class JdbcTaskRepository implements TaskRepository {
         int expectedVersion = existing.getVersion();
         int rows = jdbcTemplate.update(
                 "UPDATE t_job_config SET task_group = ?, description = ?, cron_expression = ?, " +
-                        "dispatch_type = ?, http_service_name = ?, http_path = ?, timeout_seconds = ?, " +
-                        "params = ?, enabled = ?, version = version + 1, updated_at = ? " +
+                        "dispatch_type = ?, http_service_name = ?, http_path = ?, http_method = ?, timeout_seconds = ?, " +
+                        "params = ?, workflow_def = ?, enabled = ?, version = version + 1, updated_at = ? " +
                         "WHERE task_name = ? AND version = ?",
                 nz(config.getTaskGroup()), nz(config.getDescription()), nz(config.getCronExpression()),
                 config.getDispatchType() == null ? DispatchType.LOCAL.name() : config.getDispatchType().name(),
-                nz(config.getHttpServiceName()), nz(config.getHttpPath()),
+                nz(config.getHttpServiceName()), nz(config.getHttpPath()), nz(config.getHttpMethod()),
                 config.getTimeoutSeconds() == null ? 300 : config.getTimeoutSeconds(),
-                nz(config.getParamsJson()), config.isEnabled(), new java.sql.Timestamp(System.currentTimeMillis()),
+                nz(config.getParamsJson()), nz(config.getWorkflowDef()), config.isEnabled(),
+                new java.sql.Timestamp(System.currentTimeMillis()),
                 taskName, expectedVersion);
         if (rows == 0) {
             throw new IllegalStateException("Task '" + config.getTaskName()
@@ -178,14 +182,15 @@ public class JdbcTaskRepository implements TaskRepository {
         java.sql.Timestamp now = new java.sql.Timestamp(System.currentTimeMillis());
         jdbcTemplate.update(
                 "INSERT INTO t_job_config (id, task_name, task_group, description, cron_expression, " +
-                        "dispatch_type, http_service_name, http_path, timeout_seconds, params, enabled, version, created_at, updated_at) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                        "dispatch_type, http_service_name, http_path, http_method, timeout_seconds, params, workflow_def, " +
+                        "enabled, version, created_at, updated_at) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
                 id, config.getTaskName(), nz(config.getTaskGroup()), nz(config.getDescription()),
                 nz(config.getCronExpression()),
                 config.getDispatchType() == null ? DispatchType.LOCAL.name() : config.getDispatchType().name(),
-                nz(config.getHttpServiceName()), nz(config.getHttpPath()),
+                nz(config.getHttpServiceName()), nz(config.getHttpPath()), nz(config.getHttpMethod()),
                 config.getTimeoutSeconds() == null ? 300 : config.getTimeoutSeconds(),
-                nz(config.getParamsJson()), config.isEnabled(), now, now);
+                nz(config.getParamsJson()), nz(config.getWorkflowDef()), config.isEnabled(), now, now);
         config.setId(id);
         config.setVersion(1);
         config.setCreatedAt(new Date(now.getTime()));
@@ -204,8 +209,9 @@ public class JdbcTaskRepository implements TaskRepository {
             // 不指定列名会导致 GeneratedKeyHolder.getKey() 多键异常
             PreparedStatement ps = con.prepareStatement(
                     "INSERT INTO t_job_config (task_name, task_group, description, cron_expression, " +
-                            "dispatch_type, http_service_name, http_path, timeout_seconds, params, enabled, version, created_at, updated_at) " +
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                            "dispatch_type, http_service_name, http_path, http_method, timeout_seconds, params, workflow_def, " +
+                            "enabled, version, created_at, updated_at) " +
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
                     new String[]{"id"});
             ps.setString(1, config.getTaskName());
             ps.setString(2, nz(config.getTaskGroup()));
@@ -214,11 +220,13 @@ public class JdbcTaskRepository implements TaskRepository {
             ps.setString(5, config.getDispatchType() == null ? DispatchType.LOCAL.name() : config.getDispatchType().name());
             ps.setString(6, nz(config.getHttpServiceName()));
             ps.setString(7, nz(config.getHttpPath()));
-            ps.setInt(8, config.getTimeoutSeconds() == null ? 300 : config.getTimeoutSeconds());
-            ps.setString(9, nz(config.getParamsJson()));
-            ps.setBoolean(10, config.isEnabled());
-            ps.setTimestamp(11, now);
-            ps.setTimestamp(12, now);
+            ps.setString(8, nz(config.getHttpMethod()));
+            ps.setInt(9, config.getTimeoutSeconds() == null ? 300 : config.getTimeoutSeconds());
+            ps.setString(10, nz(config.getParamsJson()));
+            ps.setString(11, nz(config.getWorkflowDef()));
+            ps.setBoolean(12, config.isEnabled());
+            ps.setTimestamp(13, now);
+            ps.setTimestamp(14, now);
             return ps;
         }, keyHolder);
         Number key = keyHolder.getKey();

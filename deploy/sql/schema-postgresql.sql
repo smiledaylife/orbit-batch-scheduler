@@ -180,8 +180,10 @@ CREATE TABLE IF NOT EXISTS t_job_config (
     dispatch_type     VARCHAR(16) NOT NULL DEFAULT 'LOCAL',
     http_service_name VARCHAR(128),
     http_path         VARCHAR(256),
+    http_method       VARCHAR(16),
     timeout_seconds   INT DEFAULT 300,
     params            TEXT,
+    workflow_def      TEXT,
     enabled           BOOLEAN NOT NULL DEFAULT TRUE,
     version           INT DEFAULT 1,
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -228,3 +230,22 @@ INSERT INTO t_job_config
 SELECT 'futureTask', 'ORBIT', '预留任务（禁用状态示例，可随时启用）',
        '0 0 5 * * ?', 'LOCAL', 600, '{}', FALSE, 1
 WHERE NOT EXISTS (SELECT 1 FROM t_job_config WHERE task_name = 'futureTask');
+
+-- 跨服务 REMOTE 演示：调度中心定时调用 order-service 的结算接口（需注册 remote-services）
+INSERT INTO t_job_config
+    (task_name, task_group, description, cron_expression, dispatch_type,
+     http_service_name, http_path, http_method, timeout_seconds, params, enabled, version)
+SELECT 'remoteOrderSettle', 'ORBIT', '跨服务订单结算（REMOTE 派发到 order-service）',
+       '0 0 2 * * ?', 'REMOTE', 'order-service', '/api/batch/settle', 'POST', 300,
+       '{"bizDate":"yesterday"}', FALSE, 1
+WHERE NOT EXISTS (SELECT 1 FROM t_job_config WHERE task_name = 'remoteOrderSettle');
+
+-- 跨服务 WORKFLOW 演示：串行编排多个外部服务
+INSERT INTO t_job_config
+    (task_name, task_group, description, cron_expression, dispatch_type,
+     timeout_seconds, workflow_def, enabled, version)
+SELECT 'nightlyBatchPipeline', 'ORBIT', '夜间批量流水线（WORKFLOW 跨服务编排）',
+       '0 30 1 * * ?', 'WORKFLOW', 1800,
+       '{"mode":"SEQUENTIAL","failFast":true,"steps":[{"name":"settle","dispatchType":"REMOTE","service":"order-service","path":"/api/batch/settle","method":"POST","params":{"bizDate":"yesterday"}},{"name":"sync-stock","dispatchType":"REMOTE","service":"inventory-service","path":"/api/batch/sync","method":"POST"},{"name":"report","dispatchType":"LOCAL","taskName":"dailyOrderReport"}]}',
+       FALSE, 1
+WHERE NOT EXISTS (SELECT 1 FROM t_job_config WHERE task_name = 'nightlyBatchPipeline');

@@ -54,8 +54,10 @@ class PostgreSQLDialectCompatibilityTest {
                     "dispatch_type VARCHAR(16) NOT NULL DEFAULT 'LOCAL', " +
                     "http_service_name VARCHAR(128), " +
                     "http_path VARCHAR(256), " +
+                    "http_method VARCHAR(16), " +
                     "timeout_seconds INT DEFAULT 300, " +
                     "params TEXT, " +
+                    "workflow_def TEXT, " +
                     "enabled BOOLEAN NOT NULL DEFAULT TRUE, " +
                     "version INT DEFAULT 1, " +
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
@@ -275,8 +277,10 @@ class PostgreSQLDialectCompatibilityTest {
                 "dispatch_type VARCHAR(16) NOT NULL DEFAULT 'LOCAL', " +
                 "http_service_name VARCHAR(128), " +
                 "http_path VARCHAR(256), " +
+                "http_method VARCHAR(16), " +
                 "timeout_seconds INT DEFAULT 300, " +
                 "params TEXT, " +
+                "workflow_def TEXT, " +
                 "enabled BOOLEAN NOT NULL DEFAULT TRUE, " +
                 "version INT DEFAULT 1, " +
                 "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +

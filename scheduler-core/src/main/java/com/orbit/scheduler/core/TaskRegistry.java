@@ -169,6 +169,7 @@ public class TaskRegistry implements SmartInitializingSingleton, ApplicationCont
             BatchTask anno = method.getAnnotation(BatchTask.class);
             this.definition = new TaskDefinition(
                     anno.name(), anno.description(), anno.cron(), anno.dispatchType(),
+                    anno.httpService(), anno.httpPath(), anno.httpMethod(),
                     anno.overwrite(), bean.getClass().getSimpleName(), method.getName());
         }
 

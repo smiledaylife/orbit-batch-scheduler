@@ -1,10 +1,13 @@
 package com.orbit.scheduler.support;
 
+import com.orbit.scheduler.model.RemoteServiceDefinition;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 调度框架配置项（前缀 orbit.scheduler）。
@@ -36,6 +39,14 @@ import java.util.List;
  *       read-timeout: 300s
  *       secret: ""
  *       static-endpoints: []
+ *     remote-services:              # 跨服务批量调度：外部业务服务注册表
+ *       order-service:
+ *         service-name: order-service
+ *         port: 8080
+ *         path-prefix: /api
+ *         default-method: POST
+ *       inventory-service:
+ *         base-url: http://inventory-service:8080
  *     log:
  *       storage: auto       # auto | database | memory
  *       memory-capacity: 1000
@@ -69,6 +80,13 @@ public class SchedulerProperties {
     private final Lock lock = new Lock();
     private final HttpDispatch httpDispatch = new HttpDispatch();
     private final Log log = new Log();
+
+    /**
+     * 远程业务服务注册表（key = 服务逻辑名，对应 JobConfig.httpServiceName）。
+     * 用于 dispatchType=REMOTE / WORKFLOW 步骤，将定时任务编排到其他微服务执行。
+     */
+    private Map<String, RemoteServiceDefinition> remoteServices =
+            new LinkedHashMap<String, RemoteServiceDefinition>();
 
     public static class Database {
         /**
@@ -250,4 +268,12 @@ public class SchedulerProperties {
     public HttpDispatch getHttpDispatch() { return httpDispatch; }
 
     public Log getLog() { return log; }
+
+    public Map<String, RemoteServiceDefinition> getRemoteServices() { return remoteServices; }
+
+    public void setRemoteServices(Map<String, RemoteServiceDefinition> remoteServices) {
+        this.remoteServices = remoteServices == null
+                ? new LinkedHashMap<String, RemoteServiceDefinition>()
+                : remoteServices;
+    }
 }

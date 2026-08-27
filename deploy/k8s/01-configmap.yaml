@@ -74,6 +74,20 @@ data:
           default-timeout-seconds: 300
           # 生产环境建议开启派发令牌
           # secret: ${DISPATCH_SECRET:}
+        # 跨服务批量调度：注册可被 REMOTE / WORKFLOW 编排的外部业务服务
+        remote-services:
+          order-service:
+            service-name: order-service
+            port: 8080
+            default-method: POST
+          inventory-service:
+            service-name: inventory-service
+            port: 8080
+            default-method: POST
+          report-service:
+            service-name: report-service
+            port: 8080
+            default-method: POST
         log:
           storage: database
 
