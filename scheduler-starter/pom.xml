@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.orbit</groupId>
+        <artifactId>orbit-batch-scheduler</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
+    <artifactId>scheduler-starter</artifactId>
+    <name>Orbit Scheduler :: Starter</name>
+    <description>Spring Boot Starter：一行依赖接入，自动装配调度框架全部组件</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.orbit</groupId>
+            <artifactId>scheduler-core</artifactId>
+        </dependency>
+
+        <!-- 数据库存储 / JDBC 锁 / JdbcTemplate 桥接（框架主链路依赖） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- Actuator 健康检查（可选：不传递给使用方） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Redisson 分布式锁（可选：不传递给使用方） -->
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- 配置元数据提示 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+    </dependencies>
+</project>

@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: orbit-scheduler-sample
+  profiles:
+    active: standalone
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+server:
+  port: 8080
+  shutdown: graceful
+
+# ---------------------------------------------------------------------------
+# Orbit Batch Scheduler 公共配置（各 profile 可覆盖）
+# ---------------------------------------------------------------------------
+orbit:
+  scheduler:
+    enabled: true
+    group: ORBIT
+    node-id: ${POD_NAME:}
+    timezone: Asia/Shanghai
+    annotation-scan: true
+    api-enabled: true
+    storage:
+      type: auto                # auto | database | memory
+    lock:
+      enabled: true
+      type: auto                # auto | redis | database | none
+      lease: 10m
+    http-dispatch:
+      enabled: true
+      service-name: orbit-scheduler
+      discovery-mode: service-dns
+      port: 8080
+      path: /api/scheduler/execute
+      connect-timeout: 3s
+      read-timeout: 300s
+      default-timeout-seconds: 300
+    log:
+      storage: auto             # auto | database | memory
+      memory-capacity: 1000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+
+logging:
+  level:
+    com.orbit.scheduler: INFO

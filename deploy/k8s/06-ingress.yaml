@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------------------
+# 可选：Ingress 暴露管理 API（按需启用，注意加访问控制）
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orbit-scheduler
+  namespace: orbit-system
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: orbit-scheduler.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: orbit-scheduler
+                port:
+                  number: 8080

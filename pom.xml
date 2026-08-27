@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.7.18</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.orbit</groupId>
+    <artifactId>orbit-batch-scheduler</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+    <name>Orbit Batch Scheduler</name>
+    <description>基于 JDK8 + Spring Boot 2.7.18 + Quartz 2.5.2 的分布式批量调度框架（云原生 K8s 支持）</description>
+
+    <modules>
+        <module>scheduler-core</module>
+        <module>scheduler-starter</module>
+        <module>scheduler-sample</module>
+    </modules>
+
+    <properties>
+        <java.version>1.8</java.version>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <!-- 覆盖 Spring Boot 2.7.18 BOM 中管理的 Quartz 版本(2.3.2)，升级为 2.5.2 -->
+        <quartz.version>2.5.2</quartz.version>
+        <redisson.version>3.23.5</redisson.version>
+        <!-- PostgreSQL / GaussDB(openGauss) 双兼容驱动版本 -->
+        <postgresql.version>42.7.3</postgresql.version>
+        <!-- openGauss JDBC：按服务端版本选择（5.1.0-og 对应 openGauss 5.1.x / 华为云 GaussDB 505.x；
+             更高版本可换 6.0.3-og 等；华为云亦可替换为 com.huawei.gaussdb:gaussdbjdbc） -->
+        <opengauss-jdbc.version>5.1.0-og</opengauss-jdbc.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.redisson</groupId>
+                <artifactId>redisson</artifactId>
+                <version>${redisson.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.postgresql</groupId>
+                <artifactId>postgresql</artifactId>
+                <version>${postgresql.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.opengauss</groupId>
+                <artifactId>opengauss-jdbc</artifactId>
+                <version>${opengauss-jdbc.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.orbit</groupId>
+                <artifactId>scheduler-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.orbit</groupId>
+                <artifactId>scheduler-starter</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                    <encoding>UTF-8</encoding>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

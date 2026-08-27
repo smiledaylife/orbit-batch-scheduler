@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# mysql 模式：生产形态
+#   MySQL 8 + Quartz JDBC 集群（多副本触发防重）+ Redis/数据库分布式锁 + HTTP 派发
+#   K8s 部署使用此模式（ConfigMap 覆盖 + Secret 注入凭据）
+#   首次部署需执行 deploy/sql/schema-mysql.sql 初始化表结构
+# ---------------------------------------------------------------------------
+spring:
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:orbit_scheduler}?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+    username: ${DB_USER:orbit}
+    password: ${DB_PASSWORD:orbit123}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 5000
+  sql:
+    init:
+      mode: never
+
+  quartz:
+    job-store-type: jdbc
+    jdbc:
+      initialize-schema: never
+    properties:
+      org.quartz.scheduler.instanceName: orbit-scheduler
+      org.quartz.scheduler.instanceId: AUTO
+      org.quartz.jobStore.driverDelegateClass: org.quartz.impl.jdbcjobstore.StdJDBCDelegate
+      org.quartz.jobStore.isClustered: true
+      org.quartz.jobStore.clusterCheckinInterval: 15000
+      org.quartz.jobStore.misfireThreshold: 60000
+      org.quartz.threadPool.threadCount: 10
+      org.quartz.threadPool.threadNamePrefix: orbit-quartz-
+
+orbit:
+  scheduler:
+    storage:
+      type: database
+    lock:
+      enabled: true
+      type: auto                # 配置 redis.address 时用 Redis，否则数据库锁
+      lease: 10m
+      # redis:
+      #   address: ${REDIS_ADDRESS:redis:6379}   # 需要启用 Redis 锁时打开
+    http-dispatch:
+      enabled: true
+      service-name: orbit-scheduler
+      discovery-mode: service-dns
+      port: 8080
+      # secret: change-me                       # 生产建议开启派发令牌
+    log:
+      storage: database

@@ -1,0 +1,70 @@
+# ---------------------------------------------------------------------------
+# 本地一键拉起：PostgreSQL 16 + Redis 7 + 调度应用（postgresql profile）
+# 用法：cd deploy && docker compose up -d
+# 首次启动时 PostgreSQL 会自动执行 ./sql/schema-postgresql.sql 初始化表结构
+#
+# 切换 GaussDB(openGauss)：
+#   1. 把 postgres 服务镜像换成 opengauss / enmotech/opengauss，环境变量 GS_PASSWORD=orbit@123
+#   2. 初始化目录挂载 ./sql:/docker-entrypoint-initdb.d:ro 执行 schema-gaussdb.sql
+#   3. app 环境变量改：SPRING_PROFILES_ACTIVE=gaussdb, DB_USER=gaussdb（驱动 org.opengauss.Driver）
+# 切换 MySQL：见 git 历史版本（mysql profile 与 schema-mysql.sql 保留在工程中）
+# ---------------------------------------------------------------------------
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: orbit-postgres
+    environment:
+      POSTGRES_DB: orbit_scheduler
+      POSTGRES_USER: orbit
+      POSTGRES_PASSWORD: orbit123
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      # 仅挂载 PostgreSQL 版脚本（目录含多方言脚本，整目录挂载会互相冲突）
+      - ./sql/schema-postgresql.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+      - orbit-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbit -d orbit_scheduler"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: orbit-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    image: orbit-scheduler-sample:1.0.0
+    container_name: orbit-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: postgresql
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: orbit_scheduler
+      DB_USER: orbit
+      DB_PASSWORD: orbit123
+      # 单机容器演示：静态端点自路由（多副本时删除此项改用 Headless DNS）
+      ORBIT_SCHEDULER_HTTP_DISPATCH_STATIC_ENDPOINTS: http://app:8080
+      ORBIT_SCHEDULER_LOCK_REDIS_ADDRESS: redis:6379
+      POD_NAME: orbit-app
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+
+volumes:
+  orbit-pg-data:
