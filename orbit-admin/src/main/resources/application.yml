@@ -1,0 +1,49 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: orbit-admin
+  datasource:
+    url: jdbc:h2:file:./data/orbit-admin;MODE=MySQL;DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+  quartz:
+    job-store-type: memory
+    properties:
+      org.quartz.scheduler.instanceName: orbit-admin
+      org.quartz.scheduler.instanceId: AUTO
+      org.quartz.threadPool.threadCount: 10
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+orbit:
+  admin:
+    access-token: ""
+    heartbeat-timeout-seconds: 90
+    connect-timeout-ms: 3000
+    read-timeout-ms: 300000
+    group: ORBIT
+    timezone: Asia/Shanghai
+    evict-interval-ms: 30000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+
+logging:
+  level:
+    com.orbit: INFO
