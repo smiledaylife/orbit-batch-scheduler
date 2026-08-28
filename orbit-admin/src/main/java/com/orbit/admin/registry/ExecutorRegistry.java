@@ -17,9 +17,14 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 执行器在线注册表（内存）。执行器周期性心跳；超时自动摘除。
- *
- * <p>云原生场景：Pod 扩缩容后新地址通过心跳自动加入，宕机地址超时剔除。
+ * 调度中心执行器在线注册表（内存管理）。
+ * <p>核心机制：
+ * <ul>
+ *   <li>基于 {@code appName|address} 作为全局唯一主键，支持高并发线程安全的节点心跳注册与状态刷新（Upsert）；</li>
+ *   <li>支持心跳超时自动失效剔除（Eviction）；</li>
+ *   <li>支持多副本实例的高效路由策略：轮询（ROUND）、随机（RANDOM）、首节点（FIRST）；</li>
+ *   <li>天然适配 K8s Pod 动态扩缩容，滚动更新时无缝上线新 Pod 并摘除老 Pod。</li>
+ * </ul>
  */
 @Component
 public class ExecutorRegistry {
@@ -27,24 +32,41 @@ public class ExecutorRegistry {
     private static final Logger log = LoggerFactory.getLogger(ExecutorRegistry.class);
 
     private final AdminProperties properties;
-    /** key = appName|address */
+
+    /**
+     * 在线执行器节点集合（key: appName|address，value: ExecutorNode）
+     */
     private final ConcurrentHashMap<String, ExecutorNode> nodes = new ConcurrentHashMap<String, ExecutorNode>();
+
+    /**
+     * 轮询路由策略的原子递增游标（key: appName，value: 轮询计数器）
+     */
     private final ConcurrentHashMap<String, AtomicInteger> roundRobin = new ConcurrentHashMap<String, AtomicInteger>();
 
     public ExecutorRegistry(AdminProperties properties) {
         this.properties = properties;
     }
 
+    /**
+     * 执行器上线注册与心跳刷新逻辑。
+     * <p>根据 appName 和 address 判定节点：若不存在则新增，若已存在则更新其最近心跳时间和支持的 Handlers 列表。
+     *
+     * @param req 执行器注册/心跳请求数据
+     */
     public void register(RegistryRequest req) {
+        // 校验入参必要性
         if (req.getAppName() == null || req.getAppName().trim().isEmpty()) {
             throw new IllegalArgumentException("appName required");
         }
         if (req.getAddress() == null || req.getAddress().trim().isEmpty()) {
             throw new IllegalArgumentException("address required");
         }
+
         String app = req.getAppName().trim();
         String addr = trimSlash(req.getAddress().trim());
         String key = keyOf(app, addr);
+
+        // 组装并更新节点状态
         ExecutorNode node = new ExecutorNode();
         node.setAppName(app);
         node.setAddress(addr);
@@ -54,11 +76,18 @@ public class ExecutorRegistry {
                 : new ArrayList<String>(req.getHandlers()));
         node.setLastHeartbeat(new Date());
         node.setOnline(true);
+
         nodes.put(key, node);
         log.debug("[orbit-admin] registry upsert app={} address={} handlers={}",
                 app, addr, node.getHandlers().size());
     }
 
+    /**
+     * 执行器主动下线注销。
+     *
+     * @param appName 应用名
+     * @param address 节点地址
+     */
     public void remove(String appName, String address) {
         if (appName == null || address == null) {
             return;
@@ -66,13 +95,19 @@ public class ExecutorRegistry {
         nodes.remove(keyOf(appName.trim(), trimSlash(address.trim())));
     }
 
-    /** 清理超时节点 */
+    /**
+     * 扫描注册表并清理心跳超时的失联节点。
+     *
+     * @return 本次清理摘除的节点数量
+     */
     public int evictExpired() {
         long timeoutMs = properties.getHeartbeatTimeoutSeconds() * 1000L;
         long now = System.currentTimeMillis();
         int removed = 0;
+
         for (Map.Entry<String, ExecutorNode> e : nodes.entrySet()) {
             ExecutorNode n = e.getValue();
+            // 若节点上次心跳时间距今超过配置的阈值，则认为已离线
             if (n.getLastHeartbeat() == null || now - n.getLastHeartbeat().getTime() > timeoutMs) {
                 if (nodes.remove(e.getKey(), n)) {
                     removed++;
@@ -84,10 +119,21 @@ public class ExecutorRegistry {
         return removed;
     }
 
+    /**
+     * 列出当前所有在线的执行器节点
+     *
+     * @return 在线节点列表
+     */
     public List<ExecutorNode> listAll() {
         return new ArrayList<ExecutorNode>(nodes.values());
     }
 
+    /**
+     * 按应用名称筛选在线的执行器节点
+     *
+     * @param appName 应用名称
+     * @return 该应用下的在线节点列表
+     */
     public List<ExecutorNode> listByApp(String appName) {
         List<ExecutorNode> list = new ArrayList<ExecutorNode>();
         if (appName == null) {
@@ -103,36 +149,62 @@ public class ExecutorRegistry {
     }
 
     /**
-     * 按路由策略选择一个执行器。
+     * 按照指定的路由策略从该应用的所有在线节点中选择一个执行器实例。
      *
-     * @param strategy ROUND / RANDOM / FIRST
+     * @param appName  执行器应用名
+     * @param strategy 路由策略：ROUND（轮询）、RANDOM（随机）、FIRST（首个）
+     * @return 选中的执行器节点，若无可用在线实例则返回 null
      */
     public ExecutorNode route(String appName, String strategy) {
         List<ExecutorNode> list = listByApp(appName);
         if (list.isEmpty()) {
             return null;
         }
+
         String s = strategy == null ? "ROUND" : strategy.trim().toUpperCase();
+
+        // 1. 随机路由策略
         if ("RANDOM".equals(s)) {
             return list.get(ThreadLocalRandom.current().nextInt(list.size()));
         }
+
+        // 2. 固定首节点路由策略
         if ("FIRST".equals(s)) {
             return list.get(0);
         }
-        // ROUND
+
+        // 3. 默认轮询路由策略（ROUND），基于原子计数器无锁递增取模
         AtomicInteger cursor = roundRobin.computeIfAbsent(appName, k -> new AtomicInteger(0));
         int idx = Math.floorMod(cursor.getAndIncrement(), list.size());
         return list.get(idx);
     }
 
+    /**
+     * 获取当前所有在线节点的总数
+     *
+     * @return 节点总数
+     */
     public int onlineCount() {
         return nodes.size();
     }
 
+    /**
+     * 生成注册表的唯一复合主键：appName|address
+     *
+     * @param app     应用名
+     * @param address 节点地址
+     * @return 复合主键
+     */
     private static String keyOf(String app, String address) {
         return app + "|" + address;
     }
 
+    /**
+     * 规范化地址，去除末尾可能多余的斜杠
+     *
+     * @param s 地址字符串
+     * @return 规范化字符串
+     */
     private static String trimSlash(String s) {
         return s.endsWith("/") && s.length() > 1 ? s.substring(0, s.length() - 1) : s;
     }

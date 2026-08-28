@@ -30,19 +30,24 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 调度中心 REST API。
- *
- * <pre>
- * 执行器侧：
- *   POST /orbit/admin/registry     注册/心跳
- *   POST /orbit/admin/registry/remove  下线
- *
- * 管理侧：
- *   /orbit/admin/jobs/**   任务 CRUD / 触发
- *   /orbit/admin/logs      执行日志
- *   /orbit/admin/executors 在线执行器
- *   /orbit/admin/overview  总览
- * </pre>
+ * 调度中心对外统一 RESTful API 控制器。
+ * <p>端点涵盖：
+ * <ul>
+ *   <li><b>执行器通信侧</b>：
+ *     <ul>
+ *       <li>{@code POST /orbit/admin/registry}：执行器注册与心跳上报</li>
+ *       <li>{@code POST /orbit/admin/registry/remove}：执行器主动下线</li>
+ *     </ul>
+ *   </li>
+ *   <li><b>运维与管理控制侧</b>：
+ *     <ul>
+ *       <li>{@code /orbit/admin/jobs/**}：任务增删改查、暂停、恢复、即时手动触发</li>
+ *       <li>{@code /orbit/admin/logs}：任务调度执行日志分页查询</li>
+ *       <li>{@code /orbit/admin/executors}：在线执行器节点列表查询</li>
+ *       <li>{@code /orbit/admin/overview}：调度中心运行大盘统计数据</li>
+ *     </ul>
+ *   </li>
+ * </ul>
  */
 @RestController
 @RequestMapping("/orbit/admin")
@@ -60,16 +65,34 @@ public class AdminApiController {
         this.properties = properties;
     }
 
-    // -------- 执行器注册 --------
+    // ==========================================
+    // 1. 执行器注册与心跳管理
+    // ==========================================
 
+    /**
+     * 接收执行器的心跳上报或初次注册请求。
+     *
+     * @param req   注册请求数据
+     * @param token HTTP Header 中的安全令牌
+     * @return 成功响应
+     */
     @PostMapping("/registry")
     public ApiResult<Void> registry(@RequestBody RegistryRequest req,
                                     @RequestHeader(value = ExecutorClient.TOKEN_HEADER, required = false) String token) {
+        // 校验安全令牌
         checkToken(token, req.getAccessToken());
+        // 注册或刷新节点
         registry.register(req);
         return ApiResult.ok();
     }
 
+    /**
+     * 接收执行器主动下线注销通知。
+     *
+     * @param req   下线请求数据
+     * @param token HTTP Header 中的安全令牌
+     * @return 成功响应
+     */
     @PostMapping("/registry/remove")
     public ApiResult<Void> registryRemove(@RequestBody RegistryRequest req,
                                           @RequestHeader(value = ExecutorClient.TOKEN_HEADER, required = false) String token) {
@@ -78,8 +101,18 @@ public class AdminApiController {
         return ApiResult.ok();
     }
 
-    // -------- 任务管理 --------
+    // ==========================================
+    // 2. 任务元数据 CRUD 与调度控制
+    // ==========================================
 
+    /**
+     * 分页查询任务列表。
+     *
+     * @param page     页码（默认 1）
+     * @param size     每页大小（默认 10）
+     * @param nameLike 任务名称模糊匹配
+     * @return 任务分页数据
+     */
     @GetMapping("/jobs")
     public ApiResult<PageResult<JobInfo>> pageJobs(@RequestParam(defaultValue = "1") int page,
                                                    @RequestParam(defaultValue = "10") int size,
@@ -87,6 +120,12 @@ public class AdminApiController {
         return ApiResult.ok(jobService.page(nameLike, page, size));
     }
 
+    /**
+     * 查询任务详情及 Quartz 运行期状态。
+     *
+     * @param name 任务名称
+     * @return 任务详情与 Quartz 信息
+     */
     @GetMapping("/jobs/{name}")
     public ApiResult<Map<String, Object>> detail(@PathVariable("name") String name) {
         JobInfo job = jobService.get(name);
@@ -96,42 +135,90 @@ public class AdminApiController {
         return ApiResult.ok(data);
     }
 
+    /**
+     * 创建定时任务。
+     *
+     * @param job 任务元数据
+     * @return 创建成功的任务
+     */
     @PostMapping("/jobs")
     public ApiResult<JobInfo> create(@RequestBody JobInfo job) {
         return ApiResult.ok(jobService.create(job));
     }
 
+    /**
+     * 修改任务信息，并热更新 Quartz 调度。
+     *
+     * @param name 任务名称
+     * @param job  待更新的数据
+     * @return 更新后的任务
+     */
     @PutMapping("/jobs/{name}")
     public ApiResult<JobInfo> update(@PathVariable("name") String name, @RequestBody JobInfo job) {
         return ApiResult.ok(jobService.update(name, job));
     }
 
+    /**
+     * 删除任务。
+     *
+     * @param name 任务名称
+     * @return 成功响应
+     */
     @DeleteMapping("/jobs/{name}")
     public ApiResult<Void> delete(@PathVariable("name") String name) {
         jobService.delete(name);
         return ApiResult.ok();
     }
 
+    /**
+     * 暂停任务的定时触发。
+     *
+     * @param name 任务名称
+     * @return 成功响应
+     */
     @PostMapping("/jobs/{name}/pause")
     public ApiResult<Void> pause(@PathVariable("name") String name) {
         jobService.pause(name);
         return ApiResult.ok();
     }
 
+    /**
+     * 恢复任务的定时触发。
+     *
+     * @param name 任务名称
+     * @return 成功响应
+     */
     @PostMapping("/jobs/{name}/resume")
     public ApiResult<Void> resume(@PathVariable("name") String name) {
         jobService.resume(name);
         return ApiResult.ok();
     }
 
+    /**
+     * 手动立即触发一次任务执行。
+     *
+     * @param name   任务名称
+     * @param params 本次单次执行的临时入参（可为空）
+     * @return 任务执行结果
+     */
     @PostMapping("/jobs/{name}/trigger")
     public ApiResult<TriggerResult> trigger(@PathVariable("name") String name,
                                             @RequestBody(required = false) Map<String, Object> params) {
         return ApiResult.ok(jobService.triggerNow(name, params));
     }
 
-    // -------- 日志 / 执行器 / 总览 --------
+    // ==========================================
+    // 3. 执行日志、在线执行器与运维总览
+    // ==========================================
 
+    /**
+     * 分页查询调度日志。
+     *
+     * @param jobName 任务名称过滤
+     * @param page    页码
+     * @param size    每页大小
+     * @return 日志分页数据
+     */
     @GetMapping("/logs")
     public ApiResult<PageResult<JobLog>> logs(@RequestParam(required = false) String jobName,
                                               @RequestParam(defaultValue = "1") int page,
@@ -139,6 +226,12 @@ public class AdminApiController {
         return ApiResult.ok(jobService.pageLogs(jobName, page, size));
     }
 
+    /**
+     * 查询在线执行器列表。
+     *
+     * @param appName 应用名（为空则查全部在线节点）
+     * @return 在线执行器节点列表
+     */
     @GetMapping("/executors")
     public ApiResult<List<ExecutorNode>> executors(@RequestParam(required = false) String appName) {
         if (appName == null || appName.trim().isEmpty()) {
@@ -147,22 +240,43 @@ public class AdminApiController {
         return ApiResult.ok(registry.listByApp(appName));
     }
 
+    /**
+     * 查询调度中心监控总览统计数据。
+     *
+     * @return 统计指标集合
+     */
     @GetMapping("/overview")
     public ApiResult<Map<String, Object>> overview() {
         return ApiResult.ok(jobService.overview());
     }
 
+    // ==========================================
+    // 4. 统一异常处理与安全校验
+    // ==========================================
+
+    /**
+     * 捕获非法参数异常（400）
+     */
     @ExceptionHandler(IllegalArgumentException.class)
     public ApiResult<Void> badRequest(IllegalArgumentException e) {
         return ApiResult.fail(400, e.getMessage());
     }
 
+    /**
+     * 捕获全局未处理异常（500）
+     */
     @ExceptionHandler(Exception.class)
     public ApiResult<Void> error(Exception e) {
         log.error("[orbit-admin] api error", e);
         return ApiResult.fail(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
     }
 
+    /**
+     * 校验安全令牌。
+     *
+     * @param headerToken 请求头中的 Token
+     * @param bodyToken   请求体中的 Token
+     */
     private void checkToken(String headerToken, String bodyToken) {
         String expect = properties.getAccessToken();
         if (expect == null || expect.isEmpty()) {

@@ -96,7 +96,7 @@ orbit:
     app-name: order-service          # 与任务 appName 一致
     admin-addresses: http://orbit-admin:8080
     # address 留空：本地用本机 IP，K8s 用 POD_IP
-    port: 8081
+    # port 无需配置，默认自动感知并继承应用自身的 server.port
     access-token: ""                 # 与 admin 一致时可开启
 ```
 
@@ -214,8 +214,8 @@ spring:
 |----|------|------|
 | `app-name` | orbit-executor | 应用名 |
 | `admin-addresses` | http://127.0.0.1:8080 | 多地址逗号分隔 |
-| `address` | 空 | 对外地址；空则 POD_IP/本机 IP |
-| `port` | 8081 | 与 server.port 一致 |
+| `address` | 空 | 对外地址；空则 POD_IP/本机 IP + 端口 |
+| `port` | 0（自动感知） | 默认自动继承 `server.port`，无需配置；仅端口映射需覆盖时指定 |
 | `heartbeat-interval-ms` | 20000 | 心跳间隔 |
 | `access-token` | 空 | 令牌 |
 
