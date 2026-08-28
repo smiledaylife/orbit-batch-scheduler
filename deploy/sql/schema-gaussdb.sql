@@ -1,8 +1,8 @@
-CREATE DATABASE IF NOT EXISTS orbit_admin DEFAULT CHARACTER SET utf8mb4;
-USE orbit_admin;
+-- Orbit Admin GaussDB / openGauss 表结构初始化脚本
+-- 兼容 GaussDB、openGauss 等数据库
 
 CREATE TABLE IF NOT EXISTS orbit_job (
-    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id               BIGSERIAL PRIMARY KEY,
     job_name         VARCHAR(64)  NOT NULL,
     description      VARCHAR(256),
     app_name         VARCHAR(64)  NOT NULL,
@@ -11,15 +11,15 @@ CREATE TABLE IF NOT EXISTS orbit_job (
     params           VARCHAR(2000),
     timeout_seconds  INT DEFAULT 300,
     route_strategy   VARCHAR(16) DEFAULT 'ROUND',
-    enabled          TINYINT(1) DEFAULT 1,
+    enabled          BOOLEAN DEFAULT TRUE,
     version          INT DEFAULT 1,
-    created_at       DATETIME(3),
-    updated_at       DATETIME(3),
-    UNIQUE KEY uk_orbit_job_name (job_name)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    created_at       TIMESTAMP,
+    updated_at       TIMESTAMP,
+    CONSTRAINT uk_orbit_job_name UNIQUE (job_name)
+);
 
 CREATE TABLE IF NOT EXISTS orbit_job_log (
-    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id                BIGSERIAL PRIMARY KEY,
     log_id            VARCHAR(64) NOT NULL,
     job_id            BIGINT,
     job_name          VARCHAR(64),
@@ -29,8 +29,9 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
     status            VARCHAR(16),
     message           VARCHAR(2000),
     cost_ms           BIGINT,
-    start_time        DATETIME(3),
-    end_time          DATETIME(3),
-    KEY idx_orbit_job_log_name (job_name),
-    KEY idx_orbit_job_log_id (log_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    start_time        TIMESTAMP,
+    end_time          TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);

@@ -18,7 +18,7 @@
 
 - JDK 8 · Spring Boot 2.7 · Quartz（调度中心）
 - 执行器无状态，K8s 直接扩缩容；心跳超时自动摘除
-- 默认 H2 文件库开箱即用，可换 MySQL / PostgreSQL
+- 默认 H2 文件库开箱即用（PostgreSQL 兼容模式），生产支持 PostgreSQL / GaussDB
 
 ---
 
@@ -164,17 +164,34 @@ kubectl apply -f deploy/k8s/
 kubectl -n orbit-system scale deploy/orbit-executor --replicas=3
 ```
 
-生产库可改用 MySQL / PostgreSQL（脚本见 `deploy/sql/`），配置：
+生产库支持 PostgreSQL / GaussDB（脚本见 `deploy/sql/`），配置示例：
+
+**PostgreSQL：**
 
 ```yaml
 spring:
   datasource:
-    url: jdbc:mysql://mysql:3306/orbit_admin
-    username: ...
-    password: ...
+    url: jdbc:postgresql://localhost:5432/orbit_admin
+    driver-class-name: org.postgresql.Driver
+    username: postgres
+    password: your_password
   sql:
     init:
-      mode: never   # 表已手工初始化
+      mode: never   # 表已手工执行 deploy/sql/schema-postgresql.sql 初始化
+```
+
+**GaussDB / openGauss：**
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:opengauss://localhost:5432/orbit_admin
+    driver-class-name: org.opengauss.Driver
+    username: gaussdb
+    password: your_password
+  sql:
+    init:
+      mode: never   # 表已手工执行 deploy/sql/schema-gaussdb.sql 初始化
 ```
 
 ---
@@ -214,6 +231,6 @@ spring:
 | 注册 | 执行器心跳 | 执行器心跳 |
 | 触发 | HTTP | HTTP `/orbit/executor/run` |
 | 路由 | 轮询/随机/故障转移… | ROUND / RANDOM / FIRST |
-| 存储 | MySQL | H2（默认）/ MySQL / PG |
+| 存储 | MySQL | H2（默认）/ PostgreSQL / GaussDB |
 
 设计刻意保持精简：无独立 Web 控制台 UI（用 REST API / 自行对接前端）、无 GLUE 模式、无子任务 DAG，满足「中心调度 + 业务侧执行」的云原生批量场景即可扩展。

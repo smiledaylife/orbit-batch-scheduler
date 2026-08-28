@@ -1,6 +1,6 @@
--- Orbit Admin 业务表（H2 / MySQL / PostgreSQL 兼容子集）
+-- Orbit Admin 业务表（PostgreSQL / GaussDB / H2 兼容）
 CREATE TABLE IF NOT EXISTS orbit_job (
-    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id               BIGSERIAL PRIMARY KEY,
     job_name         VARCHAR(64)  NOT NULL,
     description      VARCHAR(256),
     app_name         VARCHAR(64)  NOT NULL,
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS orbit_job (
 );
 
 CREATE TABLE IF NOT EXISTS orbit_job_log (
-    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id                BIGSERIAL PRIMARY KEY,
     log_id            VARCHAR(64) NOT NULL,
     job_id            BIGINT,
     job_name          VARCHAR(64),

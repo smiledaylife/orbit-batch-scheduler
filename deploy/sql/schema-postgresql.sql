@@ -1,3 +1,5 @@
+-- Orbit Admin PostgreSQL 表结构初始化脚本
+
 CREATE TABLE IF NOT EXISTS orbit_job (
     id               BIGSERIAL PRIMARY KEY,
     job_name         VARCHAR(64)  NOT NULL,

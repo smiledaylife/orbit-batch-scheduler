@@ -19,7 +19,7 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * 任务与日志 JDBC 存储（H2 / MySQL / PostgreSQL 通用 SQL）。
+ * 任务与日志 JDBC 存储（PostgreSQL / GaussDB / H2 通用 SQL）。
  */
 @Repository
 public class JobStore {

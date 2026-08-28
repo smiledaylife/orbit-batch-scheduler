@@ -6,10 +6,21 @@ spring:
   application:
     name: orbit-admin
   datasource:
-    url: jdbc:h2:file:./data/orbit-admin;MODE=MySQL;DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE
+    # 默认嵌入式 H2（PostgreSQL 兼容模式），开箱即用；生产库可配置为 PostgreSQL 或 GaussDB
+    url: jdbc:h2:file:./data/orbit-admin;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE
     driver-class-name: org.h2.Driver
     username: sa
     password:
+    # --- PostgreSQL 生产配置参考 ---
+    # url: jdbc:postgresql://localhost:5432/orbit_admin
+    # driver-class-name: org.postgresql.Driver
+    # username: postgres
+    # password: your_password
+    # --- GaussDB / openGauss 生产配置参考 ---
+    # url: jdbc:opengauss://localhost:5432/orbit_admin
+    # driver-class-name: org.opengauss.Driver
+    # username: gaussdb
+    # password: your_password
   sql:
     init:
       mode: always
