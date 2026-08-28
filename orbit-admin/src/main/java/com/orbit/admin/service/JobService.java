@@ -37,7 +37,13 @@ import java.util.TimeZone;
 import java.util.UUID;
 
 /**
- * 调度中心核心：任务 CRUD + Quartz 联动 + 派发执行器。
+ * 调度中心核心业务服务。
+ * <p>核心职责：
+ * <ul>
+ *   <li>任务元数据生命周期管理（CRUD、校验、状态控制）；</li>
+ *   <li>Quartz 定时任务的动态编排、启动加载、Cron 动态刷新、暂停与恢复；</li>
+ *   <li>任务统一派发（分发）：生成日志追踪链路 ID、按路由策略寻址、向执行器派发 HTTP 触发请求、记录执行日志与耗时。</li>
+ * </ul>
  */
 @Service
 public class JobService {
@@ -59,6 +65,10 @@ public class JobService {
         this.properties = properties;
     }
 
+    /**
+     * 调度中心初始化方法。
+     * <p>在系统启动时从数据库加载所有启用的定时任务并注册到 Quartz 调度器中。
+     */
     @PostConstruct
     public void init() {
         try {
@@ -71,20 +81,38 @@ public class JobService {
         }
     }
 
+    /**
+     * 创建新任务，并在满足条件时自动加入 Quartz 调度。
+     *
+     * @param input 任务元数据信息
+     * @return 持久化后的任务对象
+     */
     public JobInfo create(JobInfo input) {
+        // 参数合法性校验
         validate(input, true);
         if (jobStore.findJobByName(input.getJobName()).isPresent()) {
             throw new IllegalArgumentException("job already exists: " + input.getJobName());
         }
+
+        // 保存至数据库
         JobInfo saved = jobStore.saveJob(input);
+        // 同步应用到 Quartz 调度器
         applySchedule(saved);
         return saved;
     }
 
+    /**
+     * 更新已有任务元数据，并同步热更新 Quartz 调度计划。
+     *
+     * @param jobName 任务名称
+     * @param input   待更新的任务字段
+     * @return 更新后的任务对象
+     */
     public JobInfo update(String jobName, JobInfo input) {
         JobInfo existing = jobStore.findJobByName(jobName)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + jobName));
         validate(input, false);
+
         existing.setDescription(input.getDescription());
         existing.setAppName(input.getAppName());
         existing.setHandler(input.getHandler());
@@ -93,11 +121,17 @@ public class JobService {
         existing.setTimeoutSeconds(input.getTimeoutSeconds());
         existing.setRouteStrategy(input.getRouteStrategy());
         existing.setEnabled(input.isEnabled());
+
         JobInfo saved = jobStore.saveJob(existing);
         applySchedule(saved);
         return saved;
     }
 
+    /**
+     * 删除任务，并同步从 Quartz 中移除定时计划。
+     *
+     * @param jobName 任务名称
+     */
     public void delete(String jobName) {
         jobStore.findJobByName(jobName)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + jobName));
@@ -109,15 +143,34 @@ public class JobService {
         }
     }
 
+    /**
+     * 分页查询任务列表。
+     *
+     * @param nameLike 名称模糊匹配
+     * @param page     页码
+     * @param size     每页记录数
+     * @return 分页结果集
+     */
     public PageResult<JobInfo> page(String nameLike, int page, int size) {
         return jobStore.pageJobs(nameLike, page, size);
     }
 
+    /**
+     * 根据任务名称查询单个任务详情。
+     *
+     * @param jobName 任务名称
+     * @return 任务对象
+     */
     public JobInfo get(String jobName) {
         return jobStore.findJobByName(jobName)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + jobName));
     }
 
+    /**
+     * 暂停任务的自动定时触发调度。
+     *
+     * @param jobName 任务名称
+     */
     public void pause(String jobName) {
         require(jobName);
         try {
@@ -127,6 +180,11 @@ public class JobService {
         }
     }
 
+    /**
+     * 恢复任务的自动定时触发调度。
+     *
+     * @param jobName 任务名称
+     */
     public void resume(String jobName) {
         JobInfo job = require(jobName);
         try {
@@ -140,19 +198,38 @@ public class JobService {
         }
     }
 
-    /** 立即触发（异步走 Quartz，也可直接 dispatch） */
+    /**
+     * 手动立即触发一次任务执行。
+     *
+     * @param jobName 任务名称
+     * @param params  本次单次触发的动态临时入参（可为空）
+     * @return 执行响应结果
+     */
     public TriggerResult triggerNow(String jobName, Map<String, Object> params) {
         JobInfo job = require(jobName);
         return dispatch(job, params);
     }
 
     /**
-     * Quartz / 手动触发统一派发入口。
+     * 调度中心统一派发执行逻辑（无论是 Quartz 定时触发还是手动触发，均走本方法）。
+     * <ol>
+     *   <li>生成全链路唯一追踪日志 ID，初始化 RUNNING 状态日志入库；</li>
+     *   <li>从注册表中根据任务路由策略选取一个在线执行器节点；</li>
+     *   <li>若无可用节点，更新日志为 FAILED 并终止；</li>
+     *   <li>合并静态参数与动态参数，通过 HTTP 调用执行器端 /run 接口；</li>
+     *   <li>计算本次调用耗时，根据执行结果更新日志状态为 SUCCESS 或 FAILED。</li>
+     * </ol>
+     *
+     * @param job         任务元数据
+     * @param extraParams 单次触发传入的覆盖参数（可为空）
+     * @return 任务执行结果
      */
     public TriggerResult dispatch(JobInfo job, Map<String, Object> extraParams) {
+        // 1. 生成全局唯一日志 ID 与记录开始时间
         String logId = UUID.randomUUID().toString().replace("-", "");
         Date start = new Date();
 
+        // 2. 插入初始运行中日志记录
         JobLog running = new JobLog();
         running.setLogId(logId);
         running.setJobId(job.getId());
@@ -163,14 +240,17 @@ public class JobService {
         running.setStartTime(start);
         jobStore.insertLog(running);
 
+        // 3. 按照任务配置的路由策略寻址目标执行器实例
         ExecutorNode node = registry.route(job.getAppName(), job.getRouteStrategy());
         if (node == null) {
+            // 没有存活的执行器实例
             String msg = "no online executor for appName=" + job.getAppName();
             jobStore.finishLog(logId, "FAILED", null, 0, msg);
             log.warn("[orbit-admin] {}", msg);
             return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), null, 0, msg);
         }
 
+        // 4. 构建触发请求并合并参数
         TriggerRequest req = new TriggerRequest();
         req.setJobId(job.getId() == null ? 0 : job.getId());
         req.setJobName(job.getJobName());
@@ -186,19 +266,35 @@ public class JobService {
         }
         req.setParams(merged);
 
+        // 5. 向目标执行器发起 HTTP 调用触发任务执行
         TriggerResult result = executorClient.trigger(node.getAddress(), req);
         long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
         String status = result.isSuccess() ? "SUCCESS" : "FAILED";
+
+        // 6. 更新执行日志最终结果
         jobStore.finishLog(logId, status, node.getAddress(), cost, result.getMessage());
         log.info("[orbit-admin] job={} -> {} @ {} status={} {}ms",
                 job.getJobName(), job.getHandler(), node.getAddress(), status, cost);
         return result;
     }
 
+    /**
+     * 分页查询调度执行日志。
+     *
+     * @param jobName 任务名称过滤（可为空）
+     * @param page    页码
+     * @param size    每页大小
+     * @return 分页日志列表
+     */
     public PageResult<JobLog> pageLogs(String jobName, int page, int size) {
         return jobStore.pageLogs(jobName, page, size);
     }
 
+    /**
+     * 查询调度中心系统总览数据（任务数、在线节点数、Quartz 集群状态等）。
+     *
+     * @return 统计指标字典
+     */
     public Map<String, Object> overview() {
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("jobCount", jobStore.countJobs());
@@ -214,6 +310,12 @@ public class JobService {
         return m;
     }
 
+    /**
+     * 查询指定任务在 Quartz 内部的详细调度状态（下一次触发时间、触发状态等）。
+     *
+     * @param jobName 任务名称
+     * @return Quartz 状态明细
+     */
     public Map<String, Object> quartzInfo(String jobName) {
         Map<String, Object> info = new LinkedHashMap<String, Object>();
         try {
@@ -237,23 +339,35 @@ public class JobService {
         return info;
     }
 
-    // ---- quartz ----
+    // -------- Quartz 底层计划编排内部辅助方法 --------
 
+    /**
+     * 编排或更新任务在 Quartz 调度器中的 Trigger 与 JobDetail。
+     *
+     * @param job 任务元数据
+     * @throws SchedulerException Quartz 调度器操作异常
+     */
     void scheduleOrUpdate(JobInfo job) throws SchedulerException {
         JobKey key = jobKey(job.getJobName());
         boolean cronOk = job.getCron() != null && CronExpression.isValidExpression(job.getCron());
+
+        // 若任务未启用或 Cron 表达式为空/无效，若 Quartz 中存在则直接删除移除调度
         if (!job.isEnabled() || !cronOk) {
             if (scheduler.checkExists(key)) {
                 scheduler.deleteJob(key);
             }
             return;
         }
+
+        // 构建 Quartz JobDetail
         JobDetail detail = JobBuilder.newJob(OrbitQuartzJob.class)
                 .withIdentity(key)
                 .usingJobData(OrbitQuartzJob.KEY_JOB_NAME, job.getJobName())
                 .storeDurably()
                 .requestRecovery()
                 .build();
+
+        // 构建 Cron 触发器并设置时区与错失策略（misfire do nothing）
         CronTrigger trigger = TriggerBuilder.newTrigger()
                 .withIdentity(triggerKey(job.getJobName()))
                 .forJob(key)
@@ -261,6 +375,8 @@ public class JobService {
                         .withMisfireHandlingInstructionDoNothing()
                         .inTimeZone(TimeZone.getTimeZone(properties.getTimezone())))
                 .build();
+
+        // 动态注册或更新调度计划
         if (!scheduler.checkExists(key)) {
             scheduler.scheduleJob(detail, trigger);
             log.info("[orbit-admin] scheduled {} cron={}", job.getJobName(), job.getCron());
@@ -271,6 +387,11 @@ public class JobService {
         }
     }
 
+    /**
+     * 包装执行 Quartz 调度更新
+     *
+     * @param job 任务元数据
+     */
     private void applySchedule(JobInfo job) {
         try {
             scheduleOrUpdate(job);
@@ -279,11 +400,23 @@ public class JobService {
         }
     }
 
+    /**
+     * 强校验任务是否存在
+     *
+     * @param name 任务名称
+     * @return 任务对象
+     */
     private JobInfo require(String name) {
         return jobStore.findJobByName(name)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + name));
     }
 
+    /**
+     * 任务字段业务校验与默认值回填
+     *
+     * @param job    待校验任务对象
+     * @param create 是否为创建操作
+     */
     private void validate(JobInfo job, boolean create) {
         if (create) {
             if (job.getJobName() == null || !job.getJobName().matches("[A-Za-z0-9_\\-.]{1,64}")) {
@@ -300,9 +433,11 @@ public class JobService {
                 && !CronExpression.isValidExpression(job.getCron())) {
             throw new IllegalArgumentException("invalid cron: " + job.getCron());
         }
+        // 路由策略默认 ROUND
         if (job.getRouteStrategy() == null || job.getRouteStrategy().trim().isEmpty()) {
             job.setRouteStrategy("ROUND");
         }
+        // 超时时间兜底 300 秒
         if (job.getTimeoutSeconds() <= 0) {
             job.setTimeoutSeconds(300);
         }

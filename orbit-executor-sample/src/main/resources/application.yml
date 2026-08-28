@@ -12,9 +12,10 @@ orbit:
     app-name: demo-executor
     # 调度中心地址（本地默认 8080；K8s 改为 http://orbit-admin:8080）
     admin-addresses: http://127.0.0.1:8080
-    # 空则自动用 POD_IP / 本机 IP + port
+    # address 为空则自动探测：K8s 下用 POD_IP，本地用本机 IP；端口默认自动继承 server.port，无需显式配置
     address: ""
-    port: ${server.port}
+    # port 默认继承 server.port（无需配置），仅在 Docker 端口映射宿主机等特殊场景需覆盖时指定
+    # port: 8081
     access-token: ""
     heartbeat-interval-ms: 20000
     node-id: ${POD_NAME:}

@@ -32,8 +32,8 @@ data:
         enabled: true
         app-name: demo-executor
         admin-addresses: http://orbit-admin:8080
-        port: 8081
-        # K8s 下 address 留空，用 POD_IP 自动注册
+        # 端口默认自动感知 server.port，无需额外显式配置
+        # K8s 下 address 留空，框架将自动读取 POD_IP 并拼接端口完成注册
         address: ""
         heartbeat-interval-ms: 20000
         node-id: ${POD_NAME:}
