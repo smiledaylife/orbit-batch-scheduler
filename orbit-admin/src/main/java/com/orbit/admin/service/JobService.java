@@ -168,13 +168,20 @@ public class JobService {
 
     /**
      * 暂停任务的自动定时触发调度。
+     * <p>同时将 enabled=false 持久化到数据库并从 Quartz 移除 Trigger，
+     * 保证调度中心重启后暂停状态不丢失（Quartz 使用内存 JobStore，重启即清空）。
      *
      * @param jobName 任务名称
      */
     public void pause(String jobName) {
-        require(jobName);
+        JobInfo job = require(jobName);
+        job.setEnabled(false);
+        jobStore.saveJob(job);
         try {
-            scheduler.pauseJob(jobKey(jobName));
+            // 直接删除 Quartz 中的调度计划；重启时 init() 依据 enabled=false 也不会重新注册
+            if (scheduler.checkExists(jobKey(jobName))) {
+                scheduler.deleteJob(jobKey(jobName));
+            }
         } catch (SchedulerException e) {
             throw new IllegalStateException(e.getMessage(), e);
         }
@@ -182,17 +189,16 @@ public class JobService {
 
     /**
      * 恢复任务的自动定时触发调度。
+     * <p>同时将 enabled=true 持久化到数据库，并重新向 Quartz 注册 Cron 调度。
      *
      * @param jobName 任务名称
      */
     public void resume(String jobName) {
         JobInfo job = require(jobName);
+        job.setEnabled(true);
+        jobStore.saveJob(job);
         try {
-            if (!scheduler.checkExists(jobKey(jobName))) {
-                scheduleOrUpdate(job);
-            } else {
-                scheduler.resumeJob(jobKey(jobName));
-            }
+            scheduleOrUpdate(job);
         } catch (SchedulerException e) {
             throw new IllegalStateException(e.getMessage(), e);
         }

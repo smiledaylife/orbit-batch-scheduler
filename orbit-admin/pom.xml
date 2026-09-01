@@ -12,6 +12,12 @@
     <name>Orbit :: Admin (调度中心)</name>
     <description>调度中心：任务管理、Cron 触发、执行器注册、HTTP 派发</description>
 
+    <properties>
+        <!-- 调度中心依赖 Quartz 2.5.x（class 版本 55），编译与运行均需 JDK 11+。
+             覆盖根 POM 的 1.8 设置；reactor 整体须使用 JDK 11+ 构建。 -->
+        <maven.compiler.release>11</maven.compiler.release>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.orbit</groupId>
@@ -29,6 +35,13 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-quartz</artifactId>
         </dependency>
+        <!--
+          Quartz 2.5.x 的连接池依赖（c3p0 / HikariCP）在其自身 POM 中为 provided 作用域。
+          当前使用内存 JobStore（spring.quartz.job-store-type=memory），无需连接池；
+          若日后切换为 JDBC JobStore（Quartz 集群），需显式引入 com.mchange:c3p0 或 com.zaxxer:HikariCP。
+          slf4j-api 由 spring-boot-starter-logging 提供，满足 Quartz 2.5 的 slf4j-api(runtime) 要求。
+        -->
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>

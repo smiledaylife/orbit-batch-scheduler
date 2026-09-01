@@ -151,6 +151,18 @@ public class JobStore {
      */
     public JobInfo saveJob(JobInfo job) {
         Date now = new Date();
+
+        // 入库前对可能超出列宽的字段做前置校验，避免触发 SQLException（列宽与 schema.sql 保持一致）
+        String paramsJson = toJson(job.getParams());
+        if (paramsJson != null && paramsJson.length() > 2000) {
+            throw new IllegalArgumentException("params too long: serialized json length "
+                    + paramsJson.length() + " exceeds limit 2000");
+        }
+        if (job.getDescription() != null && job.getDescription().length() > 256) {
+            throw new IllegalArgumentException("description too long: length "
+                    + job.getDescription().length() + " exceeds limit 256");
+        }
+
         // 1. 新增操作
         if (job.getId() == null) {
             KeyHolder kh = new GeneratedKeyHolder();
@@ -165,7 +177,7 @@ public class JobStore {
                 ps.setString(3, job.getAppName());
                 ps.setString(4, job.getHandler());
                 ps.setString(5, blankToNull(job.getCron()));
-                ps.setString(6, toJson(job.getParams()));
+                ps.setString(6, paramsJson);
                 ps.setInt(7, job.getTimeoutSeconds() <= 0 ? 300 : job.getTimeoutSeconds());
                 ps.setString(8, blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy());
                 ps.setBoolean(9, job.isEnabled());
@@ -189,7 +201,7 @@ public class JobStore {
                         "timeout_seconds=?, route_strategy=?, enabled=?, version=version+1, updated_at=? " +
                         "WHERE id=? AND version=?",
                 blankToNull(job.getDescription()), job.getAppName(), job.getHandler(),
-                blankToNull(job.getCron()), toJson(job.getParams()),
+                blankToNull(job.getCron()), paramsJson,
                 job.getTimeoutSeconds() <= 0 ? 300 : job.getTimeoutSeconds(),
                 blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy(),
                 job.isEnabled(), new Timestamp(now.getTime()),

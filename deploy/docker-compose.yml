@@ -6,6 +6,8 @@ services:
       dockerfile: Dockerfile
       args:
         MODULE: orbit-admin
+        # Quartz 2.5.x 要求 JDK 11，调度中心运行于 JRE 11
+        RUNTIME_IMAGE: eclipse-temurin:11-jre
     image: orbit-admin:1.0.0
     ports:
       - "8080:8080"

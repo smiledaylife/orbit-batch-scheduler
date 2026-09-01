@@ -12,6 +12,11 @@
     <name>Orbit :: Executor Sample</name>
     <description>执行器示例：业务服务接入 orbit-executor</description>
 
+    <properties>
+        <!-- 示例业务应用：JRE 8 可运行 -->
+        <maven.compiler.release>8</maven.compiler.release>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.orbit</groupId>

@@ -1,0 +1,51 @@
+# ---- Maven ----
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# ---- Gradle（备用）----
+.gradle/
+build/
+
+# ---- IDE：IntelliJ IDEA ----
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# ---- IDE：Eclipse / STS ----
+.apt_generated/
+.classpath
+.factorypath
+.project
+.settings/
+.springBeans
+.sts4-cache/
+
+# ---- IDE：VS Code ----
+.vscode/
+
+# ---- NetBeans ----
+nbproject/private/
+nbbuild/
+dist/
+nbdist/
+.nb-gradle/
+
+# ---- 运行期数据（H2 文件库 / 日志）----
+data/
+*.db
+*.trace.db
+*.log
+logs/
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db

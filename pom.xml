@@ -27,9 +27,20 @@
 
     <properties>
         <java.version>1.8</java.version>
-        <maven.compiler.source>1.8</maven.compiler.source>
-        <maven.compiler.target>1.8</maven.compiler.target>
+        <!-- 默认 release：SDK 侧（core/executor/sample）保持 Java 8；
+             orbit-admin 子模块覆盖为 11（Quartz 2.5 要求）。用 release 而非 source/target，
+             可同时限制字节码版本与可用 API，避免 JDK 11 编译产物误用 Java 9+ API。 -->
+        <maven.compiler.release>8</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!--
+          JDK 拓扑：
+          · orbit-admin（调度中心）：maven.compiler.release=11，需 JDK 11+ 构建/运行 —— Quartz 2.5.x 起最低要求 JDK 11。
+          · orbit-core / orbit-executor / orbit-executor-sample（业务 SDK）：maven.compiler.release=8，
+            产出 Java 8 字节码且限制仅使用 JDK 8 API，业务方可在 JRE 8 + Spring Boot 2.7 接入。
+          admin 与 executor 之间仅通过 HTTP/JSON（orbit-core 的 POJO）通信，互不共享 JVM，
+          因此 admin 跑 JRE 11、executor 跑 JRE 8 完全兼容。
+          注意：整库 reactor 构建需使用 JDK 11+（admin 引用 Quartz 2.5，其 class 文件版本为 55，JDK 8 无法编译）。
+        -->
         <quartz.version>2.5.2</quartz.version>
     </properties>
 
@@ -48,17 +59,4 @@
         </dependencies>
     </dependencyManagement>
 
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <configuration>
-                    <source>1.8</source>
-                    <target>1.8</target>
-                    <encoding>UTF-8</encoding>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
 </project>

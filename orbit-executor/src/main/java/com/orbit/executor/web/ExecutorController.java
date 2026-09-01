@@ -1,5 +1,6 @@
 package com.orbit.executor.web;
 
+import com.orbit.core.model.ApiResult;
 import com.orbit.core.model.TriggerRequest;
 import com.orbit.core.model.TriggerResult;
 import com.orbit.executor.ExecutorBootstrap;
@@ -8,11 +9,14 @@ import com.orbit.executor.JobContext;
 import com.orbit.executor.JobHandlerRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
@@ -119,6 +123,18 @@ public class ExecutorController {
         m.put("nodeId", bootstrap.getResolvedNodeId());
         m.put("handlers", registry.listNames());
         return m;
+    }
+
+    /**
+     * 鉴权失败（令牌不匹配）返回 403，避免落入 Spring 默认 500 白页。
+     *
+     * @param e 非法参数异常
+     * @return 标准失败响应
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public ApiResult<Void> forbidden(IllegalArgumentException e) {
+        return ApiResult.fail(403, e.getMessage());
     }
 
     /**
