@@ -1,6 +1,6 @@
 package com.orbit.admin.store;
 
-import com.baomidou.mybatisplus.autoconfigure.MybatisPlusTest;
+import com.baomidou.mybatisplus.test.autoconfigure.MybatisPlusTest;
 import com.orbit.admin.config.MybatisPlusConfig;
 import com.orbit.core.model.JobInfo;
 import com.orbit.core.model.JobLog;
