@@ -38,12 +38,12 @@ import java.util.UUID;
 
 /**
  * 调度中心核心业务服务。
- * <p>核心职责：
- * <ul>
- *   <li>任务元数据生命周期管理（CRUD、校验、状态控制）；</li>
- *   <li>Quartz 定时任务的动态编排、启动加载、Cron 动态刷新、暂停与恢复；</li>
- *   <li>任务统一派发（分发）：生成日志追踪链路 ID、按路由策略寻址、向执行器派发 HTTP 触发请求、记录执行日志与耗时。</li>
- * </ul>
+ * 核心职责：
+ * 
+ *   - 任务元数据生命周期管理（CRUD、校验、状态控制）；
+ *   - Quartz 定时任务的动态编排、启动加载、Cron 动态刷新、暂停与恢复；
+ *   - 任务统一派发（分发）：生成日志追踪链路 ID、按路由策略寻址、向执行器派发 HTTP 触发请求、记录执行日志与耗时。
+ * 
  */
 @Service
 public class JobService {
@@ -67,7 +67,7 @@ public class JobService {
 
     /**
      * 调度中心初始化方法。
-     * <p>在系统启动时从数据库加载所有启用的定时任务并注册到 Quartz 调度器中。
+     * 在系统启动时从数据库加载所有启用的定时任务并注册到 Quartz 调度器中。
      */
     @PostConstruct
     public void init() {
@@ -168,13 +168,20 @@ public class JobService {
 
     /**
      * 暂停任务的自动定时触发调度。
+     * 同时将 enabled=false 持久化到数据库并从 Quartz 移除 Trigger，
+     * 保证调度中心重启后暂停状态不丢失（Quartz 使用内存 JobStore，重启即清空）。
      *
      * @param jobName 任务名称
      */
     public void pause(String jobName) {
-        require(jobName);
+        JobInfo job = require(jobName);
+        job.setEnabled(false);
+        jobStore.saveJob(job);
         try {
-            scheduler.pauseJob(jobKey(jobName));
+            // 直接删除 Quartz 中的调度计划；重启时 init() 依据 enabled=false 也不会重新注册
+            if (scheduler.checkExists(jobKey(jobName))) {
+                scheduler.deleteJob(jobKey(jobName));
+            }
         } catch (SchedulerException e) {
             throw new IllegalStateException(e.getMessage(), e);
         }
@@ -182,17 +189,16 @@ public class JobService {
 
     /**
      * 恢复任务的自动定时触发调度。
+     * 同时将 enabled=true 持久化到数据库，并重新向 Quartz 注册 Cron 调度。
      *
      * @param jobName 任务名称
      */
     public void resume(String jobName) {
         JobInfo job = require(jobName);
+        job.setEnabled(true);
+        jobStore.saveJob(job);
         try {
-            if (!scheduler.checkExists(jobKey(jobName))) {
-                scheduleOrUpdate(job);
-            } else {
-                scheduler.resumeJob(jobKey(jobName));
-            }
+            scheduleOrUpdate(job);
         } catch (SchedulerException e) {
             throw new IllegalStateException(e.getMessage(), e);
         }
@@ -212,14 +218,13 @@ public class JobService {
 
     /**
      * 调度中心统一派发执行逻辑（无论是 Quartz 定时触发还是手动触发，均走本方法）。
-     * <ol>
-     *   <li>生成全链路唯一追踪日志 ID，初始化 RUNNING 状态日志入库；</li>
-     *   <li>从注册表中根据任务路由策略选取一个在线执行器节点；</li>
-     *   <li>若无可用节点，更新日志为 FAILED 并终止；</li>
-     *   <li>合并静态参数与动态参数，通过 HTTP 调用执行器端 /run 接口；</li>
-     *   <li>计算本次调用耗时，根据执行结果更新日志状态为 SUCCESS 或 FAILED。</li>
-     * </ol>
-     *
+     * 
+     *   - 生成全链路唯一追踪日志 ID，初始化 RUNNING 状态日志入库；
+     *   - 从注册表中根据任务路由策略选取一个在线执行器节点；
+     *   - 若无可用节点，更新日志为 FAILED 并终止；
+     *   - 合并静态参数与动态参数，通过 HTTP 调用执行器端 /run 接口；
+     *   - 计算本次调用耗时，根据执行结果更新日志状态为 SUCCESS 或 FAILED。
+     * 
      * @param job         任务元数据
      * @param extraParams 单次触发传入的覆盖参数（可为空）
      * @return 任务执行结果

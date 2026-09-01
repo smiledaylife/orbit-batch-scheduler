@@ -4,7 +4,7 @@ import java.io.Serializable;
 
 /**
  * 统一 HTTP RESTful API 响应包装对象。
- * <p>用于调度中心与执行器、以及调度中心与前端/运维 API 之间的标准交互格式。
+ * 用于调度中心与执行器、以及调度中心与前端/运维 API 之间的标准交互格式。
  *
  * @param <T> 业务响应数据载荷类型
  */

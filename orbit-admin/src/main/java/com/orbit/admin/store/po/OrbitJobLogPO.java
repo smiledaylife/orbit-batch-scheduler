@@ -1,74 +1,56 @@
-package com.orbit.core.model;
+package com.orbit.admin.store.po;
+
+import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableId;
+import com.baomidou.mybatisplus.annotation.TableName;
 
 import java.io.Serializable;
 import java.util.Date;
 
 /**
- * 任务执行日志实体。
- * 用于记录每次任务调度派发的执行明细、选中的执行器节点、执行结果与耗时。
+ * 调度执行日志表 {@code orbit_job_log} 的持久化实体（PO）。
+ * 仅在调度中心持久层使用；对外协议模型见 {@code com.orbit.core.model.JobLog}。
  */
-public class JobLog implements Serializable {
+@TableName("orbit_job_log")
+public class OrbitJobLogPO implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
-    /**
-     * 日志主键自增 ID
-     */
+    /** 主键自增 ID */
+    @TableId(value = "id", type = IdType.AUTO)
     private Long id;
 
-    /**
-     * 全局调度日志跟踪 ID（UUID 生成，单次调度链路唯一）
-     */
+    /** 单次调度链路唯一追踪 ID（UUID） */
     private String logId;
 
-    /**
-     * 关联的任务 ID（JobInfo.id）
-     */
+    /** 关联任务 ID */
     private Long jobId;
 
-    /**
-     * 关联的任务名称
-     */
+    /** 关联任务名称 */
     private String jobName;
 
-    /**
-     * 关联的执行器应用名称
-     */
+    /** 关联执行器应用名 */
     private String appName;
 
-    /**
-     * 触发的 JobHandler 处理函数名
-     */
+    /** 触发的 Handler 名 */
     private String handler;
 
-    /**
-     * 实际派发执行的目标执行器地址（如 http://10.0.1.5:8081）
-     */
+    /** 实际派发的执行器地址 */
     private String executorAddress;
 
-    /**
-     * 执行状态：RUNNING（执行中）、SUCCESS（执行成功）、FAILED（执行失败）
-     */
+    /** 执行状态：RUNNING / SUCCESS / FAILED */
     private String status;
 
-    /**
-     * 执行结果信息或异常错误堆栈摘要（超长自动截断保存）
-     */
+    /** 执行结果或异常摘要（超长截断） */
     private String message;
 
-    /**
-     * 执行耗时（毫秒）
-     */
-    private long costMs;
+    /** 执行耗时（毫秒） */
+    private Long costMs;
 
-    /**
-     * 调度触发开始时间
-     */
+    /** 触发开始时间 */
     private Date startTime;
 
-    /**
-     * 调度执行结束时间
-     */
+    /** 执行结束时间 */
     private Date endTime;
 
     public Long getId() {
@@ -143,11 +125,11 @@ public class JobLog implements Serializable {
         this.message = message;
     }
 
-    public long getCostMs() {
+    public Long getCostMs() {
         return costMs;
     }
 
-    public void setCostMs(long costMs) {
+    public void setCostMs(Long costMs) {
         this.costMs = costMs;
     }
 

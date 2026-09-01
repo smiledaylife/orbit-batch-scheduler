@@ -6,7 +6,7 @@ import java.util.List;
 
 /**
  * 执行器注册 / 心跳上报请求实体。
- * <p>执行器启动或周期性心跳时，向调度中心 /orbit/admin/registry 发送此实体，
+ * 执行器启动或周期性心跳时，向调度中心 /orbit/admin/registry 发送此实体，
  * 声明自身的应用名、通信网络地址、支持的 JobHandler 列表以及安全访问凭证。
  */
 public class RegistryRequest implements Serializable {

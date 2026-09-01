@@ -11,15 +11,15 @@ import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * 示例业务任务处理类（JobHandler 集合）。
- * <p>业务方在执行器工程中定义具体的处理函数，使用 {@link OrbitJob} 声明唯一的 Handler 名称，
+ * 业务方在执行器工程中定义具体的处理函数，使用 {@link OrbitJob} 声明唯一的 Handler 名称，
  * 由调度中心通过 Cron 表达式或手动触发执行。
  *
- * <p>支持的方法入参类型包括：
- * <ul>
- *   <li>{@link JobContext}：推荐方式，包含任务 ID、任务名、日志 ID 及业务参数</li>
- *   <li>{@link Map}：直接获取入参键值对</li>
- *   <li>无参：适用于不需要参数的简单批处理或清理任务</li>
- * </ul>
+ * 支持的方法入参类型包括：
+ * 
+ *   - {@link JobContext}：推荐方式，包含任务 ID、任务名、日志 ID 及业务参数
+ *   - {@link Map}：直接获取入参键值对
+ *   - 无参：适用于不需要参数的简单批处理或清理任务
+ * 
  */
 @Component
 public class DemoJobs {

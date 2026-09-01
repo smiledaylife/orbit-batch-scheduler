@@ -4,7 +4,7 @@ import java.io.Serializable;
 
 /**
  * 任务执行结果响应实体。
- * <p>执行器执行完具体的 @OrbitJob 方法后，将结果封装并同步返回给调度中心。
+ * 执行器执行完具体的 @OrbitJob 方法后，将结果封装并同步返回给调度中心。
  */
 public class TriggerResult implements Serializable {
 

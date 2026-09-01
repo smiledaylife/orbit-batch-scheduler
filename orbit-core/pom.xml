@@ -11,6 +11,12 @@
     <artifactId>orbit-core</artifactId>
     <name>Orbit :: Core</name>
     <description>调度中心与执行器共享协议、模型</description>
+
+    <properties>
+        <!-- 共享模型保持 Java 8 字节码与 API，业务方可在 JRE 8 使用 -->
+        <maven.compiler.release>8</maven.compiler.release>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>

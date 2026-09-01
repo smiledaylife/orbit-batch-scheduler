@@ -12,7 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 /**
  * Quartz 统一调度触发任务类。
- * <p>所有注册到 Quartz 的定时任务均统一关联此 Job 实现类。
+ * 所有注册到 Quartz 的定时任务均统一关联此 Job 实现类。
  * 当 Cron 触发时，本类根据任务名称从数据库拉取最新任务状态，并委托给 {@link JobService#dispatch}
  * 进行路由选择和远程 HTTP 派发。
  */

@@ -14,13 +14,13 @@ import org.springframework.web.client.RestTemplate;
 
 /**
  * 调度中心向执行器派发任务的 HTTP 通信客户端。
- * <p>核心职责：
- * <ul>
- *   <li>负责调用执行器暴露的 {@code POST /orbit/executor/run} 接口；</li>
- *   <li>动态适配不同任务指定的读取超时时间（ReadTimeout）；</li>
- *   <li>携带鉴权安全令牌（{@code X-Orbit-Token}）；</li>
- *   <li>捕获网络连通性异常、超时异常，并优雅封装为失败的 {@link TriggerResult}。</li>
- * </ul>
+ * 核心职责：
+ * 
+ *   - 负责调用执行器暴露的 {@code POST /orbit/executor/run} 接口；
+ *   - 动态适配不同任务指定的读取超时时间（ReadTimeout）；
+ *   - 携带鉴权安全令牌（{@code X-Orbit-Token}）；
+ *   - 捕获网络连通性异常、超时异常，并优雅封装为失败的 {@link TriggerResult}。
+ * 
  */
 @Component
 public class ExecutorClient {

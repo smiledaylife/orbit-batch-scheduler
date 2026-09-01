@@ -17,13 +17,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 执行器生命周期管理与心跳自注册启动器。
- * <p>核心职责：
- * <ul>
- *   <li>在 Spring 容器启动完成并且内嵌 Web 容器就绪后，解析当前执行器的可访问地址与节点标识；</li>
- *   <li>向调度中心发送首次上线注册请求，并开启定时线程池周期性上报心跳维持在线状态；</li>
- *   <li>在 Spring 容器关闭（优雅停机）时，注销心跳定时任务并向调度中心主动发起下线通知；</li>
- *   <li>自动感知应用的实际监听端口（{@code server.port}），无需用户显式配置 {@code orbit.executor.port}。</li>
- * </ul>
+ * 核心职责：
+ * 
+ *   - 在 Spring 容器启动完成并且内嵌 Web 容器就绪后，解析当前执行器的可访问地址与节点标识；
+ *   - 向调度中心发送首次上线注册请求，并开启定时线程池周期性上报心跳维持在线状态；
+ *   - 在 Spring 容器关闭（优雅停机）时，注销心跳定时任务并向调度中心主动发起下线通知；
+ *   - 自动感知应用的实际监听端口（{@code server.port}），无需用户显式配置 {@code orbit.executor.port}。
+ * 
  */
 public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, ApplicationListener<WebServerInitializedEvent> {
 
@@ -210,14 +210,13 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
 
     /**
      * 解析执行器对外暴露的访问基地址（Base URL）
-     * <p>解析优先级规则：
-     * <ol>
-     *   <li>显式配置：若显式配置了 {@code orbit.executor.address}（如 K8s Service 域名），直接使用该地址；</li>
-     *   <li>云原生环境：若环境变量中存在 {@code POD_IP}，拼接为 {@code http://${POD_IP}:${port}}；</li>
-     *   <li>本地网卡探测：通过 {@link InetAddress#getLocalHost()} 获取本机有效 IP 并拼接端口；</li>
-     *   <li>兜底方案：使用 {@code http://127.0.0.1:${port}}。</li>
-     * </ol>
-     *
+     * 解析优先级规则：
+     * 
+     *   - 显式配置：若显式配置了 {@code orbit.executor.address}（如 K8s Service 域名），直接使用该地址；
+     *   - 云原生环境：若环境变量中存在 {@code POD_IP}，拼接为 {@code http://${POD_IP}:${port}}；
+     *   - 本地网卡探测：通过 {@link InetAddress#getLocalHost()} 获取本机有效 IP 并拼接端口；
+     *   - 兜底方案：使用 {@code http://127.0.0.1:${port}}。
+     * 
      * @return 执行器对外访问基地址
      */
     private String resolveAddress() {
@@ -252,15 +251,14 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
 
     /**
      * 解析执行器自身通信端口。
-     * <p>默认直接继承业务应用的 {@code server.port}，无需显式配置。
-     * <p>解析优先级规则：
-     * <ol>
-     *   <li>显式配置覆盖：若配置了 {@code orbit.executor.port} 且大于 0，优先采用该端口（适用于 Docker 宿主机端口映射场景）；</li>
-     *   <li>Web 容器运行期端口：若内嵌 Web 容器已就绪（捕获到 WebServerInitializedEvent），获取容器实际监听的本地端口（完美兼容 server.port=0 随机端口）；</li>
-     *   <li>Spring 环境配置：从 Spring Environment 中读取 {@code server.port} 配置项；</li>
-     *   <li>默认兜底：若均无法获取，则兜底采用 8080（Spring Boot 官方默认 Web 端口）。</li>
-     * </ol>
-     *
+     * 默认直接继承业务应用的 {@code server.port}，无需显式配置。
+     * 解析优先级规则：
+     * 
+     *   - 显式配置覆盖：若配置了 {@code orbit.executor.port} 且大于 0，优先采用该端口（适用于 Docker 宿主机端口映射场景）；
+     *   - Web 容器运行期端口：若内嵌 Web 容器已就绪（捕获到 WebServerInitializedEvent），获取容器实际监听的本地端口（完美兼容 server.port=0 随机端口）；
+     *   - Spring 环境配置：从 Spring Environment 中读取 {@code server.port} 配置项；
+     *   - 默认兜底：若均无法获取，则兜底采用 8080（Spring Boot 官方默认 Web 端口）。
+     * 
      * @return 执行器通信端口
      */
     private int resolvePort() {
@@ -288,14 +286,13 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
 
     /**
      * 解析执行器节点唯一标识符（Node ID）
-     * <p>解析优先级规则：
-     * <ol>
-     *   <li>显式配置：若配置了 {@code orbit.executor.node-id}，直接使用；</li>
-     *   <li>云原生环境：读取环境变量 {@code POD_NAME}；</li>
-     *   <li>本地主机名：通过 {@link InetAddress#getLocalHost()} 获取 HostName；</li>
-     *   <li>兜底方案：生成带时间戳的临时标识 {@code executor-${timestamp}}。</li>
-     * </ol>
-     *
+     * 解析优先级规则：
+     * 
+     *   - 显式配置：若配置了 {@code orbit.executor.node-id}，直接使用；
+     *   - 云原生环境：读取环境变量 {@code POD_NAME}；
+     *   - 本地主机名：通过 {@link InetAddress#getLocalHost()} 获取 HostName；
+     *   - 兜底方案：生成带时间戳的临时标识 {@code executor-${timestamp}}。
+     * 
      * @return 节点唯一标识
      */
     private String resolveNodeId() {

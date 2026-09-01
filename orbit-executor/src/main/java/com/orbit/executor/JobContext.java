@@ -6,7 +6,7 @@ import java.util.Map;
 
 /**
  * 任务执行上下文对象。
- * <p>调度中心在派发任务时，会将任务元数据（任务 ID、任务名称、日志追踪 ID）
+ * 调度中心在派发任务时，会将任务元数据（任务 ID、任务名称、日志追踪 ID）
  * 以及合并后的动态参数封装进此对象，并作为参数传递给带有 {@link com.orbit.executor.annotation.OrbitJob} 注解的业务执行函数。
  */
 public class JobContext {

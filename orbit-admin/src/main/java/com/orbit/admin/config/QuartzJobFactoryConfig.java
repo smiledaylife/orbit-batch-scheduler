@@ -8,7 +8,7 @@ import org.springframework.scheduling.quartz.SpringBeanJobFactory;
 
 /**
  * Quartz 与 Spring IoC 容器集成配置类。
- * <p>默认情况下 Quartz 实例化的 Job 并不受 Spring 容器托管，无法直接使用 {@code @Autowired} 注入 Spring Bean。
+ * 默认情况下 Quartz 实例化的 Job 并不受 Spring 容器托管，无法直接使用 {@code @Autowired} 注入 Spring Bean。
  * 本配置通过自定义 {@link SpringBeanJobFactory}，使 Quartz 任务类（如 {@link com.orbit.admin.quartz.OrbitQuartzJob}）
  * 能够自动注入 {@link com.orbit.admin.service.JobService} 等 Spring 服务组件。
  */
