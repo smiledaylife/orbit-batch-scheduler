@@ -42,6 +42,10 @@
           注意：整库 reactor 构建需使用 JDK 11+（admin 引用 Quartz 2.5，其 class 文件版本为 55，JDK 8 无法编译）。
         -->
         <quartz.version>2.5.2</quartz.version>
+        <!-- 持久化技术栈：Druid 连接池 + MyBatis + MyBatis-Plus -->
+        <druid.version>1.2.8</druid.version>
+        <mybatis.version>3.5.19</mybatis.version>
+        <mybatis-plus.version>3.5.7</mybatis-plus.version>
     </properties>
 
     <dependencyManagement>
@@ -55,6 +59,29 @@
                 <groupId>com.orbit</groupId>
                 <artifactId>orbit-executor</artifactId>
                 <version>${project.version}</version>
+            </dependency>
+            <!-- 固定 MyBatis 核心版本（MyBatis-Plus 3.5.7 传递的是 3.5.16，这里统一对齐到 3.5.19） -->
+            <dependency>
+                <groupId>org.mybatis</groupId>
+                <artifactId>mybatis</artifactId>
+                <version>${mybatis.version}</version>
+            </dependency>
+            <!-- Druid 连接池 -->
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>druid-spring-boot-starter</artifactId>
+                <version>${druid.version}</version>
+            </dependency>
+            <!-- MyBatis-Plus -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-boot-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-boot-starter-test</artifactId>
+                <version>${mybatis-plus.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

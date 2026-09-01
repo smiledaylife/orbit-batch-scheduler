@@ -1,17 +1,20 @@
 package com.orbit.admin.store;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.orbit.admin.store.mapper.OrbitJobLogMapper;
+import com.orbit.admin.store.mapper.OrbitJobMapper;
+import com.orbit.admin.store.po.OrbitJobLogPO;
+import com.orbit.admin.store.po.OrbitJobPO;
 import com.orbit.core.model.JobInfo;
 import com.orbit.core.model.JobLog;
 import com.orbit.core.model.PageResult;
-import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
-import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
-import java.sql.PreparedStatement;
-import java.sql.Timestamp;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,132 +22,100 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * 任务与日志持久化存储层（JDBC 实现）。
- * <p>兼容多种关系型数据库（PostgreSQL / openGauss / GaussDB / H2），采用 ANSI SQL 标准语法：
+ * 任务与日志持久化存储层（MyBatis-Plus 实现）。
+ * <p>技术栈：Druid 连接池 + MyBatis-Plus（{@link com.baomidou.mybatisplus.core.mapper.BaseMapper}）。
+ * <p>设计说明：
  * <ul>
- *   <li>任务定义表 {@code orbit_job}：支持并发乐观锁更新版本号控制（version）；</li>
- *   <li>调度日志表 {@code orbit_job_log}：支持全链路追踪日志记录与状态更新；</li>
- *   <li>提供高效分页查询、模糊检索与防超长字符串保护。</li>
+ *   <li>对外暴露/返回的是 {@code orbit-core} 的协议模型（{@link JobInfo}/{@link JobLog}），
+ *       持久层内部使用 {@code po} 包下的实体（{@link OrbitJobPO}/{@link OrbitJobLogPO}），
+ *       二者在此处相互转换，保证共享协议模块不依赖任何 ORM 框架；</li>
+ *   <li>{@code orbit_job} 通过 {@code @Version} + 乐观锁插件实现并发更新控制；</li>
+ *   <li>{@code params} 以 JSON 字符串落库；日志 {@code message} 超长截断；</li>
+ *   <li>分页依赖 {@link com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor}。</li>
  * </ul>
  */
 @Repository
 public class JobStore {
 
-    private final JdbcTemplate jdbc;
+    /** params 列宽（与 schema.sql 一致） */
+    private static final int PARAMS_MAX_LEN = 2000;
+    /** description 列宽（与 schema.sql 一致） */
+    private static final int DESC_MAX_LEN = 256;
+    /** message 列宽（与 schema.sql 一致） */
+    private static final int MESSAGE_MAX_LEN = 2000;
+    /** 默认超时（秒） */
+    private static final int DEFAULT_TIMEOUT_SECONDS = 300;
+    /** 每页最大记录数 */
+    private static final int MAX_PAGE_SIZE = 200;
+
+    private final OrbitJobMapper jobMapper;
+    private final OrbitJobLogMapper logMapper;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    /**
-     * orbit_job 表记录与 JobInfo 实体对象的 RowMapper 映射器
-     */
-    private final RowMapper<JobInfo> jobMapper = (rs, i) -> {
-        JobInfo j = new JobInfo();
-        j.setId(rs.getLong("id"));
-        j.setJobName(rs.getString("job_name"));
-        j.setDescription(rs.getString("description"));
-        j.setAppName(rs.getString("app_name"));
-        j.setHandler(rs.getString("handler"));
-        j.setCron(rs.getString("cron_expr"));
-        j.setParams(parseMap(rs.getString("params")));
-        int t = rs.getInt("timeout_seconds");
-        j.setTimeoutSeconds(rs.wasNull() ? 300 : t);
-        j.setRouteStrategy(rs.getString("route_strategy"));
-        j.setEnabled(rs.getBoolean("enabled"));
-        j.setVersion(rs.getInt("version"));
-        Timestamp c = rs.getTimestamp("created_at");
-        Timestamp u = rs.getTimestamp("updated_at");
-        j.setCreatedAt(c == null ? null : new Date(c.getTime()));
-        j.setUpdatedAt(u == null ? null : new Date(u.getTime()));
-        return j;
-    };
-
-    /**
-     * orbit_job_log 表记录与 JobLog 实体对象的 RowMapper 映射器
-     */
-    private final RowMapper<JobLog> logMapper = (rs, i) -> {
-        JobLog l = new JobLog();
-        l.setId(rs.getLong("id"));
-        l.setLogId(rs.getString("log_id"));
-        l.setJobId(rs.getLong("job_id"));
-        l.setJobName(rs.getString("job_name"));
-        l.setAppName(rs.getString("app_name"));
-        l.setHandler(rs.getString("handler"));
-        l.setExecutorAddress(rs.getString("executor_address"));
-        l.setStatus(rs.getString("status"));
-        l.setMessage(rs.getString("message"));
-        l.setCostMs(rs.getLong("cost_ms"));
-        Timestamp s = rs.getTimestamp("start_time");
-        Timestamp e = rs.getTimestamp("end_time");
-        l.setStartTime(s == null ? null : new Date(s.getTime()));
-        l.setEndTime(e == null ? null : new Date(e.getTime()));
-        return l;
-    };
-
-    public JobStore(JdbcTemplate jdbc) {
-        this.jdbc = jdbc;
+    public JobStore(OrbitJobMapper jobMapper, OrbitJobLogMapper logMapper) {
+        this.jobMapper = jobMapper;
+        this.logMapper = logMapper;
     }
 
     /**
-     * 查询所有任务列表（按任务名升序排列）
+     * 查询所有任务列表（按任务名升序）。
      *
      * @return 任务列表
      */
     public List<JobInfo> findAllJobs() {
-        return jdbc.query("SELECT * FROM orbit_job ORDER BY job_name", jobMapper);
+        List<OrbitJobPO> pos = jobMapper.selectList(
+                new LambdaQueryWrapper<OrbitJobPO>().orderByAsc(OrbitJobPO::getJobName));
+        return toJobs(pos);
     }
 
     /**
-     * 根据任务名称精确查询任务
+     * 根据任务名称精确查询任务。
      *
      * @param name 任务名称
      * @return 任务 Optional 包装
      */
     public Optional<JobInfo> findJobByName(String name) {
-        List<JobInfo> list = jdbc.query("SELECT * FROM orbit_job WHERE job_name = ?", jobMapper, name);
-        return list.isEmpty() ? Optional.<JobInfo>empty() : Optional.of(list.get(0));
+        OrbitJobPO po = jobMapper.selectOne(
+                new LambdaQueryWrapper<OrbitJobPO>().eq(OrbitJobPO::getJobName, name));
+        return Optional.ofNullable(po).map(this::toJob);
     }
 
     /**
-     * 根据任务主键 ID 查询任务
+     * 根据任务主键 ID 查询任务。
      *
      * @param id 任务主键 ID
      * @return 任务 Optional 包装
      */
     public Optional<JobInfo> findJobById(long id) {
-        List<JobInfo> list = jdbc.query("SELECT * FROM orbit_job WHERE id = ?", jobMapper, id);
-        return list.isEmpty() ? Optional.<JobInfo>empty() : Optional.of(list.get(0));
+        return Optional.ofNullable(jobMapper.selectById(id)).map(this::toJob);
     }
 
     /**
-     * 分页查询任务列表，支持按任务名进行模糊查询。
+     * 分页查询任务列表，支持按任务名模糊查询。
      *
-     * @param nameLike 任务名模糊匹配关键字（可为空）
+     * @param nameLike 任务名模糊关键字（可为空）
      * @param page     页码（从 1 开始）
      * @param size     每页大小（最小 1，最大 200）
      * @return 分页结果对象
      */
     public PageResult<JobInfo> pageJobs(String nameLike, int page, int size) {
         int p = Math.max(1, page);
-        int s = Math.min(200, Math.max(1, size));
-        int offset = (p - 1) * s;
-        Long total;
-        List<JobInfo> items;
+        int s = Math.min(MAX_PAGE_SIZE, Math.max(1, size));
 
-        if (nameLike == null || nameLike.trim().isEmpty()) {
-            total = jdbc.queryForObject("SELECT COUNT(*) FROM orbit_job", Long.class);
-            items = jdbc.query("SELECT * FROM orbit_job ORDER BY job_name LIMIT ? OFFSET ?", jobMapper, s, offset);
-        } else {
-            String like = "%" + nameLike.trim() + "%";
-            total = jdbc.queryForObject("SELECT COUNT(*) FROM orbit_job WHERE job_name LIKE ?", Long.class, like);
-            items = jdbc.query("SELECT * FROM orbit_job WHERE job_name LIKE ? ORDER BY job_name LIMIT ? OFFSET ?",
-                    jobMapper, like, s, offset);
+        LambdaQueryWrapper<OrbitJobPO> qw = new LambdaQueryWrapper<>();
+        if (nameLike != null && !nameLike.trim().isEmpty()) {
+            qw.like(OrbitJobPO::getJobName, nameLike.trim());
         }
-        return new PageResult<JobInfo>(p, s, total == null ? 0 : total, items);
+        qw.orderByAsc(OrbitJobPO::getJobName);
+
+        IPage<OrbitJobPO> result = jobMapper.selectPage(new Page<OrbitJobPO>(p, s), qw);
+        return new PageResult<JobInfo>(p, s, result.getTotal(), toJobs(result.getRecords()));
     }
 
     /**
      * 保存或更新任务。
-     * <p>若任务 ID 为 null 则执行 INSERT，并回填自增 ID 和版本号 1；
-     * 若任务 ID 已存在则执行带版本号校验的 UPDATE（乐观锁），若影响行数为 0 则抛出并发冲突异常。
+     * <p>ID 为 null 走 INSERT 并回填自增 ID、版本号 1；ID 已存在走带乐观锁的 UPDATE，
+     * 若影响行数为 0 说明发生并发冲突，抛出异常。
      *
      * @param job 待保存的任务对象
      * @return 保存成功后的任务对象
@@ -154,60 +125,59 @@ public class JobStore {
 
         // 入库前对可能超出列宽的字段做前置校验，避免触发 SQLException（列宽与 schema.sql 保持一致）
         String paramsJson = toJson(job.getParams());
-        if (paramsJson != null && paramsJson.length() > 2000) {
+        if (paramsJson != null && paramsJson.length() > PARAMS_MAX_LEN) {
             throw new IllegalArgumentException("params too long: serialized json length "
-                    + paramsJson.length() + " exceeds limit 2000");
+                    + paramsJson.length() + " exceeds limit " + PARAMS_MAX_LEN);
         }
-        if (job.getDescription() != null && job.getDescription().length() > 256) {
+        if (job.getDescription() != null && job.getDescription().length() > DESC_MAX_LEN) {
             throw new IllegalArgumentException("description too long: length "
-                    + job.getDescription().length() + " exceeds limit 256");
+                    + job.getDescription().length() + " exceeds limit " + DESC_MAX_LEN);
         }
 
-        // 1. 新增操作
+        // 1. 新增
         if (job.getId() == null) {
-            KeyHolder kh = new GeneratedKeyHolder();
-            jdbc.update(con -> {
-                PreparedStatement ps = con.prepareStatement(
-                        "INSERT INTO orbit_job (job_name, description, app_name, handler, cron_expr, params, " +
-                                "timeout_seconds, route_strategy, enabled, version, created_at, updated_at) " +
-                                "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
-                        new String[]{"id"});
-                ps.setString(1, job.getJobName());
-                ps.setString(2, blankToNull(job.getDescription()));
-                ps.setString(3, job.getAppName());
-                ps.setString(4, job.getHandler());
-                ps.setString(5, blankToNull(job.getCron()));
-                ps.setString(6, paramsJson);
-                ps.setInt(7, job.getTimeoutSeconds() <= 0 ? 300 : job.getTimeoutSeconds());
-                ps.setString(8, blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy());
-                ps.setBoolean(9, job.isEnabled());
-                ps.setTimestamp(10, new Timestamp(now.getTime()));
-                ps.setTimestamp(11, new Timestamp(now.getTime()));
-                return ps;
-            }, kh);
-            Number key = kh.getKey();
-            if (key != null) {
-                job.setId(key.longValue());
-            }
+            OrbitJobPO po = new OrbitJobPO();
+            po.setJobName(job.getJobName());
+            po.setDescription(blankToNull(job.getDescription()));
+            po.setAppName(job.getAppName());
+            po.setHandler(job.getHandler());
+            po.setCronExpr(blankToNull(job.getCron()));
+            po.setParams(paramsJson);
+            po.setTimeoutSeconds(job.getTimeoutSeconds() <= 0 ? DEFAULT_TIMEOUT_SECONDS : job.getTimeoutSeconds());
+            po.setRouteStrategy(blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy());
+            po.setEnabled(job.isEnabled());
+            po.setVersion(1);
+            po.setCreatedAt(now);
+            po.setUpdatedAt(now);
+            jobMapper.insert(po);
+
+            job.setId(po.getId());
             job.setVersion(1);
             job.setCreatedAt(now);
             job.setUpdatedAt(now);
             return job;
         }
 
-        // 2. 更新操作（带乐观锁 version 比对）
-        int rows = jdbc.update(
-                "UPDATE orbit_job SET description=?, app_name=?, handler=?, cron_expr=?, params=?, " +
-                        "timeout_seconds=?, route_strategy=?, enabled=?, version=version+1, updated_at=? " +
-                        "WHERE id=? AND version=?",
-                blankToNull(job.getDescription()), job.getAppName(), job.getHandler(),
-                blankToNull(job.getCron()), paramsJson,
-                job.getTimeoutSeconds() <= 0 ? 300 : job.getTimeoutSeconds(),
-                blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy(),
-                job.isEnabled(), new Timestamp(now.getTime()),
-                job.getId(), job.getVersion());
+        // 2. 更新（显式 set 所有列，乐观锁版本号由 @Version 插件自动拼接 WHERE version=? 并 +1）
+        OrbitJobPO po = new OrbitJobPO();
+        po.setId(job.getId());
+        po.setVersion(job.getVersion());
+        LambdaUpdateWrapper<OrbitJobPO> uw = new LambdaUpdateWrapper<OrbitJobPO>()
+                .eq(OrbitJobPO::getId, job.getId())
+                .set(OrbitJobPO::getDescription, blankToNull(job.getDescription()))
+                .set(OrbitJobPO::getAppName, job.getAppName())
+                .set(OrbitJobPO::getHandler, job.getHandler())
+                .set(OrbitJobPO::getCronExpr, blankToNull(job.getCron()))
+                .set(OrbitJobPO::getParams, paramsJson)
+                .set(OrbitJobPO::getTimeoutSeconds,
+                        job.getTimeoutSeconds() <= 0 ? DEFAULT_TIMEOUT_SECONDS : job.getTimeoutSeconds())
+                .set(OrbitJobPO::getRouteStrategy,
+                        blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy())
+                .set(OrbitJobPO::getEnabled, job.isEnabled())
+                .set(OrbitJobPO::getUpdatedAt, now);
 
-        // 若更新受影响行数为 0，说明版本号已被其他请求抢先递增
+        // 乐观锁实体（携带 @Version 字段）随 update 传入，插件会追加 version 条件
+        int rows = jobMapper.update(po, uw);
         if (rows == 0) {
             throw new IllegalStateException("job concurrent update, please retry");
         }
@@ -217,53 +187,45 @@ public class JobStore {
     }
 
     /**
-     * 根据任务名称物理删除任务记录
+     * 根据任务名称物理删除任务记录。
      *
      * @param name 任务名称
      * @return 是否成功删除
      */
     public boolean deleteJob(String name) {
-        return jdbc.update("DELETE FROM orbit_job WHERE job_name = ?", name) > 0;
+        return jobMapper.delete(new LambdaQueryWrapper<OrbitJobPO>().eq(OrbitJobPO::getJobName, name)) > 0;
     }
 
     /**
-     * 统计系统总任务数量
+     * 统计系统总任务数量。
      *
      * @return 任务总数
      */
     public long countJobs() {
-        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM orbit_job", Long.class);
-        return n == null ? 0 : n;
+        return jobMapper.selectCount(null);
     }
 
     /**
-     * 插入一条新的调度任务执行日志（初始为 RUNNING 状态）。
+     * 插入一条新的调度执行日志（初始为 RUNNING 状态）。
      *
      * @param log 日志实体
      */
     public void insertLog(JobLog log) {
-        KeyHolder kh = new GeneratedKeyHolder();
-        jdbc.update(con -> {
-            PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO orbit_job_log (log_id, job_id, job_name, app_name, handler, executor_address, " +
-                            "status, message, cost_ms, start_time, end_time) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    new String[]{"id"});
-            ps.setString(1, log.getLogId());
-            ps.setObject(2, log.getJobId());
-            ps.setString(3, log.getJobName());
-            ps.setString(4, log.getAppName());
-            ps.setString(5, log.getHandler());
-            ps.setString(6, log.getExecutorAddress());
-            ps.setString(7, log.getStatus());
-            ps.setString(8, abbreviate(log.getMessage()));
-            ps.setLong(9, log.getCostMs());
-            ps.setTimestamp(10, log.getStartTime() == null ? null : new Timestamp(log.getStartTime().getTime()));
-            ps.setTimestamp(11, log.getEndTime() == null ? null : new Timestamp(log.getEndTime().getTime()));
-            return ps;
-        }, kh);
-        Number key = kh.getKey();
-        if (key != null) {
-            log.setId(key.longValue());
+        OrbitJobLogPO po = new OrbitJobLogPO();
+        po.setLogId(log.getLogId());
+        po.setJobId(log.getJobId() == null ? null : log.getJobId());
+        po.setJobName(log.getJobName());
+        po.setAppName(log.getAppName());
+        po.setHandler(log.getHandler());
+        po.setExecutorAddress(log.getExecutorAddress());
+        po.setStatus(log.getStatus());
+        po.setMessage(abbreviate(log.getMessage()));
+        po.setCostMs(log.getCostMs());
+        po.setStartTime(log.getStartTime());
+        po.setEndTime(log.getEndTime());
+        logMapper.insert(po);
+        if (po.getId() != null) {
+            log.setId(po.getId());
         }
     }
 
@@ -277,13 +239,18 @@ public class JobStore {
      * @param message 响应或异常信息摘要
      */
     public void finishLog(String logId, String status, String address, long costMs, String message) {
-        jdbc.update(
-                "UPDATE orbit_job_log SET status=?, executor_address=?, cost_ms=?, message=?, end_time=? WHERE log_id=?",
-                status, address, costMs, abbreviate(message), new Timestamp(System.currentTimeMillis()), logId);
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .eq(OrbitJobLogPO::getLogId, logId)
+                .set(OrbitJobLogPO::getStatus, status)
+                .set(OrbitJobLogPO::getExecutorAddress, address)
+                .set(OrbitJobLogPO::getCostMs, costMs)
+                .set(OrbitJobLogPO::getMessage, abbreviate(message))
+                .set(OrbitJobLogPO::getEndTime, new Date());
+        logMapper.update(null, uw);
     }
 
     /**
-     * 分页查询调度日志列表。
+     * 分页查询调度日志列表（按 ID 倒序，即最新在前）。
      *
      * @param jobName 任务名称筛选（可为空）
      * @param page    页码
@@ -292,20 +259,65 @@ public class JobStore {
      */
     public PageResult<JobLog> pageLogs(String jobName, int page, int size) {
         int p = Math.max(1, page);
-        int s = Math.min(200, Math.max(1, size));
-        int offset = (p - 1) * s;
-        Long total;
-        List<JobLog> items;
+        int s = Math.min(MAX_PAGE_SIZE, Math.max(1, size));
 
-        if (jobName == null || jobName.trim().isEmpty()) {
-            total = jdbc.queryForObject("SELECT COUNT(*) FROM orbit_job_log", Long.class);
-            items = jdbc.query("SELECT * FROM orbit_job_log ORDER BY id DESC LIMIT ? OFFSET ?", logMapper, s, offset);
-        } else {
-            total = jdbc.queryForObject("SELECT COUNT(*) FROM orbit_job_log WHERE job_name = ?", Long.class, jobName);
-            items = jdbc.query("SELECT * FROM orbit_job_log WHERE job_name = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-                    logMapper, jobName, s, offset);
+        LambdaQueryWrapper<OrbitJobLogPO> qw = new LambdaQueryWrapper<>();
+        if (jobName != null && !jobName.trim().isEmpty()) {
+            qw.eq(OrbitJobLogPO::getJobName, jobName);
         }
-        return new PageResult<JobLog>(p, s, total == null ? 0 : total, items);
+        qw.orderByDesc(OrbitJobLogPO::getId);
+
+        IPage<OrbitJobLogPO> result = logMapper.selectPage(new Page<OrbitJobLogPO>(p, s), qw);
+        List<JobLog> items = new ArrayList<JobLog>();
+        for (OrbitJobLogPO po : result.getRecords()) {
+            items.add(toLog(po));
+        }
+        return new PageResult<JobLog>(p, s, result.getTotal(), items);
+    }
+
+    // ============================ PO <-> 模型 转换 ============================
+
+    private List<JobInfo> toJobs(List<OrbitJobPO> pos) {
+        List<JobInfo> list = new ArrayList<JobInfo>();
+        for (OrbitJobPO po : pos) {
+            list.add(toJob(po));
+        }
+        return list;
+    }
+
+    private JobInfo toJob(OrbitJobPO po) {
+        JobInfo j = new JobInfo();
+        j.setId(po.getId());
+        j.setJobName(po.getJobName());
+        j.setDescription(po.getDescription());
+        j.setAppName(po.getAppName());
+        j.setHandler(po.getHandler());
+        j.setCron(po.getCronExpr());
+        j.setParams(parseMap(po.getParams()));
+        j.setTimeoutSeconds(po.getTimeoutSeconds() == null ? DEFAULT_TIMEOUT_SECONDS : po.getTimeoutSeconds());
+        j.setRouteStrategy(po.getRouteStrategy() == null ? "ROUND" : po.getRouteStrategy());
+        j.setEnabled(Boolean.TRUE.equals(po.getEnabled()));
+        j.setVersion(po.getVersion() == null ? 0 : po.getVersion());
+        j.setCreatedAt(po.getCreatedAt());
+        j.setUpdatedAt(po.getUpdatedAt());
+        return j;
+    }
+
+    private JobLog toLog(OrbitJobLogPO po) {
+        JobLog l = new JobLog();
+        l.setId(po.getId());
+        l.setLogId(po.getLogId());
+        l.setJobId(po.getJobId() == null ? 0L : po.getJobId());
+        l.setJobName(po.getJobName());
+        l.setAppName(po.getAppName());
+        l.setHandler(po.getHandler());
+        l.setExecutorAddress(po.getExecutorAddress());
+        l.setStatus(po.getStatus());
+        l.setMessage(po.getMessage());
+        l.setCostMs(po.getCostMs() == null ? 0L : po.getCostMs());
+        l.setStartTime(po.getStartTime());
+        l.setEndTime(po.getEndTime());
+        return l;
     }
 
     /**
@@ -346,12 +358,12 @@ public class JobStore {
     }
 
     /**
-     * 截断超长字符串（防止数据库字段超长溢出，最大保留 2000 字符）
+     * 截断超长字符串（防止数据库字段超长溢出）
      */
     private static String abbreviate(String s) {
         if (s == null) {
             return null;
         }
-        return s.length() <= 2000 ? s : s.substring(0, 2000) + "...";
+        return s.length() <= MESSAGE_MAX_LEN ? s : s.substring(0, MESSAGE_MAX_LEN) + "...";
     }
 }
