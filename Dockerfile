@@ -2,7 +2,7 @@
 # 构建执行器示例（JRE 8）: docker build -t orbit-executor-sample:1.0.0 --build-arg MODULE=orbit-executor-sample .
 #
 # 说明：reactor 中 orbit-admin 依赖 Quartz 2.5.x（要求 JDK 11），因此构建阶段统一用 JDK 11；
-#      orbit-executor / orbit-core 通过 maven.compiler.release=8 产出 Java 8 字节码，运行阶段可使用 JRE 8 镜像。
+#      orbit-executor / orbit-core 编译级别为 8（各模块 POM 自管），产出 Java 8 字节码，运行阶段可使用 JRE 8 镜像。
 ARG MODULE=orbit-admin
 ARG BUILD_IMAGE=maven:3.9-eclipse-temurin-11
 ARG RUNTIME_IMAGE=eclipse-temurin:8-jre

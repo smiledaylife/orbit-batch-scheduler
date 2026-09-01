@@ -3,26 +3,86 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    <parent>
-        <groupId>com.orbit</groupId>
-        <artifactId>orbit-batch-scheduler</artifactId>
-        <version>1.0.0</version>
-    </parent>
+
+    <!-- 无 <parent>：本模块自管依赖与构建配置，可脱离 reactor 独立构建 -->
+    <groupId>com.orbit</groupId>
     <artifactId>orbit-admin</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
     <name>Orbit :: Admin (调度中心)</name>
     <description>调度中心：任务管理、Cron 触发、执行器注册、HTTP 派发</description>
 
     <properties>
-        <!-- 调度中心依赖 Quartz 2.5.x（class 版本 55），编译与运行均需 JDK 11+。
-             覆盖根 POM 的 1.8 设置；reactor 整体须使用 JDK 11+ 构建。 -->
-        <orbit.java.release>11</orbit.java.release>
-        <java.version>11</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <!-- 调度中心依赖 Quartz 2.5.x（class 文件版本 55），编译与运行均需 JDK 11+ -->
+        <java.release>11</java.release>
+        <spring-boot.version>2.7.18</spring-boot.version>
+        <quartz.version>2.5.2</quartz.version>
+        <druid.version>1.2.8</druid.version>
+        <mybatis.version>3.5.19</mybatis.version>
+        <mybatis-plus.version>3.5.7</mybatis-plus.version>
+        <opengauss.version>5.0.1</opengauss.version>
+        <maven-compiler-plugin.version>3.10.1</maven-compiler-plugin.version>
+        <maven-surefire-plugin.version>2.22.2</maven-surefire-plugin.version>
+        <maven-enforcer-plugin.version>3.4.1</maven-enforcer-plugin.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!--
+              注意顺序：本模块显式声明的版本必须写在 BOM import 之前才稳妥。
+              以 import 方式引入 BOM 时，无法像继承 spring-boot-starter-parent 那样
+              用 <properties>（如 quartz.version）覆盖 BOM 里的版本，必须在此显式锁定。
+            -->
+            <!-- Spring Boot 2.7 BOM 内置 Quartz 2.3.2，这里上抬到 2.5.2（要求 JDK 11+） -->
+            <dependency>
+                <groupId>org.quartz-scheduler</groupId>
+                <artifactId>quartz</artifactId>
+                <version>${quartz.version}</version>
+            </dependency>
+            <!-- MyBatis-Plus 3.5.7 传递的 mybatis 为 3.5.16，这里统一对齐到 3.5.19 -->
+            <dependency>
+                <groupId>org.mybatis</groupId>
+                <artifactId>mybatis</artifactId>
+                <version>${mybatis.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-boot-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-boot-starter-test</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>druid-spring-boot-starter</artifactId>
+                <version>${druid.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.opengauss</groupId>
+                <artifactId>opengauss-jdbc</artifactId>
+                <version>${opengauss.version}</version>
+            </dependency>
+            <!-- 版本收敛：Spring / Jackson / H2 / PostgreSQL / JUnit 等统一由 Boot BOM 管理 -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <dependency>
             <groupId>com.orbit</groupId>
             <artifactId>orbit-core</artifactId>
+            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -38,17 +98,16 @@
             <groupId>com.alibaba</groupId>
             <artifactId>druid-spring-boot-starter</artifactId>
         </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-quartz</artifactId>
-        </dependency>
         <!--
           Quartz 2.5.x 的连接池依赖（c3p0 / HikariCP）在其自身 POM 中为 provided 作用域。
           当前使用内存 JobStore（spring.quartz.job-store-type=memory），无需连接池；
           若日后切换为 JDBC JobStore（Quartz 集群），需显式引入 com.mchange:c3p0 或 com.zaxxer:HikariCP。
           slf4j-api 由 spring-boot-starter-logging 提供，满足 Quartz 2.5 的 slf4j-api(runtime) 要求。
         -->
-
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-quartz</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
@@ -66,7 +125,6 @@
         <dependency>
             <groupId>org.opengauss</groupId>
             <artifactId>opengauss-jdbc</artifactId>
-            <version>5.0.1</version>
             <scope>runtime</scope>
         </dependency>
         <dependency>
@@ -84,12 +142,11 @@
 
     <build>
         <plugins>
-            <!-- 调度中心依赖 Quartz 2.5.x（class 文件版本 55），JDK 8 无法编译/运行。
-                 提前失败并给出可读提示，避免出现 "invalid target release: 11" 之类的晦涩报错。 -->
+            <!-- Quartz 2.5.x 无法用 JDK 8 编译/运行：提前失败并给出可读提示 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
-                <version>3.4.1</version>
+                <version>${maven-enforcer-plugin.version}</version>
                 <executions>
                     <execution>
                         <id>enforce-jdk11-for-admin</id>
@@ -110,9 +167,34 @@
                 </executions>
             </plugin>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>${maven-compiler-plugin.version}</version>
+                <configuration>
+                    <!-- 本模块必然运行在 JDK 11+，可直接使用 release（JDK 9 引入的参数） -->
+                    <release>${java.release}</release>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${maven-surefire-plugin.version}</version>
+            </plugin>
+            <!-- 不再继承 spring-boot-starter-parent，需显式声明版本与 repackage 执行，才能产出可执行 jar -->
+            <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring-boot.version}</version>
+                <executions>
+                    <execution>
+                        <id>repackage</id>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
+
 </project>

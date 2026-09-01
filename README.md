@@ -35,6 +35,20 @@ orbit-batch-scheduler
 └── deploy/                 # docker-compose / k8s / SQL
 ```
 
+### 依赖与版本管理
+
+根 `pom.xml` **只是聚合器（aggregator）**，不作为任何模块的 `<parent>`，也不下发 `properties` /
+`dependencyManagement` / 插件配置。每个模块 POM 自治：
+
+- 各模块自行 `import` **`spring-boot-dependencies:2.7.18` BOM** 收敛 Spring / Jackson / JUnit / H2 等版本；
+- 各模块自行声明编译级别、插件版本（compiler / surefire / spring-boot-maven-plugin 均显式带 `<version>`）；
+- 模块间引用统一用 `${project.version}`，保证同版本号发布；
+- 任一模块都可脱离本仓库单独构建（`cd orbit-core && mvn install`），聚合构建（reactor）也照常可用。
+
+> ⚠️ 注意：BOM 以 `import` 方式引入时，**无法**像继承 `spring-boot-starter-parent` 那样用 `<properties>`
+> （如 `quartz.version`）覆盖版本。因此 `orbit-admin` 在自己的 `dependencyManagement` 中**显式锁定**
+> Quartz 2.5.2（Boot 2.7 BOM 内置 2.3.2）、MyBatis 3.5.19、MyBatis-Plus 3.5.7、Druid 1.2.8。
+
 ---
 
 ## 2. 本地 5 分钟跑通
