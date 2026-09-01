@@ -23,16 +23,16 @@ import java.util.Optional;
 
 /**
  * 任务与日志持久化存储层（MyBatis-Plus 实现）。
- * <p>技术栈：Druid 连接池 + MyBatis-Plus（{@link com.baomidou.mybatisplus.core.mapper.BaseMapper}）。
- * <p>设计说明：
- * <ul>
- *   <li>对外暴露/返回的是 {@code orbit-core} 的协议模型（{@link JobInfo}/{@link JobLog}），
+ * 技术栈：Druid 连接池 + MyBatis-Plus（{@link com.baomidou.mybatisplus.core.mapper.BaseMapper}）。
+ * 设计说明：
+ * 
+ *   - 对外暴露/返回的是 {@code orbit-core} 的协议模型（{@link JobInfo}/{@link JobLog}），
  *       持久层内部使用 {@code po} 包下的实体（{@link OrbitJobPO}/{@link OrbitJobLogPO}），
- *       二者在此处相互转换，保证共享协议模块不依赖任何 ORM 框架；</li>
- *   <li>{@code orbit_job} 通过 {@code @Version} + 乐观锁插件实现并发更新控制；</li>
- *   <li>{@code params} 以 JSON 字符串落库；日志 {@code message} 超长截断；</li>
- *   <li>分页依赖 {@link com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor}。</li>
- * </ul>
+ *       二者在此处相互转换，保证共享协议模块不依赖任何 ORM 框架；
+ *   - {@code orbit_job} 通过 {@code @Version} + 乐观锁插件实现并发更新控制；
+ *   - {@code params} 以 JSON 字符串落库；日志 {@code message} 超长截断；
+ *   - 分页依赖 {@link com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor}。
+ * 
  */
 @Repository
 public class JobStore {
@@ -114,7 +114,7 @@ public class JobStore {
 
     /**
      * 保存或更新任务。
-     * <p>ID 为 null 走 INSERT 并回填自增 ID、版本号 1；ID 已存在走带乐观锁的 UPDATE，
+     * ID 为 null 走 INSERT 并回填自增 ID、版本号 1；ID 已存在走带乐观锁的 UPDATE，
      * 若影响行数为 0 说明发生并发冲突，抛出异常。
      *
      * @param job 待保存的任务对象

@@ -9,7 +9,7 @@ import java.util.Date;
 
 /**
  * 调度执行日志表 {@code orbit_job_log} 的持久化实体（PO）。
- * <p>仅在调度中心持久层使用；对外协议模型见 {@code com.orbit.core.model.JobLog}。
+ * 仅在调度中心持久层使用；对外协议模型见 {@code com.orbit.core.model.JobLog}。
  */
 @TableName("orbit_job_log")
 public class OrbitJobLogPO implements Serializable {

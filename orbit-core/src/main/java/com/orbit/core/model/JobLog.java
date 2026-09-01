@@ -5,7 +5,7 @@ import java.util.Date;
 
 /**
  * 任务执行日志实体。
- * <p>用于记录每次任务调度派发的执行明细、选中的执行器节点、执行结果与耗时。
+ * 用于记录每次任务调度派发的执行明细、选中的执行器节点、执行结果与耗时。
  */
 public class JobLog implements Serializable {
 

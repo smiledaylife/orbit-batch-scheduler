@@ -12,9 +12,9 @@ import java.util.Date;
 
 /**
  * 任务定义表 {@code orbit_job} 的持久化实体（PO）。
- * <p>仅在调度中心持久层使用；对外协议模型见 {@code com.orbit.core.model.JobInfo}，
+ * 仅在调度中心持久层使用；对外协议模型见 {@code com.orbit.core.model.JobInfo}，
  * 二者通过 {@code JobStore} 做相互转换，保证 orbit-core 不依赖任何 ORM 框架。
- * <p>其中 {@code params} 以 JSON 字符串落库，{@code version} 为乐观锁版本号。
+ * 其中 {@code params} 以 JSON 字符串落库，{@code version} 为乐观锁版本号。
  */
 @TableName("orbit_job")
 public class OrbitJobPO implements Serializable {

@@ -14,7 +14,7 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * Orbit 执行器 Spring Boot 自动装配配置类。
- * <p>业务应用只需通过 Maven 引入 {@code orbit-executor} 依赖，在配置中开启
+ * 业务应用只需通过 Maven 引入 {@code orbit-executor} 依赖，在配置中开启
  * （默认开启 {@code orbit.executor.enabled: true}），即可自动装配任务注册表、心跳通信客户端和 HTTP 触发入口。
  */
 @Configuration

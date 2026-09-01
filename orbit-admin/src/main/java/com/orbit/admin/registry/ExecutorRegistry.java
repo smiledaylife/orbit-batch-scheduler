@@ -18,13 +18,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 调度中心执行器在线注册表（内存管理）。
- * <p>核心机制：
- * <ul>
- *   <li>基于 {@code appName|address} 作为全局唯一主键，支持高并发线程安全的节点心跳注册与状态刷新（Upsert）；</li>
- *   <li>支持心跳超时自动失效剔除（Eviction）；</li>
- *   <li>支持多副本实例的高效路由策略：轮询（ROUND）、随机（RANDOM）、首节点（FIRST）；</li>
- *   <li>天然适配 K8s Pod 动态扩缩容，滚动更新时无缝上线新 Pod 并摘除老 Pod。</li>
- * </ul>
+ * 核心机制：
+ * 
+ *   - 基于 {@code appName|address} 作为全局唯一主键，支持高并发线程安全的节点心跳注册与状态刷新（Upsert）；
+ *   - 支持心跳超时自动失效剔除（Eviction）；
+ *   - 支持多副本实例的高效路由策略：轮询（ROUND）、随机（RANDOM）、首节点（FIRST）；
+ *   - 天然适配 K8s Pod 动态扩缩容，滚动更新时无缝上线新 Pod 并摘除老 Pod。
+ * 
  */
 @Component
 public class ExecutorRegistry {
@@ -49,7 +49,7 @@ public class ExecutorRegistry {
 
     /**
      * 执行器上线注册与心跳刷新逻辑。
-     * <p>根据 appName 和 address 判定节点：若不存在则新增，若已存在则更新其最近心跳时间和支持的 Handlers 列表。
+     * 根据 appName 和 address 判定节点：若不存在则新增，若已存在则更新其最近心跳时间和支持的 Handlers 列表。
      *
      * @param req 执行器注册/心跳请求数据
      */

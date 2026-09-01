@@ -7,7 +7,7 @@ import java.util.Map;
 
 /**
  * 任务元数据定义模型。
- * <p>持久化存储于调度中心数据库（如 PostgreSQL / GaussDB / H2）的 orbit_job 表中，
+ * 持久化存储于调度中心数据库（如 PostgreSQL / GaussDB / H2）的 orbit_job 表中，
  * 并与 Quartz 的 JobDetail/Trigger 保持生命周期同步。
  */
 public class JobInfo implements Serializable {
@@ -56,11 +56,11 @@ public class JobInfo implements Serializable {
 
     /**
      * 多实例路由策略，支持：
-     * <ul>
-     *   <li>ROUND: 轮询（默认）</li>
-     *   <li>RANDOM: 随机</li>
-     *   <li>FIRST: 首个节点</li>
-     * </ul>
+     * 
+     *   - ROUND: 轮询（默认）
+     *   - RANDOM: 随机
+     *   - FIRST: 首个节点
+     * 
      */
     private String routeStrategy = "ROUND";
 

@@ -6,7 +6,7 @@ import java.util.Map;
 
 /**
  * 任务触发执行请求实体。
- * <p>调度中心根据定时调度或手动触发，通过 HTTP POST 方式调用执行器端 /orbit/executor/run 时透传的请求体。
+ * 调度中心根据定时调度或手动触发，通过 HTTP POST 方式调用执行器端 /orbit/executor/run 时透传的请求体。
  */
 public class TriggerRequest implements Serializable {
 

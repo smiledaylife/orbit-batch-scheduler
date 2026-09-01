@@ -5,7 +5,7 @@ import com.orbit.admin.store.po.OrbitJobPO;
 
 /**
  * 任务定义表 {@code orbit_job} 的 MyBatis-Plus Mapper。
- * <p>继承 {@link BaseMapper} 即拥有单表 CRUD；复杂查询通过 QueryWrapper/LambdaQueryWrapper 构建。
+ * 继承 {@link BaseMapper} 即拥有单表 CRUD；复杂查询通过 QueryWrapper/LambdaQueryWrapper 构建。
  */
 public interface OrbitJobMapper extends BaseMapper<OrbitJobPO> {
 }

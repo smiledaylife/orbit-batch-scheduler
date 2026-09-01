@@ -21,8 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link JobStore} 持久层切片测试（MyBatis-Plus + 内存 H2 + Druid）。
- * <p>验证：任务 CRUD、分页、JSON 参数存取、乐观锁并发冲突、日志插入/完成、长度校验。
- * <p>{@code @MybatisPlusTest} 默认事务回滚，测试间互不污染。
+ * 验证：任务 CRUD、分页、JSON 参数存取、乐观锁并发冲突、日志插入/完成、长度校验。
+ * {@code @MybatisPlusTest} 默认事务回滚，测试间互不污染。
  */
 @MybatisPlusTest
 // 不替换为默认嵌入式库，沿用 test/resources/application.yml 中 PostgreSQL 兼容模式的 H2（schema.sql 使用 BIGSERIAL）

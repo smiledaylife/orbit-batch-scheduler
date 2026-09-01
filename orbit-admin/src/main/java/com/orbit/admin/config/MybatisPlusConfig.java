@@ -10,12 +10,12 @@ import org.springframework.context.annotation.Configuration;
 
 /**
  * MyBatis-Plus 配置。
- * <p>核心职责：
- * <ul>
- *   <li>通过 {@link MapperScan} 扫描持久层 Mapper 接口（{@code com.orbit.admin.store.mapper}）；</li>
- *   <li>注册 {@link MybatisPlusInterceptor}，含分页插件（{@link PaginationInnerInterceptor}）
- *       与乐观锁插件（{@link OptimisticLockerInnerInterceptor}，配合实体上的 {@code @Version} 字段）。</li>
- * </ul>
+ * 核心职责：
+ * 
+ *   - 通过 {@link MapperScan} 扫描持久层 Mapper 接口（{@code com.orbit.admin.store.mapper}）；
+ *   - 注册 {@link MybatisPlusInterceptor}，含分页插件（{@link PaginationInnerInterceptor}）
+ *       与乐观锁插件（{@link OptimisticLockerInnerInterceptor}，配合实体上的 {@code @Version} 字段）。
+ * 
  * 数据库方言：H2 / PostgreSQL / openGauss(GaussDB) 均走 PostgreSQL 方言，统一指定 {@link DbType#POSTGRE_SQL}。
  */
 @Configuration
@@ -24,7 +24,7 @@ public class MybatisPlusConfig {
 
     /**
      * 注册 MyBatis-Plus 核心拦截器链。
-     * <p>注意：多 InnerInterceptor 时，分页插件需放在乐观锁插件之前（官方推荐顺序）。
+     * 注意：多 InnerInterceptor 时，分页插件需放在乐观锁插件之前（官方推荐顺序）。
      *
      * @return MyBatis-Plus 拦截器
      */

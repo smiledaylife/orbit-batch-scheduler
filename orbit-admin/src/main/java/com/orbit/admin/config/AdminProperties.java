@@ -5,7 +5,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * 调度中心配置属性类（对应配置前缀：{@code orbit.admin.*}）。
- * <p>涵盖调度中心鉴权令牌、执行器心跳超时阈值、派发超时控制以及 Quartz 分组和时区配置。
+ * 涵盖调度中心鉴权令牌、执行器心跳超时阈值、派发超时控制以及 Quartz 分组和时区配置。
  */
 @Component
 @ConfigurationProperties(prefix = "orbit.admin")
@@ -13,14 +13,14 @@ public class AdminProperties {
 
     /**
      * 安全访问令牌（Token）。
-     * <p>用于调度中心与执行器之间的鉴权认证：执行器注册/心跳，以及调度中心向执行器派发任务时进行双向校验。
+     * 用于调度中心与执行器之间的鉴权认证：执行器注册/心跳，以及调度中心向执行器派发任务时进行双向校验。
      * 为空时跳过鉴权。
      */
     private String accessToken = "";
 
     /**
      * 执行器心跳超时剔除时间（秒），默认为 90 秒。
-     * <p>调度中心后台任务将周期性扫描注册表，若节点的最近心跳时间距当前时间超过该阈值，
+     * 调度中心后台任务将周期性扫描注册表，若节点的最近心跳时间距当前时间超过该阈值，
      * 则判定该执行器实例失联并从内存注册表中剔除。
      */
     private int heartbeatTimeoutSeconds = 90;
@@ -32,7 +32,7 @@ public class AdminProperties {
 
     /**
      * 调度中心调用执行器时的全局默认数据读取超时时间（毫秒），默认为 300000ms（5分钟）。
-     * <p>若具体任务中单独配置了 {@code timeoutSeconds}，则优先以任务自身的超时配置为准。
+     * 若具体任务中单独配置了 {@code timeoutSeconds}，则优先以任务自身的超时配置为准。
      */
     private int readTimeoutMs = 300000;
 

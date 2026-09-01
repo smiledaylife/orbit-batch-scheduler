@@ -24,13 +24,13 @@ import java.util.Map;
 
 /**
  * 执行器对外暴露的 HTTP RESTful API 控制器。
- * <p>核心职责：
- * <ul>
- *   <li>接收调度中心派发的任务触发请求（{@code POST /orbit/executor/run}）；</li>
- *   <li>校验安全访问令牌（{@code X-Orbit-Token}）；</li>
- *   <li>定位并执行本地对应的 JobHandler，记录耗时并返回执行结果；</li>
- *   <li>提供当前节点在线信息与支持的 Handler 查询端点（{@code GET /orbit/executor/handlers}）。</li>
- * </ul>
+ * 核心职责：
+ * 
+ *   - 接收调度中心派发的任务触发请求（{@code POST /orbit/executor/run}）；
+ *   - 校验安全访问令牌（{@code X-Orbit-Token}）；
+ *   - 定位并执行本地对应的 JobHandler，记录耗时并返回执行结果；
+ *   - 提供当前节点在线信息与支持的 Handler 查询端点（{@code GET /orbit/executor/handlers}）。
+ * 
  */
 @RestController
 @RequestMapping("/orbit/executor")
@@ -139,7 +139,7 @@ public class ExecutorController {
 
     /**
      * 双向安全令牌校验逻辑。
-     * <p>若本地未配置 accessToken，则跳过校验；若配置了 accessToken，优先比对 Header 中的 Token，其次比对 Body 中的 Token。
+     * 若本地未配置 accessToken，则跳过校验；若配置了 accessToken，优先比对 Header 中的 Token，其次比对 Body 中的 Token。
      *
      * @param header Header 携带的令牌
      * @param body   Body 携带的令牌

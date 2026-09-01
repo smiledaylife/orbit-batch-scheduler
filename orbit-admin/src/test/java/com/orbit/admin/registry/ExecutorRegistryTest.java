@@ -16,12 +16,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * 执行器内存注册表单元测试。
- * <p>测试用例：
- * <ul>
- *   <li>节点注册与轮询（ROUND）负载均衡路由测试</li>
- *   <li>无节点时路由返回 null 测试</li>
- *   <li>节点主动下线注销测试</li>
- * </ul>
+ * 测试用例：
+ * 
+ *   - 节点注册与轮询（ROUND）负载均衡路由测试
+ *   - 无节点时路由返回 null 测试
+ *   - 节点主动下线注销测试
+ * 
  */
 class ExecutorRegistryTest {
 
