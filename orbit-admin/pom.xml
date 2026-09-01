@@ -15,7 +15,8 @@
     <properties>
         <!-- 调度中心依赖 Quartz 2.5.x（class 版本 55），编译与运行均需 JDK 11+。
              覆盖根 POM 的 1.8 设置；reactor 整体须使用 JDK 11+ 构建。 -->
-        <maven.compiler.release>11</maven.compiler.release>
+        <orbit.java.release>11</orbit.java.release>
+        <java.version>11</java.version>
     </properties>
 
     <dependencies>
@@ -83,6 +84,31 @@
 
     <build>
         <plugins>
+            <!-- 调度中心依赖 Quartz 2.5.x（class 文件版本 55），JDK 8 无法编译/运行。
+                 提前失败并给出可读提示，避免出现 "invalid target release: 11" 之类的晦涩报错。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.4.1</version>
+                <executions>
+                    <execution>
+                        <id>enforce-jdk11-for-admin</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[11,)</version>
+                                    <message>orbit-admin（调度中心）依赖 Quartz 2.5.x，必须使用 JDK 11 及以上构建。
+请将 JAVA_HOME 指向 JDK 11+ 后重试；若只需构建 Java 8 的 SDK 模块，可执行：
+  mvn clean package -DskipTests -pl orbit-core,orbit-executor,orbit-executor-sample</message>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

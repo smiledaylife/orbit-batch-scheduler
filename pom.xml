@@ -27,19 +27,22 @@
 
     <properties>
         <java.version>1.8</java.version>
-        <!-- 默认 release：SDK 侧（core/executor/sample）保持 Java 8；
-             orbit-admin 子模块覆盖为 11（Quartz 2.5 要求）。用 release 而非 source/target，
-             可同时限制字节码版本与可用 API，避免 JDK 11 编译产物误用 Java 9+ API。 -->
-        <maven.compiler.release>8</maven.compiler.release>
+        <!-- 目标字节码版本：SDK 侧（core/executor/sample）保持 Java 8；
+             orbit-admin 子模块覆盖为 11（Quartz 2.5 要求）。
+             注意：javac 的 release 参数是 JDK 9 才引入的，JDK 8 下会报「无效的标记」，
+             因此下方用 jdk9+ / jdk8 两个 profile 分别配置 release 与 source/target，
+             使 JDK 8 也能构建 SDK 模块（orbit-admin 仍需 JDK 11+，见其模块内 enforcer 检查）。 -->
+        <orbit.java.release>8</orbit.java.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <!--
           JDK 拓扑：
-          · orbit-admin（调度中心）：maven.compiler.release=11，需 JDK 11+ 构建/运行 —— Quartz 2.5.x 起最低要求 JDK 11。
-          · orbit-core / orbit-executor / orbit-executor-sample（业务 SDK）：maven.compiler.release=8，
+          · orbit-admin（调度中心）：orbit.java.release=11，需 JDK 11+ 构建/运行 —— Quartz 2.5.x 起最低要求 JDK 11。
+          · orbit-core / orbit-executor / orbit-executor-sample（业务 SDK）：orbit.java.release=8，
             产出 Java 8 字节码且限制仅使用 JDK 8 API，业务方可在 JRE 8 + Spring Boot 2.7 接入。
           admin 与 executor 之间仅通过 HTTP/JSON（orbit-core 的 POJO）通信，互不共享 JVM，
           因此 admin 跑 JRE 11、executor 跑 JRE 8 完全兼容。
-          注意：整库 reactor 构建需使用 JDK 11+（admin 引用 Quartz 2.5，其 class 文件版本为 55，JDK 8 无法编译）。
+          注意：整库 reactor 构建需使用 JDK 11+（admin 引用 Quartz 2.5，其 class 文件版本为 55，JDK 8 无法编译）；
+          JDK 8 环境下可只构建 SDK：mvn package -pl orbit-core,orbit-executor,orbit-executor-sample
         -->
         <quartz.version>2.5.2</quartz.version>
         <!-- 持久化技术栈：Druid 连接池 + MyBatis + MyBatis-Plus -->
@@ -85,5 +88,47 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <profiles>
+        <!-- JDK 9+：使用 compiler 的 release 参数，既限制字节码版本又限制可用 API（更严格，推荐） -->
+        <profile>
+            <id>compile-with-release</id>
+            <activation>
+                <jdk>[9,)</jdk>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <release>${orbit.java.release}</release>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- JDK 8：javac 8 不支持 release 参数，退回 source/target。
+             此时本机 JDK 即为 8，API 边界天然受限，效果等价。 -->
+        <profile>
+            <id>compile-with-source-target</id>
+            <activation>
+                <jdk>1.8</jdk>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <source>${orbit.java.release}</source>
+                            <target>${orbit.java.release}</target>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 
 </project>

@@ -14,7 +14,7 @@
 
     <properties>
         <!-- 共享模型保持 Java 8 字节码与 API，业务方可在 JRE 8 使用 -->
-        <maven.compiler.release>8</maven.compiler.release>
+        <orbit.java.release>8</orbit.java.release>
     </properties>
 
     <dependencies>

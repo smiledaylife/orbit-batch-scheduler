@@ -14,7 +14,7 @@
 
     <properties>
         <!-- 示例业务应用：JRE 8 可运行 -->
-        <maven.compiler.release>8</maven.compiler.release>
+        <orbit.java.release>8</orbit.java.release>
     </properties>
 
     <dependencies>

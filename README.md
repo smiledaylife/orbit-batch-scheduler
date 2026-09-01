@@ -40,9 +40,12 @@ orbit-batch-scheduler
 ## 2. 本地 5 分钟跑通
 
 ```bash
-# 构建（整个 reactor 需用 JDK 11+ 构建：admin 模块 release=11；
-#       executor/core/sample 模块 release=8，产物为 Java 8 字节码且仅用 JDK 8 API，可运行在 JRE 8）
+# 构建（整个 reactor 需用 JDK 11+ 构建：admin 模块编译级别 11；
+#       executor/core/sample 编译级别 8，产物为 Java 8 字节码，可运行在 JRE 8）
 mvn clean package -DskipTests
+
+# 若本机只有 JDK 8：admin 无法编译（Quartz 2.5 class 版本 55），只构建 SDK 模块即可
+mvn clean package -DskipTests -pl orbit-core,orbit-executor,orbit-executor-sample
 
 # 终端 1：调度中心 :8080（需 JRE 11+）
 java -jar orbit-admin/target/orbit-admin-1.0.0.jar

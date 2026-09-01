@@ -14,7 +14,7 @@
 
     <properties>
         <!-- 业务 SDK：严格保证 Java 8 字节码与 API，可在 JRE 8 + Spring Boot 2.7 运行 -->
-        <maven.compiler.release>8</maven.compiler.release>
+        <orbit.java.release>8</orbit.java.release>
     </properties>
 
     <dependencies>
