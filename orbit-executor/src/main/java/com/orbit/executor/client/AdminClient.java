@@ -1,7 +1,8 @@
-package com.orbit.executor;
+package com.orbit.executor.client;
 
 import com.orbit.core.model.ApiResult;
 import com.orbit.core.model.RegistryRequest;
+import com.orbit.executor.config.ExecutorProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
