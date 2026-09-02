@@ -175,11 +175,50 @@ public class OrderJobs {
 
 ## 5. 云原生部署
 
-> ⚠️ **高可用边界**：当前调度中心为**单实例**设计 —— 执行器注册表在内存、Quartz 默认 `job-store-type: memory`，
-> K8s 示例中 `/app/data` 使用 `emptyDir`（Pod 重建后 H2 任务数据丢失）。
-> 生产环境请：① 切换到 PostgreSQL / GaussDB（见下）；② 调度中心保持单副本，或自行扩展 Quartz JDBC JobStore 集群。
+**默认（单副本）**：调度中心使用内存 JobStore（`job-store-type: memory`）+ H2 文件库，开箱即用。
+此时**必须保持单副本** —— 多个副本各自持有一份 Quartz 调度器和一份内存执行器注册表，
+同一个 Cron 到点会被每个副本各触发一次，任务实际执行 N 次。
 
 **路由方式**：执行器心跳上报 `http://{POD_IP}:port`，调度中心直连 Pod IP 触发（与 XXL-JOB 一致），天然适配多副本。
+
+### 5.1 调度中心多副本（集群模式）
+
+需要高可用 / 水平扩容时启用 Quartz JDBC JobStore 集群，由 `QRTZ_LOCKS` 行锁保证
+**同一个 trigger 只被一个副本触发**（`SELECT * FROM QRTZ_LOCKS ... FOR UPDATE`），并附带故障自动接管。
+
+四项前置条件，缺一不可：
+
+| # | 条件 | 说明 |
+|---|---|---|
+| 1 | 建 11 张 `QRTZ_*` 表 | 执行 `deploy/sql/quartz-postgresql.sql`（PostgreSQL）或 `deploy/sql/quartz-gaussdb.sql`（openGauss / GaussDB）。脚本取自 Quartz v2.5.2 官方 DDL，`initialize-schema` 设为 `never`，Spring Boot 不会自动建表 |
+| 2 | 真实数据库 | 默认的 H2 文件库无法跨副本共享，K8s 里还挂 `emptyDir`（Pod 重建即丢数据）。换 PostgreSQL / GaussDB |
+| 3 | 启用 cluster profile | `--spring.profiles.active=cluster`（或环境变量 `SPRING_PROFILES_ACTIVE=cluster`），配置见 `orbit-admin/src/main/resources/application-cluster.yml` |
+| 4 | 时钟 NTP 同步 | Quartz 集群靠 `QRTZ_SCHEDULER_STATE` 的时间戳判断副本存活，时钟漂移会误判失联并触发重复的故障恢复 |
+
+```bash
+# 1. 建 Quartz 表（11 张 QRTZ_*）
+psql -U postgres -d orbit_admin -f deploy/sql/quartz-postgresql.sql
+# 2. 建业务表（orbit_job / orbit_job_log）—— 或交给 spring.sql.init 自动执行
+psql -U postgres -d orbit_admin -f deploy/sql/schema-postgresql.sql
+# 3. 启动（可多副本）
+java -jar orbit-admin.jar --spring.profiles.active=cluster
+```
+
+GaussDB 请把 `ORBIT_DB_URL` / `ORBIT_DB_DRIVER` 换成 openGauss 驱动，并将
+`ORBIT_QUARTZ_DELEGATE` 设为 `org.quartz.impl.jdbcjobstore.GaussDBDelegate`
+（M / Oracle 兼容模式则用 `StdJDBCDelegate`，DDL 改用官方 `tables_gauss_m_compatibility.sql`）。
+
+> **无需额外引入连接池**：Spring Boot 在 `job-store-type=jdbc` 时会调用
+> `schedulerFactoryBean.setDataSource(...)`，让 Quartz 直接复用 Spring 管理的 Druid 连接池，
+> 不走 Quartz 自己的 `org.quartz.dataSource.*`，因此不需要 c3p0 / HikariCP。
+
+> ⚠️ **还有一个容易踩的坑：执行器心跳寻址。**
+> 执行器注册表在**内存**中，且执行器 `AdminClient` 会遍历 `orbit.executor.admin-addresses`
+> 里逗号分隔的每个地址逐个上报。若只填普通 Service 名（如 `http://orbit-admin:8080`），
+> 负载均衡会把每次心跳投给**随机一个**副本，各副本的注册表都是残缺的，
+> 部分副本会持续报 `no online executor`。
+> 多副本下必须把**每个 admin 副本的地址显式列出**，这要求用 StatefulSet + Headless Service
+> 取得稳定 Pod DNS（`deploy/k8s/02-admin.yaml` 已附 Headless Service）。
 
 ```bash
 # 镜像（构建阶段统一用 JDK 11；运行阶段 admin=JRE 11，executor=JRE 8）

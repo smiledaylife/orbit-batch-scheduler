@@ -3,6 +3,7 @@ package com.orbit.admin.quartz;
 import com.orbit.admin.service.JobService;
 import com.orbit.admin.store.JobStore;
 import com.orbit.core.model.JobInfo;
+import org.quartz.DisallowConcurrentExecution;
 import org.quartz.Job;
 import org.quartz.JobExecutionContext;
 import org.quartz.JobExecutionException;
@@ -15,7 +16,14 @@ import org.springframework.beans.factory.annotation.Autowired;
  * 所有注册到 Quartz 的定时任务均统一关联此 Job 实现类。
  * 当 Cron 触发时，本类根据任务名称从数据库拉取最新任务状态，并委托给 {@link JobService#dispatch}
  * 进行路由选择和远程 HTTP 派发。
+ * <p>
+ * 标注 {@link DisallowConcurrentExecution} 的原因：{@code dispatch} 是同步阻塞调用，
+ * 最长会占住工作线程 {@code timeoutSeconds} 秒（上限见 {@code orbit.admin.max-timeout-seconds}）。
+ * Quartz 默认允许同一 JobDetail 并发执行，因此一个「cron 间隔短于单次执行耗时」的任务
+ * 会不断堆叠自身的执行实例，最终耗尽线程池。加上该注解后，
+ * 上一次未结束时本次触发会被阻塞（CronTrigger 配合 misfire doNothing 直接跳过），不再堆叠。
  */
+@DisallowConcurrentExecution
 public class OrbitQuartzJob implements Job {
 
     /**

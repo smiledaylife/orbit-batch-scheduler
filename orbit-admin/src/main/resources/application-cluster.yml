@@ -1,0 +1,74 @@
+# ============================================================================
+# 调度中心「集群模式」配置（多副本 admin）
+#
+# 启用方式：
+#   java -jar orbit-admin.jar --spring.profiles.active=cluster
+# 或在 K8s 里给容器加环境变量 SPRING_PROFILES_ACTIVE=cluster
+#
+# 前置条件（缺一不可）：
+#   1. 使用真实数据库（PostgreSQL / GaussDB），不能用默认的 H2 文件库；
+#   2. 已执行 deploy/sql/quartz-postgresql.sql 或 deploy/sql/quartz-gaussdb.sql
+#      建好 11 张 QRTZ_* 表（initialize-schema=never，Spring Boot 不会自动建）；
+#   3. 所有 admin 副本的时钟必须 NTP 同步 —— Quartz 集群靠 QRTZ_SCHEDULER_STATE
+#      的时间戳判断节点存活，时钟漂移会导致误判失联并触发重复的故障恢复。
+#
+# 去重原理：Quartz 的 JobStoreSupport 在 isClustered=true 时强制
+#   setUseDBLocks(true) 并装载 StdRowLockSemaphore，其加锁语句为
+#   「SELECT * FROM QRTZ_LOCKS WHERE SCHED_NAME=? AND LOCK_NAME=? FOR UPDATE」。
+#   同一个 trigger 到点时，只有一个副本能拿到 TRIGGER_ACCESS 行锁，
+#   因此不会出现「N 个 admin 各跑一次同一个任务」。
+# ============================================================================
+
+spring:
+  datasource:
+    # 集群模式必须走真实库。默认给 PostgreSQL，GaussDB 把下面两项换成：
+    #   ORBIT_DB_URL=jdbc:opengauss://<host>:5432/orbit_admin
+    #   ORBIT_DB_DRIVER=org.opengauss.Driver
+    type: com.alibaba.druid.pool.DruidDataSource
+    url: ${ORBIT_DB_URL:jdbc:postgresql://localhost:5432/orbit_admin}
+    driver-class-name: ${ORBIT_DB_DRIVER:org.postgresql.Driver}
+    username: ${ORBIT_DB_USER:postgres}
+    password: ${ORBIT_DB_PASSWORD:}
+    druid:
+      # 副本数 x 单副本连接数 不要超过数据库 max_connections
+      initial-size: 5
+      min-idle: 5
+      max-active: 20
+      max-wait: 60000
+      validation-query: SELECT 1
+      test-while-idle: true
+      time-between-eviction-runs-millis: 60000
+      min-evictable-idle-time-millis: 300000
+
+  quartz:
+    # 从内存 JobStore 切到 JDBC JobStore：调度状态落库，副本间共享
+    job-store-type: jdbc
+    jdbc:
+      # 必须为 never：生产库的 DDL 要由 deploy/sql/quartz-*.sql 受控执行。
+      # （Spring Boot 该项默认是 embedded —— 只对嵌入式库自动建表，
+      #   对 PostgreSQL / GaussDB 本来也不会动手，这里显式写死以免误解。）
+      initialize-schema: never
+    properties:
+      org.quartz.scheduler.instanceName: orbit-admin
+      # 集群要求：AUTO 会生成「主机名 + 时间戳」的唯一实例 ID，
+      # 写死成固定值会让多个副本互相认为对方失联。
+      org.quartz.scheduler.instanceId: AUTO
+      org.quartz.threadPool.threadCount: 10
+
+      # 注意：这里刻意不设置 org.quartz.jobStore.class 与 org.quartz.jobStore.dataSource。
+      # Spring Boot 的 QuartzAutoConfiguration 在 job-store-type=jdbc 时会调用
+      # schedulerFactoryBean.setDataSource(...)，让 Quartz 直接复用上面这个 Druid 连接池，
+      # 因此不需要额外引入 c3p0 / HikariCP。
+
+      # PostgreSQL 用 PostgreSQLDelegate；openGauss / GaussDB（默认兼容模式）用 GaussDBDelegate；
+      # GaussDB 的 M（Oracle）兼容模式用 StdJDBCDelegate。
+      org.quartz.jobStore.driverDelegateClass: ${ORBIT_QUARTZ_DELEGATE:org.quartz.impl.jdbcjobstore.PostgreSQLDelegate}
+      org.quartz.jobStore.tablePrefix: QRTZ_
+
+      # ---- 集群开关 ----
+      org.quartz.jobStore.isClustered: true
+      # 副本向 QRTZ_SCHEDULER_STATE 心跳的间隔（毫秒）。Quartz 默认 7500。
+      # 调大可降低 DB 压力，但故障检测与接管会变慢。
+      org.quartz.jobStore.clusterCheckinInterval: 15000
+      # 触发超时判定阈值（毫秒）
+      org.quartz.jobStore.misfireThreshold: 60000

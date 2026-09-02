@@ -6,6 +6,14 @@ spring:
     driver-class-name: org.h2.Driver
     username: sa
     password:
+    # test-while-idle 默认开启，必须配 validation-query，
+    # 否则每次建池都会打印 "testWhileIdle is true, validationQuery not set"
+    druid:
+      validation-query: SELECT 1
+      test-while-idle: true
+      initial-size: 1
+      min-idle: 1
+      max-active: 5
   sql:
     init:
       mode: always
@@ -17,3 +25,10 @@ mybatis-plus:
   global-config:
     db-config:
       id-type: AUTO
+
+orbit:
+  admin:
+    access-token: ""
+    heartbeat-timeout-seconds: 90
+    max-timeout-seconds: 3600
+    executor-address-allow-pattern: ""

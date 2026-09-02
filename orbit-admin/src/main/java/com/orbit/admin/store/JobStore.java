@@ -158,26 +158,35 @@ public class JobStore {
             return job;
         }
 
-        // 2. 更新（显式 set 所有列，乐观锁版本号由 @Version 插件自动拼接 WHERE version=? 并 +1）
+        // 2. 更新：走实体式更新（updateById），由 @Version 乐观锁插件自动补全
+        //    「SET version = 旧版本 + 1」与「WHERE id = ? AND version = 旧版本」。
+        //
+        //    注意：这里不能改用 update(entity, updateWrapper) 再对同一批列做 .set(...)。
+        //    MyBatis-Plus 的 update(et, ew) 会把「实体的 SET 片段」与「wrapper 的 SET 片段」拼接，
+        //    同名列出现两次，数据库直接报 Duplicate column name；
+        //    同时实体的主键条件与 wrapper 的 .eq(id) 叠加，WHERE 里 id 条件也会重复。
+        //    description / cron_expr / params 三列在 OrbitJobPO 上标了 FieldStrategy.ALWAYS，
+        //    因此传 null 也会被写进 SET，仍然可以把这几列清空为 NULL。
+        //
+        //    这里无需校验版本号是否为空：JobInfo.version 是基本类型 int，不可能为 null，
+        //    装箱后传给 po.setVersion(Integer) 必然非 null，乐观锁插件因此总会生效。
+        //    若调用方漏设版本号（int 默认 0），WHERE 会拼成 version=0、匹配 0 行，
+        //    直接走下面的 IllegalStateException 分支，不会静默覆盖。
         OrbitJobPO po = new OrbitJobPO();
         po.setId(job.getId());
+        po.setDescription(blankToNull(job.getDescription()));
+        po.setAppName(job.getAppName());
+        po.setHandler(job.getHandler());
+        po.setCronExpr(blankToNull(job.getCron()));
+        po.setParams(paramsJson);
+        po.setTimeoutSeconds(job.getTimeoutSeconds() <= 0 ? DEFAULT_TIMEOUT_SECONDS : job.getTimeoutSeconds());
+        po.setRouteStrategy(blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy());
+        po.setEnabled(job.isEnabled());
+        po.setUpdatedAt(now);
+        // 乐观锁版本号：插件据此拼 WHERE version=? 并在 SET 中自增
         po.setVersion(job.getVersion());
-        LambdaUpdateWrapper<OrbitJobPO> uw = new LambdaUpdateWrapper<OrbitJobPO>()
-                .eq(OrbitJobPO::getId, job.getId())
-                .set(OrbitJobPO::getDescription, blankToNull(job.getDescription()))
-                .set(OrbitJobPO::getAppName, job.getAppName())
-                .set(OrbitJobPO::getHandler, job.getHandler())
-                .set(OrbitJobPO::getCronExpr, blankToNull(job.getCron()))
-                .set(OrbitJobPO::getParams, paramsJson)
-                .set(OrbitJobPO::getTimeoutSeconds,
-                        job.getTimeoutSeconds() <= 0 ? DEFAULT_TIMEOUT_SECONDS : job.getTimeoutSeconds())
-                .set(OrbitJobPO::getRouteStrategy,
-                        blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy())
-                .set(OrbitJobPO::getEnabled, job.isEnabled())
-                .set(OrbitJobPO::getUpdatedAt, now);
 
-        // 乐观锁实体（携带 @Version 字段）随 update 传入，插件会追加 version 条件
-        int rows = jobMapper.update(po, uw);
+        int rows = jobMapper.updateById(po);
         if (rows == 0) {
             throw new IllegalStateException("job concurrent update, please retry");
         }

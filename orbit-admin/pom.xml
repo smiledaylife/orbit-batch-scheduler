@@ -100,8 +100,16 @@
         </dependency>
         <!--
           Quartz 2.5.x 的连接池依赖（c3p0 / HikariCP）在其自身 POM 中为 provided 作用域。
-          当前使用内存 JobStore（spring.quartz.job-store-type=memory），无需连接池；
-          若日后切换为 JDBC JobStore（Quartz 集群），需显式引入 com.mchange:c3p0 或 com.zaxxer:HikariCP。
+          默认使用内存 JobStore（spring.quartz.job-store-type=memory），无需连接池。
+
+          【修正】切换为 JDBC JobStore（集群模式）时，也不需要引入 c3p0 / HikariCP：
+          Spring Boot 2.7.18 的 QuartzAutoConfiguration.JdbcStoreTypeConfiguration 会调用
+          schedulerFactoryBean.setDataSource(dataSource)，让 Quartz 直接复用 Spring 管理的
+          DataSource（本项目即 druid-spring-boot-starter 提供的 Druid 连接池），
+          而不是走 Quartz 自己的 org.quartz.dataSource.* 内部连接池。
+          集群配置见 src/main/resources/application-cluster.yml，
+          建表脚本见 deploy/sql/quartz-postgresql.sql 与 deploy/sql/quartz-gaussdb.sql。
+
           slf4j-api 由 spring-boot-starter-logging 提供，满足 Quartz 2.5 的 slf4j-api(runtime) 要求。
         -->
         <dependency>
