@@ -28,8 +28,8 @@ public class OrbitJobPO implements Serializable {
     /** 任务唯一名 */
     private String jobName;
 
-    /** 任务描述；可空，更新策略设为 IGNORED 以允许清空为 NULL */
-    @TableField(value = "description", updateStrategy = FieldStrategy.IGNORED)
+    /** 任务描述；可空，更新策略设为 ALWAYS 以允许清空为 NULL */
+    @TableField(value = "description", updateStrategy = FieldStrategy.ALWAYS)
     private String description;
 
     /** 目标执行器应用名 */
@@ -38,12 +38,12 @@ public class OrbitJobPO implements Serializable {
     /** JobHandler 名称（对应 @OrbitJob 值） */
     private String handler;
 
-    /** Cron 表达式（为空表示仅手动触发）；可空，更新策略设为 IGNORED 以允许写 NULL */
-    @TableField(value = "cron_expr", updateStrategy = FieldStrategy.IGNORED)
+    /** Cron 表达式（为空表示仅手动触发）；可空，更新策略设为 ALWAYS 以允许写 NULL */
+    @TableField(value = "cron_expr", updateStrategy = FieldStrategy.ALWAYS)
     private String cronExpr;
 
-    /** 静态执行参数（JSON 字符串）；可空，更新策略设为 IGNORED 以允许写 NULL */
-    @TableField(value = "params", updateStrategy = FieldStrategy.IGNORED)
+    /** 静态执行参数（JSON 字符串）；可空，更新策略设为 ALWAYS 以允许写 NULL */
+    @TableField(value = "params", updateStrategy = FieldStrategy.ALWAYS)
     private String params;
 
     /** 执行超时（秒） */

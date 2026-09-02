@@ -4,13 +4,6 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <parent>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-parent</artifactId>
-        <version>2.7.18</version>
-        <relativePath/>
-    </parent>
-
     <groupId>com.orbit</groupId>
     <artifactId>orbit-batch-scheduler</artifactId>
     <version>1.0.0</version>
@@ -18,72 +11,27 @@
     <name>Orbit Batch Scheduler</name>
     <description>轻量云原生批量调度框架（调度中心 + 执行器），类似 XXL-JOB</description>
 
+    <!--
+      本 POM 只是「聚合器（aggregator）」：仅负责一次性构建下列模块，
+      不作为任何模块的 <parent>，也不下发 properties / dependencyManagement / 插件配置。
+
+      设计取舍（各模块 POM 自治）：
+      · 每个模块独立声明自己的坐标、编译级别、依赖与插件版本，可脱离本仓库单独构建；
+      · 依赖版本各自通过 import spring-boot-dependencies BOM 收敛，不再依靠父 POM 属性覆盖
+        （BOM 用 import 引入时，父级 <properties> 覆盖版本的写法是无效的，必须显式声明版本 —— 
+         例如 orbit-admin 的 Quartz 2.5.2 就在其自身 dependencyManagement 中显式锁定）；
+      · 模块间引用统一用 ${project.version}，同版本号发布，避免版本漂移。
+
+      构建方式（聚合与继承相互独立，reactor 依旧可用）：
+        mvn clean package -DskipTests                 # 全量
+        mvn clean package -DskipTests -pl orbit-admin -am   # 单模块 + 其依赖
+        cd orbit-core && mvn install                  # 也可完全独立构建
+    -->
     <modules>
         <module>orbit-core</module>
         <module>orbit-admin</module>
         <module>orbit-executor</module>
         <module>orbit-executor-sample</module>
     </modules>
-
-    <properties>
-        <java.version>1.8</java.version>
-        <!-- 默认 release：SDK 侧（core/executor/sample）保持 Java 8；
-             orbit-admin 子模块覆盖为 11（Quartz 2.5 要求）。用 release 而非 source/target，
-             可同时限制字节码版本与可用 API，避免 JDK 11 编译产物误用 Java 9+ API。 -->
-        <maven.compiler.release>8</maven.compiler.release>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <!--
-          JDK 拓扑：
-          · orbit-admin（调度中心）：maven.compiler.release=11，需 JDK 11+ 构建/运行 —— Quartz 2.5.x 起最低要求 JDK 11。
-          · orbit-core / orbit-executor / orbit-executor-sample（业务 SDK）：maven.compiler.release=8，
-            产出 Java 8 字节码且限制仅使用 JDK 8 API，业务方可在 JRE 8 + Spring Boot 2.7 接入。
-          admin 与 executor 之间仅通过 HTTP/JSON（orbit-core 的 POJO）通信，互不共享 JVM，
-          因此 admin 跑 JRE 11、executor 跑 JRE 8 完全兼容。
-          注意：整库 reactor 构建需使用 JDK 11+（admin 引用 Quartz 2.5，其 class 文件版本为 55，JDK 8 无法编译）。
-        -->
-        <quartz.version>2.5.2</quartz.version>
-        <!-- 持久化技术栈：Druid 连接池 + MyBatis + MyBatis-Plus -->
-        <druid.version>1.2.8</druid.version>
-        <mybatis.version>3.5.19</mybatis.version>
-        <mybatis-plus.version>3.5.7</mybatis-plus.version>
-    </properties>
-
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>com.orbit</groupId>
-                <artifactId>orbit-core</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.orbit</groupId>
-                <artifactId>orbit-executor</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <!-- 固定 MyBatis 核心版本（MyBatis-Plus 3.5.7 传递的是 3.5.16，这里统一对齐到 3.5.19） -->
-            <dependency>
-                <groupId>org.mybatis</groupId>
-                <artifactId>mybatis</artifactId>
-                <version>${mybatis.version}</version>
-            </dependency>
-            <!-- Druid 连接池 -->
-            <dependency>
-                <groupId>com.alibaba</groupId>
-                <artifactId>druid-spring-boot-starter</artifactId>
-                <version>${druid.version}</version>
-            </dependency>
-            <!-- MyBatis-Plus -->
-            <dependency>
-                <groupId>com.baomidou</groupId>
-                <artifactId>mybatis-plus-boot-starter</artifactId>
-                <version>${mybatis-plus.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.baomidou</groupId>
-                <artifactId>mybatis-plus-boot-starter-test</artifactId>
-                <version>${mybatis-plus.version}</version>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
 
 </project>

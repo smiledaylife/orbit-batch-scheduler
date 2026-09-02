@@ -3,24 +3,83 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    <parent>
-        <groupId>com.orbit</groupId>
-        <artifactId>orbit-batch-scheduler</artifactId>
-        <version>1.0.0</version>
-    </parent>
+
+    <!-- 无 <parent>：本模块自管依赖与构建配置，可脱离 reactor 独立构建 -->
+    <groupId>com.orbit</groupId>
     <artifactId>orbit-core</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
     <name>Orbit :: Core</name>
     <description>调度中心与执行器共享协议、模型</description>
 
     <properties>
-        <!-- 共享模型保持 Java 8 字节码与 API，业务方可在 JRE 8 使用 -->
-        <maven.compiler.release>8</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <!-- 共享模型保持 Java 8 字节码，业务方可在 JRE 8 使用 -->
+        <java.release>8</java.release>
+        <spring-boot.version>2.7.18</spring-boot.version>
+        <maven-compiler-plugin.version>3.10.1</maven-compiler-plugin.version>
+        <maven-surefire-plugin.version>2.22.2</maven-surefire-plugin.version>
     </properties>
 
-    <dependencies>
-        <dependency>
-            <groupId>com.fasterxml.jackson.core</groupId>
-            <artifactId>jackson-annotations</artifactId>
-        </dependency>
-    </dependencies>
+    <dependencyManagement>
+        <dependencies>
+            <!-- 版本收敛：import Spring Boot BOM（等价于继承 spring-boot-starter-parent 的版本管理部分） -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!--
+      无第三方依赖：本模块只有纯 POJO 协议模型，序列化由使用方（admin/executor 的 Spring MVC + Jackson）完成。
+      原先声明的 jackson-annotations 在代码中并未使用（无任何 com.fasterxml 引用），已移除，
+      避免把 Jackson 作为传递依赖强加给业务方。
+    -->
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>${maven-compiler-plugin.version}</version>
+                <configuration>
+                    <!-- source/target 在 JDK 8 与 JDK 9+ 上均可用；JDK 9+ 由下方 profile 升级为 release -->
+                    <source>${java.release}</source>
+                    <target>${java.release}</target>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${maven-surefire-plugin.version}</version>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- JDK 9+：改用 release，同时限制字节码版本与可用 API，避免误用 Java 9+ API -->
+        <profile>
+            <id>jdk9plus</id>
+            <activation>
+                <jdk>[9,)</jdk>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <release>${java.release}</release>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+
 </project>
