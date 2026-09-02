@@ -11,12 +11,50 @@ spec:
       port: 8080
       targetPort: 8080
 ---
+# ---------------------------------------------------------------------------
+# 执行器寻址用的 Headless Service。
+#
+# 多副本时必须提供：执行器 AdminClient 会遍历 orbit.executor.admin-addresses 里
+# 逗号分隔的每个地址逐个上报心跳。若只填普通 Service 名（orbit-admin），
+# 负载均衡会把每次心跳投给随机一个副本，各副本的内存注册表就都是残缺的，
+# 部分副本会持续报 "no online executor"。
+# 有了 Headless Service + 稳定 Pod DNS，才能把每个副本的地址显式列出来。
+# 注意：Deployment 的 Pod 名是随机的，要拿到稳定 DNS 需改用 StatefulSet。
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: orbit-admin-headless
+  namespace: orbit-system
+spec:
+  clusterIP: None
+  selector:
+    app: orbit-admin
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# ---------------------------------------------------------------------------
+# 调度中心。
+#
+# 默认单副本（内存 JobStore）。要扩到多副本，以下三项缺一不可：
+#   1. 启用集群配置：容器加 SPRING_PROFILES_ACTIVE=cluster
+#      （见 orbit-admin/src/main/resources/application-cluster.yml）；
+#   2. 换成 PostgreSQL / GaussDB 并先执行 deploy/sql/quartz-*.sql 建 11 张 QRTZ_* 表
+#      —— 默认的 H2 文件库 + emptyDir 在 Pod 重建后数据即丢失，且无法跨副本共享；
+#   3. 所有副本时钟 NTP 同步（Quartz 集群靠时间戳判断节点存活）。
+# 满足后 Quartz 会用 QRTZ_LOCKS 行锁保证同一 trigger 只被一个副本触发，
+# 不会出现重复调度。
+# 另：多副本还需把本资源改为 StatefulSet，以便执行器能按稳定 DNS 逐个上报心跳。
+# ---------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: orbit-admin
   namespace: orbit-system
 spec:
+  # 单副本。扩容前请先阅读上方三项前置条件。
   replicas: 1
   selector:
     matchLabels:

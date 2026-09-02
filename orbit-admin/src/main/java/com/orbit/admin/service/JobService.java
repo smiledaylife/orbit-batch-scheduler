@@ -17,6 +17,7 @@ import org.quartz.CronTrigger;
 import org.quartz.JobBuilder;
 import org.quartz.JobDetail;
 import org.quartz.JobKey;
+import org.quartz.ObjectAlreadyExistsException;
 import org.quartz.Scheduler;
 import org.quartz.SchedulerException;
 import org.quartz.Trigger;
@@ -81,16 +82,24 @@ public class JobService {
         }
 
         int loaded = 0;
+        int skipped = 0;
         for (JobInfo job : jobs) {
             try {
                 scheduleOrUpdate(job);
                 loaded++;
+            } catch (ObjectAlreadyExistsException e) {
+                // 集群（JDBC JobStore）模式下的正常竞态：多个副本同时启动时，
+                // 两边都可能看到 checkExists(key)==false 并同时 scheduleJob，
+                // 输的那个抛本异常 —— 任务其实已被另一个副本装好，不算失败。
+                skipped++;
+                log.debug("[orbit-admin] job {} already scheduled by another node", job.getJobName());
             } catch (Exception e) {
                 // 单个任务装载失败（例如历史遗留的非法 cron）不应阻断其余任务
                 log.error("[orbit-admin] init schedule failed for job={}", job.getJobName(), e);
             }
         }
-        log.info("[orbit-admin] loaded {}/{} job(s) into quartz", loaded, jobs.size());
+        log.info("[orbit-admin] loaded {}/{} job(s) into quartz ({} already scheduled by peer node)",
+                loaded, jobs.size(), skipped);
     }
 
     /**

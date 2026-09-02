@@ -41,6 +41,10 @@ spring:
   # 注意：quartz / lifecycle 必须挂在 spring 下。
   # 曾经误缩进到 mybatis-plus 之下，导致这些键被绑定成 mybatis-plus.quartz.*，
   # Spring Boot 对未知属性静默忽略 —— 配置不报错也不生效。
+  #
+  # 默认是内存 JobStore（单副本）。要多副本集群请启用 cluster profile：
+  #   --spring.profiles.active=cluster
+  # 详见 application-cluster.yml 与 deploy/sql/quartz-*.sql。
   quartz:
     job-store-type: memory
     properties:
