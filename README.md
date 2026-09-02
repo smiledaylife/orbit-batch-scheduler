@@ -176,10 +176,12 @@ public class OrderJobs {
 ## 5. 云原生部署
 
 **默认（单副本）**：调度中心使用内存 JobStore（`job-store-type: memory`）+ H2 文件库，开箱即用。
-此时**必须保持单副本** —— 多个副本各自持有一份 Quartz 调度器和一份内存执行器注册表，
-同一个 Cron 到点会被每个副本各触发一次，任务实际执行 N 次。
+此时**必须保持单副本** —— 多个副本各自持有一份内存 Quartz 调度器，
+同一个 Cron 到点会被每个副本各触发一次，任务实际执行 N 次。执行器注册表已落库，与副本数无关。
 
 **路由方式**：执行器心跳上报 `http://{POD_IP}:port`，调度中心直连 Pod IP 触发（与 XXL-JOB 一致），天然适配多副本。
+
+**执行器注册（对齐 XXL-JOB）**：心跳写入共享表 `orbit_executor_registry`，任意 admin 副本都能读到全量在线节点。因此调度中心是**无状态 Deployment**，执行器只需 `admin-addresses: http://orbit-admin:8080`（普通 ClusterIP Service），**不需要** StatefulSet / Headless DNS 逐副本上报。
 
 ### 5.1 调度中心多副本（集群模式）
 
@@ -212,13 +214,8 @@ GaussDB 请把 `ORBIT_DB_URL` / `ORBIT_DB_DRIVER` 换成 openGauss 驱动，并�
 > `schedulerFactoryBean.setDataSource(...)`，让 Quartz 直接复用 Spring 管理的 Druid 连接池，
 > 不走 Quartz 自己的 `org.quartz.dataSource.*`，因此不需要 c3p0 / HikariCP。
 
-> ⚠️ **还有一个容易踩的坑：执行器心跳寻址。**
-> 执行器注册表在**内存**中，且执行器 `AdminClient` 会遍历 `orbit.executor.admin-addresses`
-> 里逗号分隔的每个地址逐个上报。若只填普通 Service 名（如 `http://orbit-admin:8080`），
-> 负载均衡会把每次心跳投给**随机一个**副本，各副本的注册表都是残缺的，
-> 部分副本会持续报 `no online executor`。
-> 多副本下必须把**每个 admin 副本的地址显式列出**，这要求用 StatefulSet + Headless Service
-> 取得稳定 Pod DNS（`deploy/k8s/02-admin.yaml` 已附 Headless Service）。
+> 执行器心跳落库后，admin 多副本不再要求 StatefulSet。心跳打到任意副本即可。
+> 多副本**调度**仍依赖 Quartz JDBC 集群（上面 1~4），与注册表无关。
 
 ```bash
 # 镜像（构建阶段统一用 JDK 11；运行阶段 admin=JRE 11，executor=JRE 8）
@@ -314,7 +311,7 @@ spring:
 | 调度中心 | xxl-job-admin | orbit-admin |
 | 执行器 | xxl-job-core | orbit-executor |
 | 任务注解 | `@XxlJob` | `@OrbitJob` |
-| 注册 | 执行器心跳 | 执行器心跳 |
+| 注册 | 心跳写入 `xxl_job_registry`（MySQL） | 心跳写入 `orbit_executor_registry`（共享库，无状态 Deployment） |
 | 触发 | HTTP | HTTP `/orbit/executor/run` |
 | 路由 | 轮询/随机/故障转移… | ROUND / RANDOM / FIRST |
 | 存储 | MySQL | H2（默认）/ PostgreSQL / GaussDB |

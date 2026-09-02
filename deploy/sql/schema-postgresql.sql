@@ -34,3 +34,15 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
 
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);
+
+CREATE TABLE IF NOT EXISTS orbit_executor_registry (
+    id               BIGSERIAL PRIMARY KEY,
+    app_name         VARCHAR(64)  NOT NULL,
+    address          VARCHAR(256) NOT NULL,
+    node_id          VARCHAR(128),
+    handlers         VARCHAR(2000),
+    last_heartbeat   TIMESTAMP    NOT NULL,
+    CONSTRAINT uk_orbit_executor_app_addr UNIQUE (app_name, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_orbit_executor_hb ON orbit_executor_registry (last_heartbeat);

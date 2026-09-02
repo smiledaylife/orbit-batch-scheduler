@@ -19,7 +19,7 @@ public class AdminScheduleTasks {
     private final ExecutorRegistry registry;
 
     /**
-     * 构造方法，注入执行器内存注册表
+     * 构造方法，注入执行器注册表
      *
      * @param registry 执行器注册表
      */

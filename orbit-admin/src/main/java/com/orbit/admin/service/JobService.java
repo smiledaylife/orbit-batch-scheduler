@@ -276,17 +276,22 @@ public class JobService {
         // （没有任何后台任务会回收它）。
         ExecutorNode node = null;
         try {
-            // 3. 按照任务配置的路由策略寻址目标执行器实例
-            node = registry.route(job.getAppName(), job.getRouteStrategy());
-            if (node == null) {
-                // 没有存活的执行器实例
+            List<ExecutorNode> candidates = registry.listByApp(job.getAppName());
+            if (candidates.isEmpty()) {
                 String msg = "no online executor for appName=" + job.getAppName();
                 jobStore.finishLog(logId, "FAILED", null, 0, msg);
                 log.warn("[orbit-admin] {}", msg);
                 return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), null, 0, msg);
             }
 
-            // 4. 构建触发请求并合并参数
+            // 先按路由策略选起点，再对剩余节点做故障转移：
+            // Pod 重建后 IP/Pod 名都会变，旧地址在心跳超时前仍在表里；
+            // 连不上就立刻摘除并换下一个（对齐 XXL-JOB FAILOVER）。
+            ExecutorNode preferred = registry.route(job.getAppName(), job.getRouteStrategy());
+            if (preferred != null) {
+                candidates = rotateToFront(candidates, preferred.getAddress());
+            }
+
             TriggerRequest req = new TriggerRequest();
             req.setJobId(job.getId() == null ? 0 : job.getId());
             req.setJobName(job.getJobName());
@@ -302,15 +307,29 @@ public class JobService {
             }
             req.setParams(merged);
 
-            // 5. 向目标执行器发起 HTTP 调用触发任务执行
-            TriggerResult result = executorClient.trigger(node.getAddress(), req);
+            TriggerResult result = null;
+            for (int i = 0; i < candidates.size(); i++) {
+                node = candidates.get(i);
+                result = executorClient.trigger(node.getAddress(), req);
+                if (result.isSuccess()) {
+                    break;
+                }
+                boolean last = i == candidates.size() - 1;
+                if (looksUnreachable(result.getMessage()) && !last) {
+                    registry.remove(job.getAppName(), node.getAddress());
+                    log.warn("[orbit-admin] executor unreachable, evict and failover: {} @ {} ({})",
+                            job.getAppName(), node.getAddress(), result.getMessage());
+                    continue;
+                }
+                break;
+            }
+
             long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
             String status = result.isSuccess() ? "SUCCESS" : "FAILED";
-
-            // 6. 更新执行日志最终结果
-            jobStore.finishLog(logId, status, node.getAddress(), cost, result.getMessage());
+            String address = node == null ? null : node.getAddress();
+            jobStore.finishLog(logId, status, address, cost, result.getMessage());
             log.info("[orbit-admin] job={} -> {} @ {} status={} {}ms",
-                    job.getJobName(), job.getHandler(), node.getAddress(), status, cost);
+                    job.getJobName(), job.getHandler(), address, status, cost);
             return result;
         } catch (RuntimeException e) {
             String address = node == null ? null : node.getAddress();
@@ -475,6 +494,47 @@ public class JobService {
      * @param name 任务名称
      * @return 任务对象
      */
+    /**
+     * 把首选地址旋到列表头部，其余顺序不变，便于 ROUND 后再 failover。
+     */
+    private static List<ExecutorNode> rotateToFront(List<ExecutorNode> list, String address) {
+        if (address == null || list.size() <= 1) {
+            return list;
+        }
+        int idx = -1;
+        for (int i = 0; i < list.size(); i++) {
+            if (address.equals(list.get(i).getAddress())) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx <= 0) {
+            return list;
+        }
+        List<ExecutorNode> rotated = new java.util.ArrayList<ExecutorNode>(list.size());
+        rotated.addAll(list.subList(idx, list.size()));
+        rotated.addAll(list.subList(0, idx));
+        return rotated;
+    }
+
+    /**
+     * 判断派发失败是否像「对端已不存在」（连接拒绝 / 超时 / 无路由），
+     * 此时应立刻摘除旧 Pod IP，而不是等心跳超时。
+     */
+    private static boolean looksUnreachable(String message) {
+        if (message == null) {
+            return false;
+        }
+        String m = message.toLowerCase();
+        return m.contains("connection refused")
+                || m.contains("connect timed out")
+                || m.contains("connectexception")
+                || m.contains("no route to host")
+                || m.contains("network is unreachable")
+                || m.contains("failed to connect")
+                || m.contains("connection reset");
+    }
+
     private JobInfo require(String name) {
         return jobStore.findJobByName(name)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + name));

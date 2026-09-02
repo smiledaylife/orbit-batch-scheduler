@@ -27,6 +27,8 @@ spec:
       labels:
         app: orbit-executor
     spec:
+      # SIGTERM 时 Spring SmartLifecycle 会 POST /registry/remove，立刻摘除旧 IP
+      terminationGracePeriodSeconds: 30
       containers:
         - name: executor
           image: orbit-executor-sample:1.0.0
