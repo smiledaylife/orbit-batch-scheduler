@@ -167,9 +167,11 @@ public class JobStore {
         //    同时实体的主键条件与 wrapper 的 .eq(id) 叠加，WHERE 里 id 条件也会重复。
         //    description / cron_expr / params 三列在 OrbitJobPO 上标了 FieldStrategy.ALWAYS，
         //    因此传 null 也会被写进 SET，仍然可以把这几列清空为 NULL。
-        if (job.getVersion() == null) {
-            throw new IllegalStateException("job version is required for update, id=" + job.getId());
-        }
+        //
+        //    这里无需校验版本号是否为空：JobInfo.version 是基本类型 int，不可能为 null，
+        //    装箱后传给 po.setVersion(Integer) 必然非 null，乐观锁插件因此总会生效。
+        //    若调用方漏设版本号（int 默认 0），WHERE 会拼成 version=0、匹配 0 行，
+        //    直接走下面的 IllegalStateException 分支，不会静默覆盖。
         OrbitJobPO po = new OrbitJobPO();
         po.setId(job.getId());
         po.setDescription(blankToNull(job.getDescription()));
