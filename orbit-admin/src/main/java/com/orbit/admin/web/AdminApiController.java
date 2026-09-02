@@ -13,6 +13,7 @@ import com.orbit.core.model.RegistryRequest;
 import com.orbit.core.model.TriggerResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
@@ -255,17 +257,22 @@ public class AdminApiController {
      * 捕获非法参数异常（400）
      */
     @ExceptionHandler(IllegalArgumentException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResult<Void> badRequest(IllegalArgumentException e) {
         return ApiResult.fail(400, e.getMessage());
     }
 
     /**
-     * 捕获全局未处理异常（500）
+     * 捕获全局未处理异常（500）。
+     * <p>
+     * 不再把 {@code e.getMessage()} 回给调用方：其中可能包含 SQL 片段、表名、
+     * 驱动类名等内部信息。完整堆栈只写服务端日志。
      */
     @ExceptionHandler(Exception.class)
+    @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public ApiResult<Void> error(Exception e) {
         log.error("[orbit-admin] api error", e);
-        return ApiResult.fail(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+        return ApiResult.fail(500, "internal error");
     }
 
     /**

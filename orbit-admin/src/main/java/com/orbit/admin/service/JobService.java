@@ -71,14 +71,26 @@ public class JobService {
      */
     @PostConstruct
     public void init() {
+        List<JobInfo> jobs;
         try {
-            for (JobInfo job : jobStore.findAllJobs()) {
-                scheduleOrUpdate(job);
-            }
-            log.info("[orbit-admin] loaded {} job(s) into quartz", jobStore.countJobs());
+            jobs = jobStore.findAllJobs();
         } catch (Exception e) {
-            log.error("[orbit-admin] init schedule failed: {}", e.getMessage(), e);
+            // 读库失败意味着依赖不可用。原先这里把异常整体吞掉，会让调度中心
+            // 以「零调度但一切正常」的姿态启动，属于静默故障 —— 改为让启动失败。
+            throw new IllegalStateException("[orbit-admin] failed to load jobs on startup", e);
         }
+
+        int loaded = 0;
+        for (JobInfo job : jobs) {
+            try {
+                scheduleOrUpdate(job);
+                loaded++;
+            } catch (Exception e) {
+                // 单个任务装载失败（例如历史遗留的非法 cron）不应阻断其余任务
+                log.error("[orbit-admin] init schedule failed for job={}", job.getJobName(), e);
+            }
+        }
+        log.info("[orbit-admin] loaded {}/{} job(s) into quartz", loaded, jobs.size());
     }
 
     /**
@@ -135,11 +147,16 @@ public class JobService {
     public void delete(String jobName) {
         jobStore.findJobByName(jobName)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + jobName));
+        // 以数据库为唯一事实来源：先删库，再清理 Quartz。
+        // 原先 Quartz 清理失败会抛异常，但此时 DB 行已删除 —— 接口报错却已生效，
+        // 调用方重试只会得到 "job not found"，两边状态对不上。
+        // 改为 Quartz 失败仅记日志：DB 已无该任务，重启后 init() 也不会再装载它。
         jobStore.deleteJob(jobName);
         try {
             scheduler.deleteJob(jobKey(jobName));
         } catch (SchedulerException e) {
-            throw new IllegalStateException("delete quartz job failed: " + e.getMessage(), e);
+            log.error("[orbit-admin] job {} removed from db but quartz cleanup failed: {}",
+                    jobName, e.getMessage(), e);
         }
     }
 
@@ -245,42 +262,72 @@ public class JobService {
         running.setStartTime(start);
         jobStore.insertLog(running);
 
-        // 3. 按照任务配置的路由策略寻址目标执行器实例
-        ExecutorNode node = registry.route(job.getAppName(), job.getRouteStrategy());
-        if (node == null) {
-            // 没有存活的执行器实例
-            String msg = "no online executor for appName=" + job.getAppName();
-            jobStore.finishLog(logId, "FAILED", null, 0, msg);
-            log.warn("[orbit-admin] {}", msg);
-            return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), null, 0, msg);
-        }
+        // 3~6 全程包在 try/catch 中：无论路由寻址、参数合并还是落库环节抛异常，
+        // 都必须把日志从 RUNNING 收敛到终态，否则会留下永久 RUNNING 的僵尸记录
+        // （没有任何后台任务会回收它）。
+        ExecutorNode node = null;
+        try {
+            // 3. 按照任务配置的路由策略寻址目标执行器实例
+            node = registry.route(job.getAppName(), job.getRouteStrategy());
+            if (node == null) {
+                // 没有存活的执行器实例
+                String msg = "no online executor for appName=" + job.getAppName();
+                jobStore.finishLog(logId, "FAILED", null, 0, msg);
+                log.warn("[orbit-admin] {}", msg);
+                return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), null, 0, msg);
+            }
 
-        // 4. 构建触发请求并合并参数
-        TriggerRequest req = new TriggerRequest();
-        req.setJobId(job.getId() == null ? 0 : job.getId());
-        req.setJobName(job.getJobName());
-        req.setHandler(job.getHandler());
-        req.setLogId(logId);
-        req.setTimeoutSeconds(job.getTimeoutSeconds());
-        Map<String, Object> merged = new HashMap<String, Object>();
-        if (job.getParams() != null) {
-            merged.putAll(job.getParams());
-        }
-        if (extraParams != null) {
-            merged.putAll(extraParams);
-        }
-        req.setParams(merged);
+            // 4. 构建触发请求并合并参数
+            TriggerRequest req = new TriggerRequest();
+            req.setJobId(job.getId() == null ? 0 : job.getId());
+            req.setJobName(job.getJobName());
+            req.setHandler(job.getHandler());
+            req.setLogId(logId);
+            req.setTimeoutSeconds(job.getTimeoutSeconds());
+            Map<String, Object> merged = new HashMap<String, Object>();
+            if (job.getParams() != null) {
+                merged.putAll(job.getParams());
+            }
+            if (extraParams != null) {
+                merged.putAll(extraParams);
+            }
+            req.setParams(merged);
 
-        // 5. 向目标执行器发起 HTTP 调用触发任务执行
-        TriggerResult result = executorClient.trigger(node.getAddress(), req);
-        long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
-        String status = result.isSuccess() ? "SUCCESS" : "FAILED";
+            // 5. 向目标执行器发起 HTTP 调用触发任务执行
+            TriggerResult result = executorClient.trigger(node.getAddress(), req);
+            long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
+            String status = result.isSuccess() ? "SUCCESS" : "FAILED";
 
-        // 6. 更新执行日志最终结果
-        jobStore.finishLog(logId, status, node.getAddress(), cost, result.getMessage());
-        log.info("[orbit-admin] job={} -> {} @ {} status={} {}ms",
-                job.getJobName(), job.getHandler(), node.getAddress(), status, cost);
-        return result;
+            // 6. 更新执行日志最终结果
+            jobStore.finishLog(logId, status, node.getAddress(), cost, result.getMessage());
+            log.info("[orbit-admin] job={} -> {} @ {} status={} {}ms",
+                    job.getJobName(), job.getHandler(), node.getAddress(), status, cost);
+            return result;
+        } catch (RuntimeException e) {
+            String address = node == null ? null : node.getAddress();
+            long cost = System.currentTimeMillis() - start.getTime();
+            String msg = "dispatch failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            log.error("[orbit-admin] dispatch error for job={}", job.getJobName(), e);
+            safeFinishLog(logId, address, cost, msg);
+            return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), address, cost, msg);
+        }
+    }
+
+    /**
+     * 兜底写终态日志。自身异常只记录不外抛，避免在异常处理路径上二次抛出，
+     * 把原始的派发异常覆盖掉。
+     *
+     * @param logId   日志追踪 ID
+     * @param address 执行器地址（可为空）
+     * @param cost    耗时毫秒
+     * @param message 失败原因
+     */
+    private void safeFinishLog(String logId, String address, long cost, String message) {
+        try {
+            jobStore.finishLog(logId, "FAILED", address, cost, message);
+        } catch (Exception ex) {
+            log.error("[orbit-admin] failed to finalize log {}: {}", logId, ex.getMessage(), ex);
+        }
     }
 
     /**
@@ -387,8 +434,16 @@ public class JobService {
             log.info("[orbit-admin] scheduled {} cron={}", job.getJobName(), job.getCron());
         } else {
             scheduler.addJob(detail, true);
-            scheduler.rescheduleJob(triggerKey(job.getJobName()), trigger);
-            log.info("[orbit-admin] rescheduled {} cron={}", job.getJobName(), job.getCron());
+            // rescheduleJob 在 Trigger 不存在时返回 null 且什么都不做。
+            // 由于 JobDetail 是 storeDurably() 的，「Job 在、Trigger 不在」是可达状态，
+            // 此时若不补救，任务会被静默搁置 —— 不报错，也永远不再触发。
+            if (scheduler.rescheduleJob(triggerKey(job.getJobName()), trigger) == null) {
+                scheduler.scheduleJob(trigger);
+                log.info("[orbit-admin] trigger missing, re-created for {} cron={}",
+                        job.getJobName(), job.getCron());
+            } else {
+                log.info("[orbit-admin] rescheduled {} cron={}", job.getJobName(), job.getCron());
+            }
         }
     }
 
@@ -445,6 +500,14 @@ public class JobService {
         // 超时时间兜底 300 秒
         if (job.getTimeoutSeconds() <= 0) {
             job.setTimeoutSeconds(300);
+        }
+        // 按全局上限封顶：派发是同步阻塞的，无上限的 timeoutSeconds 会让单次调用
+        // 长时间占住 Tomcat 线程（手动触发）或 Quartz 工作线程（定时触发）。
+        int maxTimeout = properties.getMaxTimeoutSeconds();
+        if (maxTimeout > 0 && job.getTimeoutSeconds() > maxTimeout) {
+            log.warn("[orbit-admin] job {} timeoutSeconds {} exceeds max {}, capped",
+                    job.getJobName(), job.getTimeoutSeconds(), maxTimeout);
+            job.setTimeoutSeconds(maxTimeout);
         }
     }
 

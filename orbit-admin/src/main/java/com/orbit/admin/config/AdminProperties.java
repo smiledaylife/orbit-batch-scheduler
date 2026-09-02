@@ -42,6 +42,22 @@ public class AdminProperties {
     private String group = "ORBIT";
 
     /**
+     * 单个任务允许的最大执行超时（秒），默认 3600。
+     * 该上限同时用于两处：
+     *   - 任务元数据校验时对 {@code timeoutSeconds} 做封顶；
+     *   - 派发调用时限制 HTTP readTimeout，避免长时间占住 Tomcat / Quartz 工作线程，
+     *       并防止 {@code timeoutSeconds * 1000} 的 int 溢出。
+     */
+    private int maxTimeoutSeconds = 3600;
+
+    /**
+     * 执行器注册地址白名单（Java 正则，需匹配整个 address），默认为空表示不启用。
+     * 未启用时仍会做基础校验：必须是 http/https、必须有 host、禁止链路本地地址（169.254.0.0/16）。
+     * 生产环境建议显式配置，以杜绝执行器注册接口被用于 SSRF。
+     */
+    private String executorAddressAllowPattern = "";
+
+    /**
      * 定时任务 Cron 表达式计算所依据的时区标识，默认为 "Asia/Shanghai"。
      */
     private String timezone = "Asia/Shanghai";
@@ -92,5 +108,21 @@ public class AdminProperties {
 
     public void setTimezone(String timezone) {
         this.timezone = timezone;
+    }
+
+    public int getMaxTimeoutSeconds() {
+        return maxTimeoutSeconds;
+    }
+
+    public void setMaxTimeoutSeconds(int maxTimeoutSeconds) {
+        this.maxTimeoutSeconds = maxTimeoutSeconds;
+    }
+
+    public String getExecutorAddressAllowPattern() {
+        return executorAddressAllowPattern;
+    }
+
+    public void setExecutorAddressAllowPattern(String executorAddressAllowPattern) {
+        this.executorAddressAllowPattern = executorAddressAllowPattern;
     }
 }

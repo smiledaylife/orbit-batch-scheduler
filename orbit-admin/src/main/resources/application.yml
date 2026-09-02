@@ -38,6 +38,17 @@ spring:
     init:
       mode: always
       schema-locations: classpath:schema.sql
+  # 注意：quartz / lifecycle 必须挂在 spring 下。
+  # 曾经误缩进到 mybatis-plus 之下，导致这些键被绑定成 mybatis-plus.quartz.*，
+  # Spring Boot 对未知属性静默忽略 —— 配置不报错也不生效。
+  quartz:
+    job-store-type: memory
+    properties:
+      org.quartz.scheduler.instanceName: orbit-admin
+      org.quartz.scheduler.instanceId: AUTO
+      org.quartz.threadPool.threadCount: 10
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
 
 # MyBatis-Plus 配置
 mybatis-plus:
@@ -48,14 +59,6 @@ mybatis-plus:
     db-config:
       # 主键自增（配合 BIGSERIAL）
       id-type: AUTO
-  quartz:
-    job-store-type: memory
-    properties:
-      org.quartz.scheduler.instanceName: orbit-admin
-      org.quartz.scheduler.instanceId: AUTO
-      org.quartz.threadPool.threadCount: 10
-  lifecycle:
-    timeout-per-shutdown-phase: 30s
 
 orbit:
   admin:
@@ -66,6 +69,13 @@ orbit:
     group: ORBIT
     timezone: Asia/Shanghai
     evict-interval-ms: 30000
+    # 单个任务允许的最大执行超时（秒）。用于给派发调用设上限，
+    # 避免手动触发/定时派发长时间占住 Tomcat 线程或 Quartz 工作线程。
+    max-timeout-seconds: 3600
+    # 执行器注册地址白名单（Java 正则，匹配整个 address）。
+    # 留空表示不启用白名单，仅做协议/链路本地地址等基础校验。
+    # 生产环境建议收紧，例如：^https?://orbit-executor[a-z0-9-]*\.svc\.cluster\.local(:\d+)?$
+    executor-address-allow-pattern: ""
 
 management:
   endpoints:

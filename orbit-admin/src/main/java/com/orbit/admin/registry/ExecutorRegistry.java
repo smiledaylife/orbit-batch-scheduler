@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +44,17 @@ public class ExecutorRegistry {
      */
     private final ConcurrentHashMap<String, AtomicInteger> roundRobin = new ConcurrentHashMap<String, AtomicInteger>();
 
+    /**
+     * 节点排序器：按地址升序。
+     * 用于消除 {@link ConcurrentHashMap} 遍历顺序不确定带来的影响。
+     */
+    private static final Comparator<ExecutorNode> BY_ADDRESS = new Comparator<ExecutorNode>() {
+        @Override
+        public int compare(ExecutorNode a, ExecutorNode b) {
+            return a.getAddress().compareTo(b.getAddress());
+        }
+    };
+
     public ExecutorRegistry(AdminProperties properties) {
         this.properties = properties;
     }
@@ -63,7 +75,9 @@ public class ExecutorRegistry {
         }
 
         String app = req.getAppName().trim();
-        String addr = trimSlash(req.getAddress().trim());
+        // 校验并规范化地址：拒绝非 http(s)、无 host、以及链路本地等保留地址（防 SSRF）
+        String addr = ExecutorAddressValidator.validateAndNormalize(
+                req.getAddress(), properties.getExecutorAddressAllowPattern());
         String key = keyOf(app, addr);
 
         // 组装并更新节点状态
@@ -108,7 +122,7 @@ public class ExecutorRegistry {
         for (Map.Entry<String, ExecutorNode> e : nodes.entrySet()) {
             ExecutorNode n = e.getValue();
             // 若节点上次心跳时间距今超过配置的阈值，则认为已离线
-            if (n.getLastHeartbeat() == null || now - n.getLastHeartbeat().getTime() > timeoutMs) {
+            if (isExpired(n, now, timeoutMs)) {
                 if (nodes.remove(e.getKey(), n)) {
                     removed++;
                     log.info("[orbit-admin] executor offline (heartbeat timeout): {} @ {}",
@@ -120,12 +134,26 @@ public class ExecutorRegistry {
     }
 
     /**
+     * 判断节点心跳是否已超时。
+     *
+     * @param n         节点
+     * @param now       当前时间戳（毫秒）
+     * @param timeoutMs 超时阈值（毫秒）
+     * @return 是否已失联
+     */
+    private static boolean isExpired(ExecutorNode n, long now, long timeoutMs) {
+        return n.getLastHeartbeat() == null || now - n.getLastHeartbeat().getTime() > timeoutMs;
+    }
+
+    /**
      * 列出当前所有在线的执行器节点
      *
      * @return 在线节点列表
      */
     public List<ExecutorNode> listAll() {
-        return new ArrayList<ExecutorNode>(nodes.values());
+        List<ExecutorNode> list = new ArrayList<ExecutorNode>(nodes.values());
+        Collections.sort(list, BY_ADDRESS);
+        return list;
     }
 
     /**
@@ -145,6 +173,10 @@ public class ExecutorRegistry {
                 list.add(n);
             }
         }
+        // ConcurrentHashMap.values() 无顺序保证，且遍历顺序可能随时变化。
+        // 若不排序，FIRST 策略取到的「第一个」实际是任意节点，
+        // ROUND 的取模也建立在乱序列表上，负载会不均。此处按地址排序保证确定性。
+        Collections.sort(list, BY_ADDRESS);
         return list;
     }
 
@@ -180,12 +212,23 @@ public class ExecutorRegistry {
     }
 
     /**
-     * 获取当前所有在线节点的总数
+     * 获取当前所有在线节点的总数。
+     * <p>
+     * 注意：注册表中的节点要等后台 evict 任务扫描后才会被物理移除，
+     * 因此不能直接用 {@code nodes.size()} —— 那会把「心跳已超时但尚未被剔除」的节点也算成在线。
      *
-     * @return 节点总数
+     * @return 心跳未超时的节点总数
      */
     public int onlineCount() {
-        return nodes.size();
+        long timeoutMs = properties.getHeartbeatTimeoutSeconds() * 1000L;
+        long now = System.currentTimeMillis();
+        int count = 0;
+        for (ExecutorNode n : nodes.values()) {
+            if (n.isOnline() && !isExpired(n, now, timeoutMs)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**

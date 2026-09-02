@@ -12,6 +12,8 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.concurrent.ConcurrentHashMap;
+
 /**
  * 调度中心向执行器派发任务的 HTTP 通信客户端。
  * 核心职责：
@@ -34,6 +36,14 @@ public class ExecutorClient {
 
     private final AdminProperties properties;
 
+    /**
+     * RestTemplate 缓存，按 readTimeout 复用。
+     * 原先每次派发都 new 一个 RestTemplate + SimpleClientHttpRequestFactory（底层 HttpURLConnection、
+     * 无连接池），高频调度下是持续的无谓分配。key 的取值受任务 timeoutSeconds 上限约束，规模可控。
+     */
+    private final ConcurrentHashMap<Integer, RestTemplate> restTemplates =
+            new ConcurrentHashMap<Integer, RestTemplate>();
+
     public ExecutorClient(AdminProperties properties) {
         this.properties = properties;
     }
@@ -46,13 +56,12 @@ public class ExecutorClient {
      * @return 执行器返回的执行结果；若请求失败或超时则返回包含错误原因的失败结果
      */
     public TriggerResult trigger(String executorBaseUrl, TriggerRequest request) {
-        // 1. 确定本次 HTTP 调用的读取超时时间：优先使用任务自身配置的 timeoutSeconds，兜底使用全局 readTimeoutMs
-        int readTimeout = request.getTimeoutSeconds() > 0
-                ? request.getTimeoutSeconds() * 1000
-                : properties.getReadTimeoutMs();
+        // 1. 确定本次 HTTP 调用的读取超时时间：优先使用任务自身配置的 timeoutSeconds（受全局上限封顶），
+        //    兜底使用全局 readTimeoutMs
+        int readTimeout = resolveReadTimeoutMs(request.getTimeoutSeconds());
 
-        // 2. 根据指定的超时时间动态创建 RestTemplate 实例
-        RestTemplate rest = buildRest(properties.getConnectTimeoutMs(), readTimeout);
+        // 2. 按超时时间复用 RestTemplate（RestTemplate 配置完成后是线程安全的）
+        RestTemplate rest = restTemplateFor(readTimeout);
 
         // 3. 设置鉴权令牌（若配置）
         if (properties.getAccessToken() != null && !properties.getAccessToken().isEmpty()) {
@@ -86,6 +95,50 @@ public class ExecutorClient {
             return TriggerResult.fail(request.getLogId(), request.getJobId(), executorBaseUrl, 0,
                     e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
+    }
+
+    /**
+     * 解析本次调用的 readTimeout（毫秒）。
+     * <p>
+     * 两点修正：
+     *   - 用 {@code long} 做乘法：原先 {@code timeoutSeconds * 1000} 是 int 运算，
+     *       timeoutSeconds 超过 2147483 时会溢出为负数，而负的 readTimeout 在
+     *       {@code HttpURLConnection} 中等同于「无限等待」；
+     *   - 按 {@code orbit.admin.max-timeout-seconds} 封顶，避免单次派发长时间占住线程。
+     *
+     * @param timeoutSeconds 任务配置的超时秒数，&lt;=0 表示使用全局默认
+     * @return 读取超时毫秒数
+     */
+    private int resolveReadTimeoutMs(int timeoutSeconds) {
+        if (timeoutSeconds <= 0) {
+            return properties.getReadTimeoutMs();
+        }
+        long seconds = timeoutSeconds;
+        int max = properties.getMaxTimeoutSeconds();
+        if (max > 0 && seconds > max) {
+            seconds = max;
+        }
+        long ms = seconds * 1000L;
+        if (ms > Integer.MAX_VALUE) {
+            ms = Integer.MAX_VALUE;
+        }
+        return (int) ms;
+    }
+
+    /**
+     * 取得（或创建）指定 readTimeout 对应的 RestTemplate。
+     *
+     * @param readTimeoutMs 读取超时毫秒数
+     * @return 可复用的 RestTemplate
+     */
+    private RestTemplate restTemplateFor(int readTimeoutMs) {
+        RestTemplate cached = restTemplates.get(readTimeoutMs);
+        if (cached != null) {
+            return cached;
+        }
+        RestTemplate created = buildRest(properties.getConnectTimeoutMs(), readTimeoutMs);
+        RestTemplate previous = restTemplates.putIfAbsent(readTimeoutMs, created);
+        return previous != null ? previous : created;
     }
 
     /**
