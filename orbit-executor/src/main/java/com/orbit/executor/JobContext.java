@@ -97,4 +97,91 @@ public class JobContext {
         String v = getString(key);
         return v == null ? defaultValue : v;
     }
+
+    /**
+     * 获取指定参数键的 int 形式值。
+     * 数值以 {@link Number}（JSON 数字）或可解析字符串传入均可。
+     *
+     * @param key          参数键
+     * @param defaultValue 键不存在、为 null 或无法解析时的默认值
+     * @return int 值
+     */
+    public int getInt(String key, int defaultValue) {
+        Number n = asNumber(key);
+        return n == null ? defaultValue : n.intValue();
+    }
+
+    /**
+     * 获取指定参数键的 long 形式值。
+     * 数值以 {@link Number}（JSON 数字）或可解析字符串传入均可。
+     *
+     * @param key          参数键
+     * @param defaultValue 键不存在、为 null 或无法解析时的默认值
+     * @return long 值
+     */
+    public long getLong(String key, long defaultValue) {
+        Number n = asNumber(key);
+        return n == null ? defaultValue : n.longValue();
+    }
+
+    /**
+     * 获取指定参数键的 double 形式值。
+     * 数值以 {@link Number}（JSON 数字）或可解析字符串传入均可。
+     *
+     * @param key          参数键
+     * @param defaultValue 键不存在、为 null 或无法解析时的默认值
+     * @return double 值
+     */
+    public double getDouble(String key, double defaultValue) {
+        Number n = asNumber(key);
+        return n == null ? defaultValue : n.doubleValue();
+    }
+
+    /**
+     * 获取指定参数键的 boolean 形式值。
+     * 兼容 Boolean 值与 "true"/"false"（忽略大小写）字符串。
+     *
+     * @param key          参数键
+     * @param defaultValue 键不存在、为 null 或无法解析时的默认值
+     * @return boolean 值
+     */
+    public boolean getBoolean(String key, boolean defaultValue) {
+        Object v = params.get(key);
+        if (v == null) {
+            return defaultValue;
+        }
+        if (v instanceof Boolean) {
+            return (Boolean) v;
+        }
+        String s = String.valueOf(v).trim();
+        if ("true".equalsIgnoreCase(s)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(s)) {
+            return false;
+        }
+        return defaultValue;
+    }
+
+    /**
+     * 将参数值规约为 Number：Number 直接返回，字符串尝试解析，失败返回 null。
+     */
+    private Number asNumber(String key) {
+        Object v = params.get(key);
+        if (v == null) {
+            return null;
+        }
+        if (v instanceof Number) {
+            return (Number) v;
+        }
+        try {
+            return Long.parseLong(String.valueOf(v).trim());
+        } catch (NumberFormatException ignore) {
+            try {
+                return Double.parseDouble(String.valueOf(v).trim());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+    }
 }

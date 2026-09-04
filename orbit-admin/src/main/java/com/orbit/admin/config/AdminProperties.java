@@ -62,6 +62,31 @@ public class AdminProperties {
      */
     private String timezone = "Asia/Shanghai";
 
+    /**
+     * 执行器注册表本地缓存 TTL（毫秒），默认 3000。
+     * <p>
+     * 调度热路径（Quartz 每次触发、手动触发、API 查询）原先每次都直查数据库；
+     * 引入短 TTL 缓存后，高频调度下注册表查询 QPS 下降 1~2 个数量级。
+     * 缓存要点：
+     * <ul>
+     *   <li>TTL 远小于心跳超时阈值（默认 90s），陈旧度上界可控；
+     *       （XXL-JOB 调度中心为纯内存注册表 + 30 秒 DB 拉取，本实现 3 秒 TTL 远比其新鲜）；</li>
+     *   <li>本进程内的 register / remove / evict 写操作会立即失效缓存；</li>
+     *   <li>多副本部署时其他副本的写入经 TTL 自然传播，最大延迟即 TTL；</li>
+     *   <li>命中过期节点的派发由既有的 failover（不可达即摘除换节点）兜底。</li>
+     * </ul>
+     * 设为 0 表示关闭缓存，恢复每次直查数据库。
+     */
+    private long registryCacheTtlMs = 3000;
+
+    /**
+     * 调度执行日志保留天数，默认 30 天（0 表示关闭自动清理）。
+     * <p>
+     * {@code orbit_job_log} 无限增长会拖垮查询与备份；后台任务周期性
+     * 删除 start_time 早于保留期的日志（分批删除，避免大事务锁表）。
+     */
+    private int logRetentionDays = 30;
+
     public String getAccessToken() {
         return accessToken;
     }
@@ -124,5 +149,21 @@ public class AdminProperties {
 
     public void setExecutorAddressAllowPattern(String executorAddressAllowPattern) {
         this.executorAddressAllowPattern = executorAddressAllowPattern;
+    }
+
+    public long getRegistryCacheTtlMs() {
+        return registryCacheTtlMs;
+    }
+
+    public void setRegistryCacheTtlMs(long registryCacheTtlMs) {
+        this.registryCacheTtlMs = registryCacheTtlMs;
+    }
+
+    public int getLogRetentionDays() {
+        return logRetentionDays;
+    }
+
+    public void setLogRetentionDays(int logRetentionDays) {
+        this.logRetentionDays = logRetentionDays;
     }
 }

@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
 
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);
+-- 日志保留期清理（按 start_time 分批删除）与僵尸 RUNNING 回收均依赖该索引，避免全表扫描
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_start ON orbit_job_log (start_time);
 
 -- 执行器心跳注册表（对齐 XXL-JOB xxl_job_registry）：共享库即可无状态 Deployment
 CREATE TABLE IF NOT EXISTS orbit_executor_registry (

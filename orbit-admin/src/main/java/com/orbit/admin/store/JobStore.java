@@ -11,7 +11,10 @@ import com.orbit.admin.store.po.OrbitJobLogPO;
 import com.orbit.admin.store.po.OrbitJobPO;
 import com.orbit.core.model.JobInfo;
 import com.orbit.core.model.JobLog;
+import com.orbit.core.model.JobLogStatus;
 import com.orbit.core.model.PageResult;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
 
 import java.util.ArrayList;
@@ -37,6 +40,8 @@ import java.util.Optional;
 @Repository
 public class JobStore {
 
+    private static final Logger log = LoggerFactory.getLogger(JobStore.class);
+
     /** params 列宽（与 schema.sql 一致） */
     private static final int PARAMS_MAX_LEN = 2000;
     /** description 列宽（与 schema.sql 一致） */
@@ -47,6 +52,8 @@ public class JobStore {
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
     /** 每页最大记录数 */
     private static final int MAX_PAGE_SIZE = 200;
+    /** 批量删除每批行数：避免大事务长锁 */
+    private static final int DELETE_BATCH_SIZE = 1000;
 
     private final OrbitJobMapper jobMapper;
     private final OrbitJobLogMapper logMapper;
@@ -222,7 +229,7 @@ public class JobStore {
     public void insertLog(JobLog log) {
         OrbitJobLogPO po = new OrbitJobLogPO();
         po.setLogId(log.getLogId());
-        po.setJobId(log.getJobId() == null ? null : log.getJobId());
+        po.setJobId(log.getJobId());
         po.setJobName(log.getJobName());
         po.setAppName(log.getAppName());
         po.setHandler(log.getHandler());
@@ -256,6 +263,64 @@ public class JobStore {
                 .set(OrbitJobLogPO::getMessage, abbreviate(message))
                 .set(OrbitJobLogPO::getEndTime, new Date());
         logMapper.update(null, uw);
+    }
+
+    /**
+     * 回收僵尸 RUNNING 日志：将早于 cutoff 的 RUNNING 记录收敛为 FAILED 终态。
+     * <p>
+     * 场景：调度中心在派发中途崩溃/重启，插入的 RUNNING 日志无人收敛（此前会永久悬挂，
+     * 既误导 /logs 页面观测，也让分页统计失真）。后台任务周期调用本方法完成兑底。
+     *
+     * @param cutoffMs 回收阈值：start_time 早于（now - cutoffMs）的 RUNNING 记录将被收敛
+     * @param message  写入 message 字段的收敛原因说明
+     * @return 本次收敛的记录数
+     */
+    public int reapOrphanedRunning(long cutoffMs, String message) {
+        Date cutoff = new Date(System.currentTimeMillis() - Math.max(0L, cutoffMs));
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
+                .lt(OrbitJobLogPO::getStartTime, cutoff)
+                .set(OrbitJobLogPO::getStatus, JobLogStatus.FAILED)
+                .set(OrbitJobLogPO::getMessage, abbreviate(message))
+                .set(OrbitJobLogPO::getEndTime, new Date());
+        int updated = logMapper.update(null, uw);
+        if (updated > 0) {
+            log.warn("[orbit-admin] reaped {} orphaned RUNNING log(s) older than {}s", updated, cutoffMs / 1000);
+        }
+        return updated;
+    }
+
+    /**
+     * 删除早于 cutoff 的历史日志（分批删除，避免大事务长锁）。
+     * <p>
+     * 实现说明：不用 {@code DELETE ... LIMIT}——PostgreSQL 不支持该语法（仅 H2/GaussDB 支持），
+     * 故采用「先按 id 分页选出，再按主键批删」的通用写法，三种库全部兼容。
+     *
+     * @param cutoff 删除阈值：start_time 早于该时刻的日志将被删除
+     * @return 本次删除的总行数
+     */
+    public int deleteLogsBefore(Date cutoff) {
+        int total = 0;
+        while (true) {
+            List<OrbitJobLogPO> batch = logMapper.selectList(
+                    new LambdaQueryWrapper<OrbitJobLogPO>()
+                            .select(OrbitJobLogPO::getId)
+                            .lt(OrbitJobLogPO::getStartTime, cutoff)
+                            .orderByAsc(OrbitJobLogPO::getId)
+                            .last("LIMIT " + DELETE_BATCH_SIZE));
+            if (batch.isEmpty()) {
+                break;
+            }
+            List<Long> ids = new ArrayList<Long>(batch.size());
+            for (OrbitJobLogPO po : batch) {
+                ids.add(po.getId());
+            }
+            total += logMapper.deleteBatchIds(ids);
+            if (batch.size() < DELETE_BATCH_SIZE) {
+                break;
+            }
+        }
+        return total;
     }
 
     /**
@@ -367,12 +432,19 @@ public class JobStore {
     }
 
     /**
-     * 截断超长字符串（防止数据库字段超长溢出）
+     * 截断超长字符串（防止数据库字段超长溢出）。
+     * <p>
+     * 修复：旧实现 {@code substring(0, 2000) + "..."} 会产生 2003 字符，
+     * 超过 message 列宽 VARCHAR(2000)，执行器返回长消息时入库直接报
+     * 「value too long」异常。现保证结果总长度（含省略号）不超过列宽。
      */
     private static String abbreviate(String s) {
         if (s == null) {
             return null;
         }
-        return s.length() <= MESSAGE_MAX_LEN ? s : s.substring(0, MESSAGE_MAX_LEN) + "...";
+        if (s.length() <= MESSAGE_MAX_LEN) {
+            return s;
+        }
+        return s.substring(0, MESSAGE_MAX_LEN - 3) + "...";
     }
 }

@@ -3,9 +3,9 @@ package com.orbit.executor.web;
 import com.orbit.core.model.ApiResult;
 import com.orbit.core.model.TriggerRequest;
 import com.orbit.core.model.TriggerResult;
-import com.orbit.executor.JobContext;
 import com.orbit.executor.bootstrap.ExecutorBootstrap;
 import com.orbit.executor.config.ExecutorProperties;
+import com.orbit.executor.handler.JobExecutionService;
 import com.orbit.executor.handler.JobHandlerRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,18 +19,20 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
  * 执行器对外暴露的 HTTP RESTful API 控制器。
  * 核心职责：
- * 
+ *
  *   - 接收调度中心派发的任务触发请求（{@code POST /orbit/executor/run}）；
  *   - 校验安全访问令牌（{@code X-Orbit-Token}）；
- *   - 定位并执行本地对应的 JobHandler，记录耗时并返回执行结果；
- *   - 提供当前节点在线信息与支持的 Handler 查询端点（{@code GET /orbit/executor/handlers}）。
- * 
+ *   - 委托 {@link JobExecutionService} 在有界工作线程池中执行任务（含超时强制与饱和保护）；
+ *   - 提供当前节点在线信息与支持的 Handler 查询端点（{@code GET /orbit/executor/handlers}，同样受令牌保护）。
+ *
  */
 @RestController
 @RequestMapping("/orbit/executor")
@@ -46,19 +48,22 @@ public class ExecutorController {
     private final JobHandlerRegistry registry;
     private final ExecutorProperties properties;
     private final ExecutorBootstrap bootstrap;
+    private final JobExecutionService executionService;
 
     /**
      * 构造控制器，注入核心依赖组件
      *
-     * @param registry   JobHandler 注册表
-     * @param properties 执行器配置属性
-     * @param bootstrap  执行器引导器
+     * @param registry        JobHandler 注册表
+     * @param properties      执行器配置属性
+     * @param bootstrap       执行器引导器
+     * @param executionService 任务执行服务（线程池 + 超时强制）
      */
     public ExecutorController(JobHandlerRegistry registry, ExecutorProperties properties,
-                              ExecutorBootstrap bootstrap) {
+                              ExecutorBootstrap bootstrap, JobExecutionService executionService) {
         this.registry = registry;
         this.properties = properties;
         this.bootstrap = bootstrap;
+        this.executionService = executionService;
     }
 
     /**
@@ -76,7 +81,6 @@ public class ExecutorController {
 
         String handler = request.getHandler();
         String node = bootstrap.getResolvedNodeId() == null ? "executor" : bootstrap.getResolvedNodeId();
-        long start = System.currentTimeMillis();
 
         // 2. 基础参数校验：Handler 名称必填
         if (handler == null || handler.trim().isEmpty()) {
@@ -89,34 +93,20 @@ public class ExecutorController {
                     "handler not found on this executor: " + handler);
         }
 
-        // 4. 构建任务执行上下文并执行具体业务函数
-        try {
-            JobContext ctx = new JobContext(request.getJobId(), request.getJobName(), handler,
-                    request.getLogId(), request.getParams());
-            Object ret = registry.invoke(handler, ctx);
-            long cost = System.currentTimeMillis() - start;
-            String msg = ret == null ? "OK" : String.valueOf(ret);
-
-            log.info("[orbit-executor] run handler={} job={} logId={} {}ms",
-                    handler, request.getJobName(), request.getLogId(), cost);
-
-            return TriggerResult.ok(request.getLogId(), request.getJobId(), node, cost, msg);
-        } catch (Exception e) {
-            // 捕获业务异常并封装为失败结果返回
-            long cost = System.currentTimeMillis() - start;
-            log.error("[orbit-executor] handler '{}' failed", handler, e);
-            return TriggerResult.fail(request.getLogId(), request.getJobId(), node, cost,
-                    e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
-        }
+        // 4. 委托执行服务：有界线程池 + 超时强制 + 饱和保护
+        return executionService.execute(request, registry, node);
     }
 
     /**
      * 查询当前执行器节点的信息以及已注册的所有 JobHandler 列表。
+     * 配置了 accessToken 时同样要求鉴权，避免向未授权方暴露节点信息。
      *
+     * @param token HTTP Header 中的鉴权令牌
      * @return 执行器概况与 Handler 列表数据
      */
     @GetMapping("/handlers")
-    public Map<String, Object> handlers() {
+    public Map<String, Object> handlers(@RequestHeader(value = TOKEN_HEADER, required = false) String token) {
+        checkToken(token, null);
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("appName", properties.getAppName());
         m.put("address", bootstrap.getResolvedAddress());
@@ -140,6 +130,7 @@ public class ExecutorController {
     /**
      * 双向安全令牌校验逻辑。
      * 若本地未配置 accessToken，则跳过校验；若配置了 accessToken，优先比对 Header 中的 Token，其次比对 Body 中的 Token。
+     * 比对使用常量时间算法（{@link MessageDigest#isEqual}），抵御时序侧信道逐字节猜测令牌。
      *
      * @param header Header 携带的令牌
      * @param body   Body 携带的令牌
@@ -150,8 +141,19 @@ public class ExecutorController {
             return;
         }
         String actual = header != null && !header.isEmpty() ? header : body;
-        if (!expect.equals(actual)) {
+        if (!constantTimeEquals(expect, actual)) {
             throw new IllegalArgumentException("invalid access token");
         }
+    }
+
+    /**
+     * 常量时间字符串比对：除不等长立即返回 false 之外，逐字节比较耗时与内容无关。
+     */
+    static boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null) {
+            return false;
+        }
+        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8),
+                b.getBytes(StandardCharsets.UTF_8));
     }
 }

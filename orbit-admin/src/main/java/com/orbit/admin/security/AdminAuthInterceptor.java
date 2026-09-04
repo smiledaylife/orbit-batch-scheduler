@@ -11,6 +11,8 @@ import org.springframework.web.servlet.HandlerInterceptor;
 import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 
 /**
  * 调度中心管理接口统一鉴权拦截器。
@@ -74,7 +76,8 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
             return true;
         }
         String actual = extractToken(request);
-        if (expected.trim().equals(actual)) {
+        // 常量时间比对（MessageDigest.isEqual）：抵御时序侧信道逐字节猜测令牌
+        if (constantTimeEquals(expected.trim(), actual)) {
             return true;
         }
 
@@ -85,6 +88,16 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
         response.setCharacterEncoding("UTF-8");
         response.getWriter().write(UNAUTHORIZED_BODY);
         return false;
+    }
+
+    /**
+     * 常量时间字符串比对：除不等长立即返回 false 之外，逐字节比较耗时与内容无关。
+     */
+    private static boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null) {
+            return false;
+        }
+        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

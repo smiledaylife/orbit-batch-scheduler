@@ -15,6 +15,14 @@ services:
       - JAVA_OPTS=-Xms256m -Xmx512m
     volumes:
       - admin-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      # temurin 镜像无 curl/wget，用 bash 内建 /dev/tcp 探测端口连通性
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   orbit-executor:
     build:
@@ -29,8 +37,19 @@ services:
       - JAVA_OPTS=-Xms128m -Xmx256m
       - ORBIT_EXECUTOR_ADMIN_ADDRESSES=http://orbit-admin:8080
       - ORBIT_EXECUTOR_ADDRESS=http://orbit-executor:8081
+      # 单节点并发上限 + 超时强制中断（worker-threads: 0 可退回旧行为）
+      - ORBIT_EXECUTOR_WORKER_THREADS=8
+      - ORBIT_EXECUTOR_QUEUE_CAPACITY=256
     depends_on:
-      - orbit-admin
+      orbit-admin:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/8081' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
   admin-data:

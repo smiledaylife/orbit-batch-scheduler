@@ -3,6 +3,7 @@ package com.orbit.executor.autoconfigure;
 import com.orbit.executor.bootstrap.ExecutorBootstrap;
 import com.orbit.executor.client.AdminClient;
 import com.orbit.executor.config.ExecutorProperties;
+import com.orbit.executor.handler.JobExecutionService;
 import com.orbit.executor.handler.JobHandlerRegistry;
 import com.orbit.executor.web.ExecutorController;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -15,7 +16,8 @@ import org.springframework.context.annotation.Configuration;
 /**
  * Orbit 执行器 Spring Boot 自动装配配置类。
  * 业务应用只需通过 Maven 引入 {@code orbit-executor} 依赖，在配置中开启
- * （默认开启 {@code orbit.executor.enabled: true}），即可自动装配任务注册表、心跳通信客户端和 HTTP 触发入口。
+ * （默认开启 {@code orbit.executor.enabled: true}），即可自动装配任务注册表、心跳通信客户端、
+ * 有界任务执行线程池（超时强制 + 饱和保护）和 HTTP 触发入口。
  */
 @Configuration
 @EnableConfigurationProperties(ExecutorProperties.class)
@@ -31,6 +33,19 @@ public class OrbitExecutorAutoConfiguration {
     @ConditionalOnMissingBean
     public JobHandlerRegistry orbitJobHandlerRegistry() {
         return new JobHandlerRegistry();
+    }
+
+    /**
+     * 注册任务执行服务 Bean（有界工作线程池 + 超时强制中断 + 饱和保护 + 优雅停机）。
+     * DisposableBean 生命周期由 Spring 容器自动回调。
+     *
+     * @param properties 执行器配置属性
+     * @return JobExecutionService 实例
+     */
+    @Bean(destroyMethod = "destroy")
+    @ConditionalOnMissingBean
+    public JobExecutionService orbitJobExecutionService(ExecutorProperties properties) {
+        return new JobExecutionService(properties);
     }
 
     /**
@@ -71,17 +86,19 @@ public class OrbitExecutorAutoConfiguration {
         /**
          * 注册接收调度中心 /orbit/executor/run 和 /handlers 调用的控制器
          *
-         * @param registry   JobHandler 注册表
-         * @param properties 执行器配置属性
-         * @param bootstrap  执行器启动引导器
+         * @param registry        JobHandler 注册表
+         * @param properties      执行器配置属性
+         * @param bootstrap       执行器启动引导器
+         * @param executionService 任务执行服务
          * @return ExecutorController 实例
          */
         @Bean
         @ConditionalOnMissingBean
         public ExecutorController orbitExecutorController(JobHandlerRegistry registry,
                                                           ExecutorProperties properties,
-                                                          ExecutorBootstrap bootstrap) {
-            return new ExecutorController(registry, properties, bootstrap);
+                                                          ExecutorBootstrap bootstrap,
+                                                          JobExecutionService executionService) {
+            return new ExecutorController(registry, properties, bootstrap, executionService);
         }
     }
 }

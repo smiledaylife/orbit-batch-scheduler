@@ -80,6 +80,14 @@ orbit:
     # 留空表示不启用白名单，仅做协议/链路本地地址等基础校验。
     # 生产环境建议收紧，例如：^https?://orbit-executor[a-z0-9-]*\.svc\.cluster\.local(:\d+)?$
     executor-address-allow-pattern: ""
+    # 执行器注册表本地缓存 TTL（毫秒）：调度热路径免查库，写操作立即失效；
+    # 远小于心跳超时阈值，陈旧度上界可控。0 = 关闭缓存。
+    registry-cache-ttl-ms: 3000
+    # 调度执行日志保留天数：后台任务分批删除更早日志，防止日志表无限增长。0 = 关闭清理。
+    log-retention-days: 30
+    # 僵尸 RUNNING 日志回收/日志清理的后台任务频率（毫秒），一般无需调整
+    log-reap-interval-ms: 60000
+    log-cleanup-interval-ms: 3600000
 
 management:
   endpoints:

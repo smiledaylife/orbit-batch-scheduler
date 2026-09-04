@@ -8,7 +8,9 @@ import com.orbit.admin.store.JobStore;
 import com.orbit.core.model.ExecutorNode;
 import com.orbit.core.model.JobInfo;
 import com.orbit.core.model.JobLog;
+import com.orbit.core.model.JobLogStatus;
 import com.orbit.core.model.PageResult;
+import com.orbit.core.model.RouteStrategy;
 import com.orbit.core.model.TriggerRequest;
 import com.orbit.core.model.TriggerResult;
 import org.quartz.CronExpression;
@@ -26,14 +28,18 @@ import org.quartz.TriggerKey;
 import org.quartz.impl.matchers.GroupMatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TimeZone;
 import java.util.UUID;
 
@@ -72,6 +78,15 @@ public class JobService {
      */
     @PostConstruct
     public void init() {
+        // 时区合法性前置校验：TimeZone.getTimeZone 对非法 ID 静默回退 GMT，
+        // 会导致所有 Cron 在错误时区触发且无任何告警 —— 在启动阶段直接失败更安全。
+        String tz = properties.getTimezone();
+        Set<String> available = new HashSet<String>(Arrays.asList(TimeZone.getAvailableIDs()));
+        if (tz == null || !available.contains(tz)) {
+            throw new IllegalStateException("invalid orbit.admin.timezone: " + tz
+                    + " (must be a valid java.util.TimeZone id, e.g. Asia/Shanghai)");
+        }
+
         List<JobInfo> jobs;
         try {
             jobs = jobStore.findAllJobs();
@@ -115,11 +130,17 @@ public class JobService {
             throw new IllegalArgumentException("job already exists: " + input.getJobName());
         }
 
-        // 保存至数据库
-        JobInfo saved = jobStore.saveJob(input);
-        // 同步应用到 Quartz 调度器
-        applySchedule(saved);
-        return saved;
+        try {
+            // 保存至数据库
+            JobInfo saved = jobStore.saveJob(input);
+            // 同步应用到 Quartz 调度器
+            applySchedule(saved);
+            return saved;
+        } catch (DataIntegrityViolationException dup) {
+            // check-then-act 竞态兜底：并发创建同名任务时，唯一约束保证只有一个胜出者，
+            // 败者在此转换为与串行路径一致的友好错误（否则会以裸 500 暴露给调用方）。
+            throw new IllegalArgumentException("job already exists: " + input.getJobName());
+        }
     }
 
     /**
@@ -267,7 +288,7 @@ public class JobService {
         running.setJobName(job.getJobName());
         running.setAppName(job.getAppName());
         running.setHandler(job.getHandler());
-        running.setStatus("RUNNING");
+        running.setStatus(JobLogStatus.RUNNING);
         running.setStartTime(start);
         jobStore.insertLog(running);
 
@@ -279,7 +300,7 @@ public class JobService {
             List<ExecutorNode> candidates = registry.listByApp(job.getAppName());
             if (candidates.isEmpty()) {
                 String msg = "no online executor for appName=" + job.getAppName();
-                jobStore.finishLog(logId, "FAILED", null, 0, msg);
+                jobStore.finishLog(logId, JobLogStatus.FAILED, null, 0, msg);
                 log.warn("[orbit-admin] {}", msg);
                 return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), null, 0, msg);
             }
@@ -287,7 +308,9 @@ public class JobService {
             // 先按路由策略选起点，再对剩余节点做故障转移：
             // Pod 重建后 IP/Pod 名都会变，旧地址在心跳超时前仍在表里；
             // 连不上就立刻摘除并换下一个（对齐 XXL-JOB FAILOVER）。
-            ExecutorNode preferred = registry.route(job.getAppName(), job.getRouteStrategy());
+            // 优化：直接在已查出的 candidates 上选点（原先 route(appName,...) 内部
+            // 会再执行一次 listByApp，每次派发实际查两遍库/缓存）。
+            ExecutorNode preferred = registry.route(candidates, job.getAppName(), job.getRouteStrategy());
             if (preferred != null) {
                 candidates = rotateToFront(candidates, preferred.getAddress());
             }
@@ -325,7 +348,7 @@ public class JobService {
             }
 
             long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
-            String status = result.isSuccess() ? "SUCCESS" : "FAILED";
+            String status = result.isSuccess() ? JobLogStatus.SUCCESS : JobLogStatus.FAILED;
             String address = node == null ? null : node.getAddress();
             jobStore.finishLog(logId, status, address, cost, result.getMessage());
             log.info("[orbit-admin] job={} -> {} @ {} status={} {}ms",
@@ -352,7 +375,7 @@ public class JobService {
      */
     private void safeFinishLog(String logId, String address, long cost, String message) {
         try {
-            jobStore.finishLog(logId, "FAILED", address, cost, message);
+            jobStore.finishLog(logId, JobLogStatus.FAILED, address, cost, message);
         } catch (Exception ex) {
             log.error("[orbit-admin] failed to finalize log {}: {}", logId, ex.getMessage(), ex);
         }
@@ -489,12 +512,6 @@ public class JobService {
     }
 
     /**
-     * 强校验任务是否存在
-     *
-     * @param name 任务名称
-     * @return 任务对象
-     */
-    /**
      * 把首选地址旋到列表头部，其余顺序不变，便于 ROUND 后再 failover。
      */
     private static List<ExecutorNode> rotateToFront(List<ExecutorNode> list, String address) {
@@ -562,9 +579,18 @@ public class JobService {
                 && !CronExpression.isValidExpression(job.getCron())) {
             throw new IllegalArgumentException("invalid cron: " + job.getCron());
         }
-        // 路由策略默认 ROUND
+        // 路由策略：空值回填 ROUND；非空时必须属于合法集合（原先任意字符串都被
+        // 静默当作 ROUND 处理，排拼错误只能在事后翻日志发现），统一规范化为大写存储。
         if (job.getRouteStrategy() == null || job.getRouteStrategy().trim().isEmpty()) {
-            job.setRouteStrategy("ROUND");
+            job.setRouteStrategy(RouteStrategy.ROUND);
+        } else {
+            String s = job.getRouteStrategy().trim().toUpperCase();
+            if (!RouteStrategy.ROUND.equals(s) && !RouteStrategy.RANDOM.equals(s)
+                    && !RouteStrategy.FIRST.equals(s)) {
+                throw new IllegalArgumentException("routeStrategy must be one of ROUND/RANDOM/FIRST: "
+                        + job.getRouteStrategy());
+            }
+            job.setRouteStrategy(s);
         }
         // 超时时间兜底 300 秒
         if (job.getTimeoutSeconds() <= 0) {

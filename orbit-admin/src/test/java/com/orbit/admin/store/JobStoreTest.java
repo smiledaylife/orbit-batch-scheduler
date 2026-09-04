@@ -145,6 +145,95 @@ class JobStoreTest {
         assertThrows(IllegalArgumentException.class, () -> jobStore.saveJob(job));
     }
 
+    @Test
+    void oversizedMessageIsTruncatedWithinColumnWidth() {
+        // 回归测试：旧实现截断后拼接 "..." 会产生 2003 字符，超出 message VARCHAR(2000)，
+        // 执行器返回长异常堆栈时 finishLog 直接报「value too long」入库失败。
+        JobInfo job = jobStore.saveJob(newJob("bigMsg"));
+        JobLog running = new JobLog();
+        running.setLogId("log-big");
+        running.setJobId(job.getId());
+        running.setJobName("bigMsg");
+        running.setStatus("RUNNING");
+        running.setStartTime(new java.util.Date());
+        jobStore.insertLog(running);
+
+        String huge = repeat('e', 3000);
+        jobStore.finishLog("log-big", "FAILED", null, 1L, huge);
+
+        JobLog done = jobStore.pageLogs("bigMsg", 1, 10).getItems().get(0);
+        assertNotNull(done.getMessage());
+        assertTrue(done.getMessage().length() <= 2000, "message must fit column width: "
+                + done.getMessage().length());
+        assertTrue(done.getMessage().endsWith("..."));
+    }
+
+    @Test
+    void reapOrphanedRunningLogs() {
+        // 一条超龄 RUNNING（模拟 admin 崩溃遗留）+ 一条新 RUNNING（模拟正常执行中，不应被误杀）
+        insertRunningLog("log-old", new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L));
+        insertRunningLog("log-new", new java.util.Date());
+
+        int reaped = jobStore.reapOrphanedRunning(3600 * 1000L, "orphaned running log");
+
+        assertEquals(1, reaped);
+        JobLog old = findByLogId("log-old");
+        JobLog fresh = findByLogId("log-new");
+        assertEquals("FAILED", old.getStatus());
+        assertEquals("RUNNING", fresh.getStatus());
+        assertNotNull(old.getEndTime());
+    }
+
+    @Test
+    void deleteLogsBeforeRespectsCutoff() {
+        long now = System.currentTimeMillis();
+        // 三条超期日志 + 一条保留期内日志
+        insertFinishedLog("log-d1", new java.util.Date(now - 40L * 24 * 3600 * 1000));
+        insertFinishedLog("log-d2", new java.util.Date(now - 35L * 24 * 3600 * 1000));
+        insertFinishedLog("log-d3", new java.util.Date(now - 31L * 24 * 3600 * 1000));
+        insertFinishedLog("log-keep", new java.util.Date(now - 1L * 24 * 3600 * 1000));
+
+        java.util.Date cutoff = new java.util.Date(now - 30L * 24 * 3600 * 1000);
+        int deleted = jobStore.deleteLogsBefore(cutoff);
+
+        assertEquals(3, deleted);
+        assertEquals(1, jobStore.pageLogs(null, 1, 10).getTotal());
+        assertNotNull(findByLogId("log-keep"));
+    }
+
+    private void insertRunningLog(String logId, java.util.Date startTime) {
+        JobLog running = new JobLog();
+        running.setLogId(logId);
+        running.setJobName("jobLog");
+        running.setAppName("demo-executor");
+        running.setHandler("dailyReport");
+        running.setStatus("RUNNING");
+        running.setStartTime(startTime);
+        jobStore.insertLog(running);
+    }
+
+    private void insertFinishedLog(String logId, java.util.Date startTime) {
+        JobLog finished = new JobLog();
+        finished.setLogId(logId);
+        finished.setJobName("jobLog");
+        finished.setAppName("demo-executor");
+        finished.setHandler("dailyReport");
+        finished.setStatus("SUCCESS");
+        finished.setStartTime(startTime);
+        finished.setEndTime(new java.util.Date(startTime.getTime() + 1000));
+        finished.setCostMs(1000L);
+        jobStore.insertLog(finished);
+    }
+
+    private JobLog findByLogId(String logId) {
+        for (JobLog l : jobStore.pageLogs("jobLog", 1, 200).getItems()) {
+            if (logId.equals(l.getLogId())) {
+                return l;
+            }
+        }
+        return null;
+    }
+
     private static String repeat(char c, int n) {
         StringBuilder sb = new StringBuilder(n);
         for (int i = 0; i < n; i++) {

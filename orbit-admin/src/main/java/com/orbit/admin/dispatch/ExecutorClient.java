@@ -37,6 +37,11 @@ public class ExecutorClient {
     private final AdminProperties properties;
 
     /**
+     * 预构建的 JSON + 鉴权 Header（accessToken 在运行期不可变，构造时一次性构建）
+     */
+    private final HttpHeaders jsonHeaders;
+
+    /**
      * RestTemplate 缓存，按 readTimeout 复用。
      * 原先每次派发都 new 一个 RestTemplate + SimpleClientHttpRequestFactory（底层 HttpURLConnection、
      * 无连接池），高频调度下是持续的无谓分配。key 的取值受任务 timeoutSeconds 上限约束，规模可控。
@@ -46,6 +51,7 @@ public class ExecutorClient {
 
     public ExecutorClient(AdminProperties properties) {
         this.properties = properties;
+        this.jsonHeaders = buildJsonHeaders(properties.getAccessToken());
     }
 
     /**
@@ -68,16 +74,10 @@ public class ExecutorClient {
             request.setAccessToken(properties.getAccessToken());
         }
 
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        if (properties.getAccessToken() != null && !properties.getAccessToken().isEmpty()) {
-            headers.set(TOKEN_HEADER, properties.getAccessToken());
-        }
-
         // 4. 拼接执行器触发端点 URL
         String url = trimSlash(executorBaseUrl) + "/orbit/executor/run";
         try {
-            TriggerResult result = rest.postForObject(url, new HttpEntity<TriggerRequest>(request, headers),
+            TriggerResult result = rest.postForObject(url, new HttpEntity<TriggerRequest>(request, jsonHeaders),
                     TriggerResult.class);
             // 处理空响应异常场景
             if (result == null) {
@@ -127,18 +127,26 @@ public class ExecutorClient {
 
     /**
      * 取得（或创建）指定 readTimeout 对应的 RestTemplate。
+     * 使用 computeIfAbsent 原子复用：并发首次派发同一超时档位时不再重复构建。
      *
      * @param readTimeoutMs 读取超时毫秒数
      * @return 可复用的 RestTemplate
      */
     private RestTemplate restTemplateFor(int readTimeoutMs) {
-        RestTemplate cached = restTemplates.get(readTimeoutMs);
-        if (cached != null) {
-            return cached;
+        return restTemplates.computeIfAbsent(readTimeoutMs,
+                k -> buildRest(properties.getConnectTimeoutMs(), k));
+    }
+
+    /**
+     * 预构建 JSON + 鉴权 Header。
+     */
+    private static HttpHeaders buildJsonHeaders(String accessToken) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (accessToken != null && !accessToken.isEmpty()) {
+            headers.set(TOKEN_HEADER, accessToken);
         }
-        RestTemplate created = buildRest(properties.getConnectTimeoutMs(), readTimeoutMs);
-        RestTemplate previous = restTemplates.putIfAbsent(readTimeoutMs, created);
-        return previous != null ? previous : created;
+        return headers;
     }
 
     /**

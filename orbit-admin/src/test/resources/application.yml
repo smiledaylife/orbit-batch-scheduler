@@ -32,3 +32,6 @@ orbit:
     heartbeat-timeout-seconds: 90
     max-timeout-seconds: 3600
     executor-address-allow-pattern: ""
+    # 注册表缓存关闭：保证每个测试方法读到的都是最新落库状态
+    registry-cache-ttl-ms: 0
+    log-retention-days: 30

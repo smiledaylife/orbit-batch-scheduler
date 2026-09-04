@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
 
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);
+-- Log retention cleanup and orphaned RUNNING reap both scan by start_time
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_start ON orbit_job_log (start_time);
 
 CREATE TABLE IF NOT EXISTS orbit_executor_registry (
     id               BIGSERIAL PRIMARY KEY,

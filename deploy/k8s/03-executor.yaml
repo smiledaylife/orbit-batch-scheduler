@@ -48,6 +48,11 @@ spec:
               value: http://orbit-admin:8080
             - name: ORBIT_EXECUTOR_APP_NAME
               value: demo-executor
+            # 任务工作线程池：单节点并发上限 + 按任务超时强制中断（0 = 旧行为，可省略）
+            - name: ORBIT_EXECUTOR_WORKER_THREADS
+              value: "8"
+            - name: ORBIT_EXECUTOR_QUEUE_CAPACITY
+              value: "256"
           volumeMounts:
             - name: conf
               mountPath: /app/config

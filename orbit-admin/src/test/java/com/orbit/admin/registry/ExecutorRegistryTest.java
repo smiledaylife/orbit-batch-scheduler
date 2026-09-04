@@ -36,6 +36,8 @@ class ExecutorRegistryTest {
         AdminProperties adminProperties() {
             AdminProperties p = new AdminProperties();
             p.setHeartbeatTimeoutSeconds(90);
+            // 关闭注册表缓存：保证每个断言读到的都是最新落库状态
+            p.setRegistryCacheTtlMs(0);
             return p;
         }
     }

@@ -117,6 +117,8 @@ orbit:
     admin-addresses: http://orbit-admin:8080
     # address 留空：本地用本机 IP，K8s 用 POD_IP
     # port 无需配置，默认自动感知并继承应用自身的 server.port
+    worker-threads: 8                # 单节点并发上限 + 超时强制中断（0 = 旧行为）
+    queue-capacity: 256              # 排队上限，满则快速失败
     access-token: ""                 # 与 admin 一致时可开启
 ```
 
@@ -126,12 +128,21 @@ public class OrderJobs {
     @OrbitJob("settleOrders")
     public String settle(JobContext ctx) {
         // 业务逻辑
+        String bizDate = ctx.getString("bizDate");
+        int batch = ctx.getInt("batch", 100);   // 类型化取参（getInt/getLong/getBoolean/getDouble）
         return "ok";
     }
 }
 ```
 
 方法签名：无参 / `JobContext` / `Map`。
+
+> **任务执行线程池**：执行器内置有界工作线程池（默认 8 线程 + 256 排队，
+> `orbit.executor.worker-threads` / `queue-capacity` 可调）：
+> 限制单节点并发执行数、队列满时快速失败返回 `executor saturated`；
+> 并按任务 `timeoutSeconds` **超时强制中断**（`interrupted=true`），
+> 彻底消除「调度中心 HTTP 读超时放弃后，执行器任务永久僵尸运行」的问题。
+> 设 `worker-threads: 0` 可退回旧版「请求线程内联执行」行为。
 
 > 执行器 SDK（`orbit-executor` + `orbit-core`）以 **Java 8 字节码**发布，业务应用运行在 **JRE 8 及以上 + Spring Boot 2.7** 即可接入，
 > 与调度中心使用 JDK 11 互不影响（两端仅经 HTTP/JSON 交互）。调度中心的 Quartz 依赖不会传递到业务侧。
@@ -281,13 +292,23 @@ spring:
 
 | 项 | 默认 | 说明 |
 |----|------|------|
-| `access-token` | 空 | 与执行器双向校验 |
+| `access-token` | 空 | 与执行器双向校验（比对采用常量时间算法，防时序侧信道） |
 | `heartbeat-timeout-seconds` | 90 | 超时摘除执行器 |
 | `evict-interval-ms` | 30000 | 后台扫描摘除失联节点的频率 |
-| `timezone` | Asia/Shanghai | Cron 时区 |
+| `timezone` | Asia/Shanghai | Cron 时区（非法值启动即失败，不再静默回退 GMT） |
 | `group` | ORBIT | Quartz Job/Trigger 分组名 |
 | `connect-timeout-ms` | 3000 | 调执行器连接超时 |
 | `read-timeout-ms` | 300000 | 默认读超时 |
+| `max-timeout-seconds` | 3600 | 单任务超时上限（派发封顶 + 僵尸 RUNNING 回收阈值基准） |
+| `registry-cache-ttl-ms` | 3000 | 注册表本地缓存 TTL：调度热路径免查库；写操作立即失效；0 = 关闭 |
+| `log-retention-days` | 30 | 执行日志保留天数：后台分批删除更早日志；0 = 关闭 |
+| `log-reap-interval-ms` | 60000 | 僵尸 RUNNING 日志回收频率（阈值 = max-timeout + 5 分钟宽限） |
+| `log-cleanup-interval-ms` | 3600000 | 日志保留期清理频率 |
+
+> **注册表缓存说明**：TTL（默认 3s）远小于心跳超时（90s），多副本间写传播延迟上界即
+> TTL；本进程写操作（注册/摘除/剔除）立即失效缓存；派发命中已下线节点由既有
+> failover（不可达即摘除换节点）兑底。XXL-JOB 调度中心为纯内存注册表 + 30s DB
+> 拉取，本实现 3s TTL 远比其新鲜。
 
 **执行器 `orbit.executor.*`**
 
@@ -300,7 +321,9 @@ spring:
 | `port` | 0（自动感知） | 默认自动继承 `server.port`，无需配置；仅端口映射需覆盖时指定 |
 | `node-id` | 空 | 节点唯一标识；空则取 `POD_NAME`/主机名 |
 | `heartbeat-interval-ms` | 20000 | 心跳间隔（保底不低于 5000） |
-| `access-token` | 空 | 令牌 |
+| `worker-threads` | 8 | 任务工作线程数：单节点并发上限 + 超时强制中断；0 = 请求线程内联（旧行为） |
+| `queue-capacity` | 256 | 任务排队队列容量：满则新触发快速失败（executor saturated） |
+| `access-token` | 空 | 令牌（双向常量时间比对） |
 
 ---
 
@@ -313,7 +336,8 @@ spring:
 | 任务注解 | `@XxlJob` | `@OrbitJob` |
 | 注册 | 心跳写入 `xxl_job_registry`（MySQL） | 心跳写入 `orbit_executor_registry`（共享库，无状态 Deployment） |
 | 触发 | HTTP | HTTP `/orbit/executor/run` |
-| 路由 | 轮询/随机/故障转移… | ROUND / RANDOM / FIRST |
+| 路由 | 轮询/随机/故障转移… | ROUND / RANDOM / FIRST（非法值创建/更新时拒绝） |
+| 超时 | — | 双端对齐：admin 读超时 + 执行器强制中断（消除僵尸任务） |
 | 存储 | MySQL | H2（默认）/ PostgreSQL / GaussDB |
 | ORM/连接池 | — | MyBatis 3.5.19 + MyBatis-Plus 3.5.7 + Druid 1.2.8 |
 

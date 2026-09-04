@@ -62,6 +62,34 @@ public class ExecutorProperties {
      */
     private String nodeId = "";
 
+    /**
+     * 任务执行工作线程数（默认 8）。
+     * <p>
+     * 引入有界工作线程池后的收益：
+     * <ul>
+     *   <li>限制单节点并发的任务执行数，防止瞬时触发风暴打爆业务应用；</li>
+     *   <li>超出线程数的触发进入队列排队，队列满则立即返回「executor saturated」失败
+     *       （调度中心可据此观测并扩容副本）；</li>
+     *   <li>任务在独立线程执行后，可按任务 {@code timeoutSeconds} 进行<b>超时强制中断</b>，
+     *       解决「调度中心 HTTP 读超时放弃后，执行器任务永久僵尸运行」的问题；</li>
+     *   <li>任务线程独立命名（orbit-job-worker-N），便于线程 dump 定位。</li>
+     * </ul>
+     * 设为 0 表示退回旧版行为：任务直接在 Web 容器请求线程内执行，无超时强制。
+     */
+    private int workerThreads = 8;
+
+    /**
+     * 任务排队队列容量（默认 256）。仅当 {@code worker-threads > 0} 时生效。
+     * 队列满后新触发立即失败返回，不会再占用请求线程等待。
+     */
+    private int queueCapacity = 256;
+
+    /**
+     * 传入 timeoutSeconds 非法（&lt;=0）时，执行器侧兜底的最大等待秒数（24 小时）。
+     * 正常情况下调度中心总会下发正的超时值，此项仅为防御性兜底。
+     */
+    private int maxJobWaitSeconds = 86400;
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -124,5 +152,29 @@ public class ExecutorProperties {
 
     public void setNodeId(String nodeId) {
         this.nodeId = nodeId;
+    }
+
+    public int getWorkerThreads() {
+        return workerThreads;
+    }
+
+    public void setWorkerThreads(int workerThreads) {
+        this.workerThreads = workerThreads;
+    }
+
+    public int getQueueCapacity() {
+        return queueCapacity;
+    }
+
+    public void setQueueCapacity(int queueCapacity) {
+        this.queueCapacity = queueCapacity;
+    }
+
+    public int getMaxJobWaitSeconds() {
+        return maxJobWaitSeconds;
+    }
+
+    public void setMaxJobWaitSeconds(int maxJobWaitSeconds) {
+        this.maxJobWaitSeconds = maxJobWaitSeconds;
     }
 }

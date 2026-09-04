@@ -27,6 +27,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -287,7 +289,9 @@ public class AdminApiController {
             return;
         }
         String actual = headerToken != null && !headerToken.isEmpty() ? headerToken : bodyToken;
-        if (!expect.equals(actual)) {
+        // 常量时间比对（MessageDigest.isEqual）：抵御时序侧信道逐字节猜测令牌
+        if (actual == null || !MessageDigest.isEqual(
+                expect.getBytes(StandardCharsets.UTF_8), actual.getBytes(StandardCharsets.UTF_8))) {
             throw new IllegalArgumentException("invalid access token");
         }
     }
