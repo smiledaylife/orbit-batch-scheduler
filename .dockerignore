@@ -1,0 +1,25 @@
+# 构建上下文瘦身：Dockerfile 只 COPY 根 pom.xml 与四个模块目录，
+# 其余内容（尤其是 .git 与 target）不该进入构建上下文。
+.git
+.gitignore
+.github
+
+# Maven 构建产物（镜像内会重新 mvn package）
+**/target
+
+# 运行期数据与日志（H2 文件库等）
+**/data
+*.log
+logs
+
+# IDE / 系统文件
+.idea
+*.iml
+*.ipr
+*.iws
+.vscode
+.settings
+.classpath
+.project
+.DS_Store
+Thumbs.db

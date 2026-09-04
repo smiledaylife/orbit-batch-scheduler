@@ -7,26 +7,29 @@ import java.util.regex.PatternSyntaxException;
 
 /**
  * 执行器注册地址校验器。
- * <p>
+ *
  * 背景：{@code POST /orbit/admin/registry} 的 {@code address} 字段完全由调用方给出，
  * 调度中心随后会向该地址发起 {@code POST /orbit/executor/run}，并在请求中携带 accessToken。
  * 若不校验，该接口即成为一个 SSRF 入口（例如注册云厂商元数据地址
  * {@code http://169.254.169.254/latest/meta-data}）。
- * <p>
+ *
  * 校验规则：
- * <ol>
- *   <li>必须是合法 URI，且协议只能是 http / https；</li>
- *   <li>必须含 host，端口（若显式给出）必须在 1..65535；</li>
- *   <li>host 为 IP 字面量时，拒绝链路本地（169.254.0.0/16、fe80::/10）、
- *       任意本地（0.0.0.0/8、::）、组播与广播地址；</li>
- *   <li>若配置了 {@code orbit.admin.executor-address-allow-pattern}，
- *       地址还必须整体匹配该正则。</li>
- * </ol>
- * <p>
- * <b>已知边界</b>：本类刻意<b>不做 DNS 解析</b>。原因是解析会给注册路径引入网络延迟与
- * 不确定性，且离线/测试环境（如 host 为 {@code a} 的用例）会因此失败。
- * 因此攻击者仍可能用一个解析到 169.254.169.254 的域名绕过第 3 条 ——
- * 需要彻底封堵时请配置第 4 条的白名单正则。
+ *
+ *   1) 必须是合法 URI，且协议只能是 http / https；
+ *   2) 必须含 host，端口（若显式给出）必须在 1..65535；
+ *   3) host 为 IP 字面量时，拒绝链路本地（169.254.0.0/16、fe80::/10）、
+ *      任意本地（0.0.0.0/8、::）、组播与广播地址；
+ *   4) 若配置了 {@code orbit.admin.executor-address-allow-pattern}，
+ *      地址还必须整体匹配该正则。
+ *
+ * 已知边界：
+ *
+ *   - 本类刻意不做 DNS 解析。原因是解析会给注册路径引入网络延迟与不确定性，
+ *     且离线/测试环境（如 host 为 {@code a} 的用例）会因此失败。因此攻击者仍可能
+ *     用一个解析到 169.254.169.254 的域名绕过第 3 条；
+ *   - 回环地址（127.0.0.0/8、::1、localhost）刻意放行，以便单机 / docker-compose
+ *     直接联调；
+ *   - 上述两类绕过都需要在生产环境用第 4 条的白名单正则一并封堵。
  */
 public final class ExecutorAddressValidator {
 

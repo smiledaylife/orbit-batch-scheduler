@@ -47,12 +47,22 @@ spring:
   # 详见 application-cluster.yml 与 deploy/sql/quartz-*.sql。
   quartz:
     job-store-type: memory
+    # 优雅停机时等待正在执行的派发跑完再关闭调度器。
+    # 派发是同步阻塞的：进程被直接打断会留下永远停在 RUNNING 的日志
+    # （兜底回收见 orbit.admin.log-* 与 AdminScheduleTasks#cleanupLogs）。
+    wait-for-jobs-to-complete-on-shutdown: true
     properties:
       org.quartz.scheduler.instanceName: orbit-admin
       org.quartz.scheduler.instanceId: AUTO
       org.quartz.threadPool.threadCount: 10
   lifecycle:
     timeout-per-shutdown-phase: 30s
+  # 后台维护任务的线程池：执行器摘除（evict）与日志清理（cleanupLogs）各占一个线程，
+  # 避免 Spring Boot 默认的单线程调度器让慢任务阻塞快任务
+  task:
+    scheduling:
+      pool:
+        size: 2
 
 # MyBatis-Plus 配置
 mybatis-plus:
@@ -72,6 +82,7 @@ orbit:
     read-timeout-ms: 300000
     group: ORBIT
     timezone: Asia/Shanghai
+    # 后台摘除失联执行器的扫描频率（毫秒），由 @Scheduled 直接读取
     evict-interval-ms: 30000
     # 单个任务允许的最大执行超时（秒）。用于给派发调用设上限，
     # 避免手动触发/定时派发长时间占住 Tomcat 线程或 Quartz 工作线程。
@@ -80,6 +91,10 @@ orbit:
     # 留空表示不启用白名单，仅做协议/链路本地地址等基础校验。
     # 生产环境建议收紧，例如：^https?://orbit-executor[a-z0-9-]*\.svc\.cluster\.local(:\d+)?$
     executor-address-allow-pattern: ""
+    # 调度日志（orbit_job_log）保留天数；0 或负数表示永久保留
+    log-retention-days: 30
+    # 日志清理任务的执行频率（毫秒），默认每小时一次；首次执行延后一个周期
+    log-cleanup-interval-ms: 3600000
 
 management:
   endpoints:

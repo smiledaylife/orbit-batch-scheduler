@@ -24,7 +24,7 @@ import java.lang.annotation.Target;
  *
  *       // 方式 2：直接接收 Map 类型的参数字典
  *       @OrbitJob("dataSync")
- *       public void dataSync(Map&lt;String, Object&gt; params) {
+ *       public void dataSync(Map<String, Object> params) {
  *           // 业务逻辑
  *       }
  *

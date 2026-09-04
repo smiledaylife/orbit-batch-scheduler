@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
 
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);
+-- 日志保留清理（按 start_time 删除过期记录，见 orbit.admin.log-retention-days）
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_start ON orbit_job_log (start_time);
+-- 僵尸 RUNNING 日志回收（status + start_time 过滤，见 AdminScheduleTasks#cleanupLogs）
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_status_start ON orbit_job_log (status, start_time);
 
 CREATE TABLE IF NOT EXISTS orbit_executor_registry (
     id               BIGSERIAL PRIMARY KEY,

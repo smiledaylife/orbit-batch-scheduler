@@ -34,19 +34,19 @@ import java.util.Map;
 /**
  * 调度中心对外统一 RESTful API 控制器。
  * 端点涵盖：
- * 
+ *
  *   - 执行器通信侧：
- *     
+ *
  *       - {@code POST /orbit/admin/registry}：执行器注册与心跳上报
  *       - {@code POST /orbit/admin/registry/remove}：执行器主动下线
- *     
+ *
  *   - 运维与管理控制侧：
- *     
+ *
  *       - {@code /orbit/admin/jobs/**}：任务增删改查、暂停、恢复、即时手动触发
  *       - {@code /orbit/admin/logs}：任务调度执行日志分页查询
  *       - {@code /orbit/admin/executors}：在线执行器节点列表查询
  *       - {@code /orbit/admin/overview}：调度中心运行大盘统计数据
- *     
+ *
  */
 @RestController
 @RequestMapping("/orbit/admin")
@@ -264,7 +264,7 @@ public class AdminApiController {
 
     /**
      * 捕获全局未处理异常（500）。
-     * <p>
+     *
      * 不再把 {@code e.getMessage()} 回给调用方：其中可能包含 SQL 片段、表名、
      * 驱动类名等内部信息。完整堆栈只写服务端日志。
      */

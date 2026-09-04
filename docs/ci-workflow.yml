@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# GitHub Actions 工作流模板（尚未启用）。
+#
+# 放到仓库的 .github/workflows/ci.yml 即可生效：
+#   mkdir -p .github/workflows && cp docs/ci-workflow.yml .github/workflows/ci.yml
+#
+# 之所以没有直接提交到 .github/workflows/：当前用于推送的 GitHub App 令牌没有
+# workflows 权限，GitHub 会拒绝这类改动（"refusing to allow a GitHub App to
+# create or update workflow ... without `workflows` permission"）。
+# 给 App 勾上 Workflows 权限（Read and write）后，把这个文件移过去即可。
+# ---------------------------------------------------------------------------
+
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # 调度中心依赖 Quartz 2.5.x（class 版本 55），整个 reactor 必须用 JDK 11+ 构建
+  reactor:
+    name: Reactor build & test (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [ '11', '17' ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: Build and test all modules
+        run: mvn -B -ntp clean verify
+
+      - name: Assert SDK jars are Java 8 bytecode
+        run: |
+          set -euo pipefail
+          # orbit-core / orbit-executor 面向 JRE 8 的业务方，产物必须是 class 文件版本 52
+          check() {
+            jar="$1"
+            cls=$(unzip -Z1 "$jar" | grep -m1 '\.class$')
+            major=$(unzip -p "$jar" "$cls" | od -An -tu1 -j6 -N2 | awk '{print $1*256+$2}')
+            echo "$jar :: $cls -> major version $major"
+            if [ "$major" != "52" ]; then
+              echo "::error::$jar is not Java 8 bytecode (expected major 52, got $major)"
+              exit 1
+            fi
+          }
+          check orbit-core/target/orbit-core-1.0.0.jar
+          check orbit-executor/target/orbit-executor-1.0.0.jar
+
+  # README 承诺「本机只有 JDK 8 时可单独构建 SDK 模块」，用 CI 把这句话钉住
+  sdk-on-jdk8:
+    name: SDK modules on JDK 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Build core / executor / sample only
+        run: mvn -B -ntp -pl orbit-core,orbit-executor,orbit-executor-sample clean verify

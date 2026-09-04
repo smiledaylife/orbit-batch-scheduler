@@ -14,22 +14,22 @@ import javax.servlet.http.HttpServletResponse;
 
 /**
  * 调度中心管理接口统一鉴权拦截器。
- * <p>
+ *
  * 背景：此前只有 {@code /registry} 与 {@code /registry/remove} 两个端点调用了
  * {@code checkToken}，其余 11 个端点（含 {@code POST /jobs}、{@code DELETE /jobs/{name}}、
  * {@code POST /jobs/{name}/trigger}）即使在配置了 accessToken 的情况下也完全不校验 ——
  * 任何能访问到调度中心端口的人都可以建任务、删任务、立即触发任意 handler。
- * <p>
- * 本拦截器覆盖 {@code /orbit/admin/**} 全部端点，令牌从请求头读取：
- * <ul>
- *   <li>{@code X-Orbit-Token: <token>}（执行器与本拦截器共用同一约定）；</li>
- *   <li>或 {@code Authorization: Bearer <token>}（便于 curl / 浏览器 / 网关接入）。</li>
- * </ul>
+ *
+ * 本拦截器覆盖 {@code /orbit/admin/**} 全部端点，令牌从请求头读取，两种写法任选其一：
+ *
+ *   - {@code X-Orbit-Token: your-token}（执行器与本拦截器共用同一约定）；
+ *   - {@code Authorization: Bearer your-token}（便于 curl / 浏览器 / 网关接入）。
+ *
  * 说明：{@code /registry} 额外支持从请求体读取 token（见 {@code AdminApiController.checkToken}），
  * 那是为了兼容执行器的历史行为；拦截器不读请求体，因为 preHandle 阶段消费 body
  * 会影响后续 {@code @RequestBody} 反序列化。执行器两端都会带请求头，因此不受影响。
- * <p>
- * <b>未配置 accessToken 时的行为</b>：放行，但启动时打印醒目告警。
+ *
+ * 未配置 accessToken 时的行为：放行，但启动时打印醒目告警。
  * 这样保留了开箱即用的开发体验；生产环境必须配置
  * {@code orbit.admin.access-token}。
  */

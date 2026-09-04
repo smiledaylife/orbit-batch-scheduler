@@ -158,6 +158,12 @@ public class OrderJobs {
 | POST | `/orbit/executor/run` | 执行器：接收调度触发（调度中心调用） |
 | GET | `/orbit/executor/handlers` | 执行器：查询本节点注册的 Handler 列表 |
 
+> **鉴权**：配置了 `orbit.admin.access-token` 之后，`/orbit/admin/**` 的**全部**端点都要带令牌，
+> 二选一：请求头 `X-Orbit-Token: your-token`，或 `Authorization: Bearer your-token`；
+> 校验失败返回 `401` + `{"code":401,"success":false,...}`。
+> Actuator（`/actuator/health` 等）不在拦截范围内，K8s 探针可免鉴权访问。
+> 执行器侧同理：`orbit.executor.access-token` 与调度中心配置一致即可。
+
 任务字段：
 
 | 字段 | 说明 |
@@ -168,8 +174,33 @@ public class OrderJobs {
 | `cron` | Quartz Cron，空=仅手动 |
 | `params` | JSON 参数 |
 | `routeStrategy` | `ROUND` / `RANDOM` / `FIRST` |
-| `timeoutSeconds` | 读超时 |
+| `timeoutSeconds` | 本次派发的总时间预算（秒），failover 的多次尝试共享；受 `max-timeout-seconds` 封顶 |
 | `enabled` | 是否调度 |
+
+### 4.1 派发、超时与日志生命周期
+
+一次派发（定时或手动）的完整链路：
+
+1. 生成 `logId`（UUID）并写入一条 `RUNNING` 日志；
+2. 按 `routeStrategy` 选首选节点，其余在线节点按地址排序作为 failover 候选；
+3. 依次尝试候选节点，**所有尝试共享 `timeoutSeconds` 这一份预算**：
+   每次 HTTP 调用的读超时 = `min(timeoutSeconds, 剩余预算)`，预算耗尽即失败返回，
+   不会出现「候选数 × timeoutSeconds」把 Quartz 工作线程 / Tomcat 线程长时间占住的情况；
+4. 仅当失败像「对端已不存在」（connection refused / connect timed out / no route to host …）时，
+   才立刻从注册表摘除该节点并转移下一个；**读超时不转移** —— 任务可能仍在执行器上跑，
+   换节点重跑会导致同一次调度被执行两遍（`connection reset` 无法区分握手阶段还是响应阶段断开，
+   按不可达处理，对重复执行敏感的任务请在 Handler 内用 `JobContext#getLogId()` 去重）；
+5. 终态写回日志：`SUCCESS` / `FAILED`，含执行器地址、耗时与消息摘要（超长截断到 2000 字符）。
+
+日志表 `orbit_job_log` 由后台任务维护（`AdminScheduleTasks#cleanupLogs`，默认每小时一次）：
+
+| 行为 | 配置 | 说明 |
+|------|------|------|
+| 过期清理 | `orbit.admin.log-retention-days`（默认 30，`<=0` 永久保留） | 按 `start_time` 物理删除 |
+| 僵尸回收 | 依据 `orbit.admin.max-timeout-seconds` 自动推导 | 调度中心被 kill / OOM 时来不及收尾、长期停在 `RUNNING` 的记录会被置为 `FAILED` 并注明原因 |
+
+> 停机时 Quartz 配置了 `wait-for-jobs-to-complete-on-shutdown: true`，正常优雅停机会等在途派发跑完再退出；
+> 被 `SIGKILL` 打断的记录才依赖上面的僵尸回收兜底。
 
 ---
 
@@ -284,6 +315,10 @@ spring:
 | `access-token` | 空 | 与执行器双向校验 |
 | `heartbeat-timeout-seconds` | 90 | 超时摘除执行器 |
 | `evict-interval-ms` | 30000 | 后台扫描摘除失联节点的频率 |
+| `log-retention-days` | 30 | 调度日志保留天数，`<=0` 永久保留 |
+| `log-cleanup-interval-ms` | 3600000 | 日志清理 / 僵尸 RUNNING 回收的频率 |
+| `max-timeout-seconds` | 3600 | 单任务超时上限，同时是单次派发的总预算上限 |
+| `executor-address-allow-pattern` | 空 | 执行器注册地址白名单正则（防 SSRF），空=只做基础校验 |
 | `timezone` | Asia/Shanghai | Cron 时区 |
 | `group` | ORBIT | Quartz Job/Trigger 分组名 |
 | `connect-timeout-ms` | 3000 | 调执行器连接超时 |
@@ -316,5 +351,31 @@ spring:
 | 路由 | 轮询/随机/故障转移… | ROUND / RANDOM / FIRST |
 | 存储 | MySQL | H2（默认）/ PostgreSQL / GaussDB |
 | ORM/连接池 | — | MyBatis 3.5.19 + MyBatis-Plus 3.5.7 + Druid 1.2.8 |
+| 日志清理 | 手动 / 定时清理 | 后台任务按 `log-retention-days` 自动清理 + 僵尸 `RUNNING` 回收 |
+| 鉴权 | accessToken | accessToken（`/orbit/admin/**` 全端点拦截，支持 `X-Orbit-Token` 与 `Bearer`） |
 
 设计刻意保持精简：无独立 Web 控制台 UI（用 REST API / 自行对接前端）、无 GLUE 模式、无子任务 DAG，满足「中心调度 + 业务侧执行」的云原生批量场景即可扩展。
+
+---
+
+## 8. 持续集成
+
+`docs/ci-workflow.yml` 是一份可直接使用的 GitHub Actions 工作流模板，覆盖三件事：
+
+| 作业 | 内容 |
+|------|------|
+| `reactor`（JDK 11 / 17） | `mvn clean verify` 全量构建 + 单元测试；随后校验 `orbit-core` / `orbit-executor` 产物的 class 文件主版本号为 **52（Java 8）**，钉住「SDK 面向 JRE 8」的承诺 |
+| `sdk-on-jdk8`（JDK 8） | 只构建 `orbit-core,orbit-executor,orbit-executor-sample`，验证 README 里「本机只有 JDK 8」那条命令确实可用 |
+
+启用方式（需要仓库的 **Workflows** 写权限）：
+
+```bash
+mkdir -p .github/workflows && cp docs/ci-workflow.yml .github/workflows/ci.yml
+git add .github/workflows/ci.yml && git commit -m "ci: enable GitHub Actions build" && git push
+```
+
+启用后可在 README 标题下加回徽章：
+
+```markdown
+[![CI](https://github.com/smiledaylife/orbit-batch-scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/smiledaylife/orbit-batch-scheduler/actions/workflows/ci.yml)
+```

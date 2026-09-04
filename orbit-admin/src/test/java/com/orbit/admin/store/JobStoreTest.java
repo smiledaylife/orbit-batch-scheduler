@@ -21,7 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link JobStore} 持久层切片测试（MyBatis-Plus + 内存 H2 + Druid）。
- * 验证：任务 CRUD、分页、JSON 参数存取、乐观锁并发冲突、日志插入/完成、长度校验。
+ * 验证：任务 CRUD、分页、JSON 参数存取、乐观锁并发冲突、日志插入/完成、长度校验、
+ * 日志保留清理与僵尸 RUNNING 回收。
  * {@code @MybatisPlusTest} 默认事务回滚，测试间互不污染。
  */
 @MybatisPlusTest
@@ -143,6 +144,70 @@ class JobStoreTest {
         big.put("payload", repeat('x', 3000));
         job.setParams(big);
         assertThrows(IllegalArgumentException.class, () -> jobStore.saveJob(job));
+    }
+
+    @Test
+    void purgeLogsBeforeCutoff() {
+        JobInfo job = jobStore.saveJob(newJob("jobPurge"));
+        insertRunningLog("log-old", job, daysAgo(40));
+        insertRunningLog("log-new", job, new java.util.Date());
+
+        int purged = jobStore.deleteLogsBefore(daysAgo(30));
+
+        assertEquals(1, purged);
+        PageResult<JobLog> page = jobStore.pageLogs("jobPurge", 1, 10);
+        assertEquals(1, page.getTotal());
+        assertEquals("log-new", page.getItems().get(0).getLogId());
+    }
+
+    @Test
+    void reclaimStaleRunningLogs() {
+        JobInfo job = jobStore.saveJob(newJob("jobStale"));
+        insertRunningLog("log-stale", job, hoursAgo(3));
+        insertRunningLog("log-fresh", job, new java.util.Date());
+
+        int reclaimed = jobStore.failStaleRunningLogs(hoursAgo(2), "reclaimed by cleanup task");
+
+        assertEquals(1, reclaimed);
+        PageResult<JobLog> page = jobStore.pageLogs("jobStale", 1, 10);
+        JobLog stale = find(page, "log-stale");
+        JobLog fresh = find(page, "log-fresh");
+        assertEquals("FAILED", stale.getStatus());
+        assertEquals("reclaimed by cleanup task", stale.getMessage());
+        assertNotNull(stale.getEndTime());
+        // 仍在派发窗口内的记录不能被误伤
+        assertEquals("RUNNING", fresh.getStatus());
+    }
+
+    /** 插入一条 RUNNING 状态、指定开始时间的日志，用于验证保留策略与僵尸回收 */
+    private void insertRunningLog(String logId, JobInfo job, java.util.Date startTime) {
+        JobLog running = new JobLog();
+        running.setLogId(logId);
+        running.setJobId(job.getId());
+        running.setJobName(job.getJobName());
+        running.setAppName(job.getAppName());
+        running.setHandler(job.getHandler());
+        running.setStatus("RUNNING");
+        running.setStartTime(startTime);
+        jobStore.insertLog(running);
+    }
+
+    /** 从分页结果里按 logId 取出日志，取不到直接让测试失败 */
+    private static JobLog find(PageResult<JobLog> page, String logId) {
+        for (JobLog item : page.getItems()) {
+            if (logId.equals(item.getLogId())) {
+                return item;
+            }
+        }
+        throw new AssertionError("log not found in page: " + logId);
+    }
+
+    private static java.util.Date daysAgo(int days) {
+        return new java.util.Date(System.currentTimeMillis() - days * 24L * 60L * 60L * 1000L);
+    }
+
+    private static java.util.Date hoursAgo(int hours) {
+        return new java.util.Date(System.currentTimeMillis() - hours * 60L * 60L * 1000L);
     }
 
     private static String repeat(char c, int n) {

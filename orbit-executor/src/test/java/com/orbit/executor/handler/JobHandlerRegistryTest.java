@@ -21,10 +21,10 @@ import static org.mockito.Mockito.when;
 
 /**
  * 执行器核心组件单元测试：
- * 
+ *
  *   - {@link JobHandlerRegistry} 注解扫描与动态反射调用测试
  *   - {@link ExecutorBootstrap} 自动感知 server.port 端口逻辑测试
- * 
+ *
  */
 class JobHandlerRegistryTest {
 

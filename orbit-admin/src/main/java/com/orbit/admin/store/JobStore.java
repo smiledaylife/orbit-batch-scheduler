@@ -25,14 +25,16 @@ import java.util.Optional;
  * 任务与日志持久化存储层（MyBatis-Plus 实现）。
  * 技术栈：Druid 连接池 + MyBatis-Plus（{@link com.baomidou.mybatisplus.core.mapper.BaseMapper}）。
  * 设计说明：
- * 
+ *
  *   - 对外暴露/返回的是 {@code orbit-core} 的协议模型（{@link JobInfo}/{@link JobLog}），
  *       持久层内部使用 {@code po} 包下的实体（{@link OrbitJobPO}/{@link OrbitJobLogPO}），
  *       二者在此处相互转换，保证共享协议模块不依赖任何 ORM 框架；
  *   - {@code orbit_job} 通过 {@code @Version} + 乐观锁插件实现并发更新控制；
  *   - {@code params} 以 JSON 字符串落库；日志 {@code message} 超长截断；
- *   - 分页依赖 {@link com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor}。
- * 
+ *   - 分页依赖 {@link com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor}；
+ *   - 日志保留（{@code deleteLogsBefore}）与僵尸 RUNNING 回收（{@code failStaleRunningLogs}）
+ *       由 {@link com.orbit.admin.config.AdminScheduleTasks} 周期驱动。
+ *
  */
 @Repository
 public class JobStore {
@@ -282,6 +284,45 @@ public class JobStore {
             items.add(toLog(po));
         }
         return new PageResult<JobLog>(p, s, result.getTotal(), items);
+    }
+
+    /**
+     * 物理删除 {@code start_time} 早于给定时间点的调度日志（日志保留策略）。
+     * 由 {@link com.orbit.admin.config.AdminScheduleTasks} 周期性调用，
+     * 避免 {@code orbit_job_log} 无限增长。
+     *
+     * @param cutoff 保留起始时间点，早于该时间点的记录将被删除
+     * @return 实际删除的记录数
+     */
+    public int deleteLogsBefore(Date cutoff) {
+        if (cutoff == null) {
+            return 0;
+        }
+        return logMapper.delete(new LambdaQueryWrapper<OrbitJobLogPO>()
+                .lt(OrbitJobLogPO::getStartTime, cutoff));
+    }
+
+    /**
+     * 把长时间停留在 RUNNING 的僵尸日志收敛为 FAILED。
+     * 派发是同步阻塞的，正常情况下 RUNNING 只存在于一次 HTTP 调用期间；
+     * 调度中心被 kill / OOM / 崩溃时，{@code finishLog} 没有机会执行，
+     * 这些记录会永久停在 RUNNING（既误导排障，也让成功率统计失真）。
+     *
+     * @param cutoff 起始时间早于该时间点且仍为 RUNNING 的日志被判定为僵尸
+     * @param reason 写入 {@code message} 的说明（超长自动截断）
+     * @return 实际收敛的记录数
+     */
+    public int failStaleRunningLogs(Date cutoff, String reason) {
+        if (cutoff == null) {
+            return 0;
+        }
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .eq(OrbitJobLogPO::getStatus, "RUNNING")
+                .lt(OrbitJobLogPO::getStartTime, cutoff)
+                .set(OrbitJobLogPO::getStatus, "FAILED")
+                .set(OrbitJobLogPO::getMessage, abbreviate(reason))
+                .set(OrbitJobLogPO::getEndTime, new Date());
+        return logMapper.update(null, uw);
     }
 
     // ============================ PO <-> 模型 转换 ============================

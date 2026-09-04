@@ -5,7 +5,11 @@ import org.springframework.stereotype.Component;
 
 /**
  * 调度中心配置属性类（对应配置前缀：{@code orbit.admin.*}）。
- * 涵盖调度中心鉴权令牌、执行器心跳超时阈值、派发超时控制以及 Quartz 分组和时区配置。
+ * 涵盖调度中心鉴权令牌、执行器心跳超时阈值、派发超时控制、调度日志保留策略
+ * 以及 Quartz 分组和时区配置。
+ *
+ * 说明：后台任务的执行频率（{@code evict-interval-ms} / {@code log-cleanup-interval-ms}）
+ * 由 {@code @Scheduled} 直接以占位符形式读取，不在本类中重复声明。
  */
 @Component
 @ConfigurationProperties(prefix = "orbit.admin")
@@ -21,9 +25,16 @@ public class AdminProperties {
     /**
      * 执行器心跳超时剔除时间（秒），默认为 90 秒。
      * 调度中心后台任务将周期性扫描注册表，若节点的最近心跳时间距当前时间超过该阈值，
-     * 则判定该执行器实例失联并从内存注册表中剔除。
+     * 则判定该执行器实例失联并从注册表中剔除。
      */
     private int heartbeatTimeoutSeconds = 90;
+
+    /**
+     * 调度日志（{@code orbit_job_log}）保留天数，默认 30 天。
+     * 后台清理任务会按 {@code start_time} 物理删除超过保留期的日志记录；
+     * 设为 0 或负数表示永久保留（不做清理）。
+     */
+    private int logRetentionDays = 30;
 
     /**
      * 调度中心向执行器发起 HTTP 调用时的建立连接超时时间（毫秒），默认为 3000ms（3秒）。
@@ -76,6 +87,14 @@ public class AdminProperties {
 
     public void setHeartbeatTimeoutSeconds(int heartbeatTimeoutSeconds) {
         this.heartbeatTimeoutSeconds = heartbeatTimeoutSeconds;
+    }
+
+    public int getLogRetentionDays() {
+        return logRetentionDays;
+    }
+
+    public void setLogRetentionDays(int logRetentionDays) {
+        this.logRetentionDays = logRetentionDays;
     }
 
     public int getConnectTimeoutMs() {

@@ -16,7 +16,7 @@ import org.springframework.beans.factory.annotation.Autowired;
  * 所有注册到 Quartz 的定时任务均统一关联此 Job 实现类。
  * 当 Cron 触发时，本类根据任务名称从数据库拉取最新任务状态，并委托给 {@link JobService#dispatch}
  * 进行路由选择和远程 HTTP 派发。
- * <p>
+ *
  * 标注 {@link DisallowConcurrentExecution} 的原因：{@code dispatch} 是同步阻塞调用，
  * 最长会占住工作线程 {@code timeoutSeconds} 秒（上限见 {@code orbit.admin.max-timeout-seconds}）。
  * Quartz 默认允许同一 JobDetail 并发执行，因此一个「cron 间隔短于单次执行耗时」的任务

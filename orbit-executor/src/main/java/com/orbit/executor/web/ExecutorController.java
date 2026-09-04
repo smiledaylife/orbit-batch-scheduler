@@ -25,12 +25,12 @@ import java.util.Map;
 /**
  * 执行器对外暴露的 HTTP RESTful API 控制器。
  * 核心职责：
- * 
+ *
  *   - 接收调度中心派发的任务触发请求（{@code POST /orbit/executor/run}）；
  *   - 校验安全访问令牌（{@code X-Orbit-Token}）；
  *   - 定位并执行本地对应的 JobHandler，记录耗时并返回执行结果；
  *   - 提供当前节点在线信息与支持的 Handler 查询端点（{@code GET /orbit/executor/handlers}）。
- * 
+ *
  */
 @RestController
 @RequestMapping("/orbit/executor")

@@ -14,11 +14,11 @@ import org.springframework.web.client.RestTemplate;
 /**
  * 执行器向调度中心进行通信交互的 HTTP 客户端。
  * 核心职责：
- * 
+ *
  *   - 负责将执行器的节点信息与心跳定期上报至调度中心集群（支持多地址容灾）；
  *   - 在执行器服务关闭时，负责向调度中心发送下线请求；
  *   - 在 HTTP 请求头中携带双向约定的安全访问令牌（{@code X-Orbit-Token}）。
- * 
+ *
  */
 public class AdminClient {
 

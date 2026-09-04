@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 调度中心执行器在线注册表（共享库，对齐 XXL-JOB {@code xxl_job_registry}）。
- * <p>
+ *
  * 心跳 upsert 写入 {@code orbit_executor_registry}，任意 admin 副本读到同一份在线节点。
  * 因此调度中心可用无状态 Deployment + 普通 Service：执行器只需把心跳打到
  * {@code http://orbit-admin:8080}，不必 StatefulSet / Headless DNS 逐副本上报。

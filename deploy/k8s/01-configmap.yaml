@@ -36,6 +36,10 @@ data:
         access-token: ""
         heartbeat-timeout-seconds: 90
         timezone: Asia/Shanghai
+        # 调度日志保留天数（<=0 表示永久保留）；清理任务默认每小时执行一次
+        log-retention-days: 30
+        # 生产环境务必配置执行器注册地址白名单，杜绝注册接口被用于 SSRF
+        executor-address-allow-pattern: ""
   executor.yml: |
     server:
       port: 8081

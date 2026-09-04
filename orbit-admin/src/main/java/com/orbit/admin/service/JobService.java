@@ -40,11 +40,11 @@ import java.util.UUID;
 /**
  * 调度中心核心业务服务。
  * 核心职责：
- * 
+ *
  *   - 任务元数据生命周期管理（CRUD、校验、状态控制）；
  *   - Quartz 定时任务的动态编排、启动加载、Cron 动态刷新、暂停与恢复；
  *   - 任务统一派发（分发）：生成日志追踪链路 ID、按路由策略寻址、向执行器派发 HTTP 触发请求、记录执行日志与耗时。
- * 
+ *
  */
 @Service
 public class JobService {
@@ -244,13 +244,14 @@ public class JobService {
 
     /**
      * 调度中心统一派发执行逻辑（无论是 Quartz 定时触发还是手动触发，均走本方法）。
-     * 
+     *
      *   - 生成全链路唯一追踪日志 ID，初始化 RUNNING 状态日志入库；
      *   - 从注册表中根据任务路由策略选取一个在线执行器节点；
      *   - 若无可用节点，更新日志为 FAILED 并终止；
      *   - 合并静态参数与动态参数，通过 HTTP 调用执行器端 /run 接口；
+     *   - 节点不可达时摘除该节点并对下一个候选做故障转移，所有尝试共享同一份时间预算；
      *   - 计算本次调用耗时，根据执行结果更新日志状态为 SUCCESS 或 FAILED。
-     * 
+     *
      * @param job         任务元数据
      * @param extraParams 单次触发传入的覆盖参数（可为空）
      * @return 任务执行结果
@@ -259,6 +260,7 @@ public class JobService {
         // 1. 生成全局唯一日志 ID 与记录开始时间
         String logId = UUID.randomUUID().toString().replace("-", "");
         Date start = new Date();
+        long jobId = job.getId() == null ? 0L : job.getId();
 
         // 2. 插入初始运行中日志记录
         JobLog running = new JobLog();
@@ -272,8 +274,8 @@ public class JobService {
         jobStore.insertLog(running);
 
         // 3~6 全程包在 try/catch 中：无论路由寻址、参数合并还是落库环节抛异常，
-        // 都必须把日志从 RUNNING 收敛到终态，否则会留下永久 RUNNING 的僵尸记录
-        // （没有任何后台任务会回收它）。
+        // 都必须把日志从 RUNNING 收敛到终态。进程被强杀时来不及收尾的记录，
+        // 由 AdminScheduleTasks#cleanupLogs 的僵尸日志回收兜底。
         ExecutorNode node = null;
         try {
             List<ExecutorNode> candidates = registry.listByApp(job.getAppName());
@@ -281,7 +283,7 @@ public class JobService {
                 String msg = "no online executor for appName=" + job.getAppName();
                 jobStore.finishLog(logId, "FAILED", null, 0, msg);
                 log.warn("[orbit-admin] {}", msg);
-                return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), null, 0, msg);
+                return TriggerResult.fail(logId, jobId, null, 0, msg);
             }
 
             // 先按路由策略选起点，再对剩余节点做故障转移：
@@ -292,12 +294,6 @@ public class JobService {
                 candidates = rotateToFront(candidates, preferred.getAddress());
             }
 
-            TriggerRequest req = new TriggerRequest();
-            req.setJobId(job.getId() == null ? 0 : job.getId());
-            req.setJobName(job.getJobName());
-            req.setHandler(job.getHandler());
-            req.setLogId(logId);
-            req.setTimeoutSeconds(job.getTimeoutSeconds());
             Map<String, Object> merged = new HashMap<String, Object>();
             if (job.getParams() != null) {
                 merged.putAll(job.getParams());
@@ -305,10 +301,29 @@ public class JobService {
             if (extraParams != null) {
                 merged.putAll(extraParams);
             }
-            req.setParams(merged);
+
+            // 派发总预算：所有 failover 尝试共享 job.timeoutSeconds，而不是每个候选各拿一份。
+            // 否则「候选节点数 x timeoutSeconds」会让单次派发长时间占住 Quartz 工作线程
+            // 或 Tomcat 线程（5 个候选 + 3600s 超时就是最坏 5 小时）。
+            long deadline = start.getTime() + dispatchBudgetMs(job);
 
             TriggerResult result = null;
             for (int i = 0; i < candidates.size(); i++) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    String msg = "dispatch timeout budget exhausted before trying "
+                            + candidates.get(i).getAddress();
+                    result = TriggerResult.fail(logId, jobId,
+                            node == null ? null : node.getAddress(),
+                            System.currentTimeMillis() - start.getTime(), msg);
+                    log.warn("[orbit-admin] job={} {}", job.getJobName(), msg);
+                    break;
+                }
+
+                // 每次尝试用独立的请求对象：timeoutSeconds 随剩余预算递减，
+                // 也避免同一个实例在多次派发之间被相互覆盖。
+                TriggerRequest req = buildTriggerRequest(job, logId, merged,
+                        attemptTimeoutSeconds(job.getTimeoutSeconds(), remaining));
                 node = candidates.get(i);
                 result = executorClient.trigger(node.getAddress(), req);
                 if (result.isSuccess()) {
@@ -337,8 +352,64 @@ public class JobService {
             String msg = "dispatch failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             log.error("[orbit-admin] dispatch error for job={}", job.getJobName(), e);
             safeFinishLog(logId, address, cost, msg);
-            return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), address, cost, msg);
+            return TriggerResult.fail(logId, jobId, address, cost, msg);
         }
+    }
+
+    /**
+     * 组装一次派发请求。
+     *
+     * @param job            任务元数据
+     * @param logId          全链路日志 ID
+     * @param params         已合并的入参（任务静态参数 + 本次触发的覆盖参数）
+     * @param timeoutSeconds 本次尝试可用的超时秒数
+     * @return 触发请求
+     */
+    private static TriggerRequest buildTriggerRequest(JobInfo job, String logId,
+                                                      Map<String, Object> params, int timeoutSeconds) {
+        TriggerRequest req = new TriggerRequest();
+        req.setJobId(job.getId() == null ? 0L : job.getId());
+        req.setJobName(job.getJobName());
+        req.setHandler(job.getHandler());
+        req.setLogId(logId);
+        req.setTimeoutSeconds(timeoutSeconds);
+        req.setParams(params);
+        return req;
+    }
+
+    /**
+     * 计算单次派发的总时间预算（毫秒）。
+     * 取任务自身的 {@code timeoutSeconds}，并按 {@code orbit.admin.max-timeout-seconds} 封顶；
+     * 任务未配置超时时退回全局 {@code read-timeout-ms}。
+     *
+     * @param job 任务元数据
+     * @return 派发总预算（毫秒），至少 1 秒
+     */
+    private long dispatchBudgetMs(JobInfo job) {
+        int seconds = job.getTimeoutSeconds() > 0
+                ? job.getTimeoutSeconds()
+                : properties.getReadTimeoutMs() / 1000;
+        int max = properties.getMaxTimeoutSeconds();
+        if (max > 0 && seconds > max) {
+            seconds = max;
+        }
+        return Math.max(1000L, seconds * 1000L);
+    }
+
+    /**
+     * 本次尝试可用的读超时（秒）：既不超过任务配置，也不超过剩余的派发预算。
+     *
+     * @param configuredSeconds 任务配置的超时秒数
+     * @param remainingMs       距离派发截止时间的剩余毫秒数
+     * @return 本次 HTTP 调用的超时秒数，至少 1 秒
+     */
+    private static int attemptTimeoutSeconds(int configuredSeconds, long remainingMs) {
+        long remainingSeconds = (remainingMs + 999L) / 1000L;
+        if (remainingSeconds < 1L) {
+            remainingSeconds = 1L;
+        }
+        int configured = configuredSeconds > 0 ? configuredSeconds : Integer.MAX_VALUE;
+        return (int) Math.min((long) configured, remainingSeconds);
     }
 
     /**
@@ -476,7 +547,7 @@ public class JobService {
     }
 
     /**
-     * 包装执行 Quartz 调度更新
+     * 把 Quartz 受检异常包装为运行时异常，供 CRUD 路径直接调用。
      *
      * @param job 任务元数据
      */
@@ -489,13 +560,11 @@ public class JobService {
     }
 
     /**
-     * 强校验任务是否存在
+     * 把首选地址旋到列表头部，其余顺序不变，便于 ROUND 选点之后再依次 failover。
      *
-     * @param name 任务名称
-     * @return 任务对象
-     */
-    /**
-     * 把首选地址旋到列表头部，其余顺序不变，便于 ROUND 后再 failover。
+     * @param list    候选执行器节点列表
+     * @param address 路由策略选中的首选地址（可为空）
+     * @return 首选地址在头部的列表；无需旋转时原样返回
      */
     private static List<ExecutorNode> rotateToFront(List<ExecutorNode> list, String address) {
         if (address == null || list.size() <= 1) {
@@ -518,8 +587,16 @@ public class JobService {
     }
 
     /**
-     * 判断派发失败是否像「对端已不存在」（连接拒绝 / 超时 / 无路由），
+     * 判断派发失败是否像「对端已不存在」（连接拒绝 / 连接超时 / 无路由），
      * 此时应立刻摘除旧 Pod IP，而不是等心跳超时。
+     *
+     * 注意：读超时（read timed out）刻意不在其中 —— 任务可能仍在执行器上跑，
+     * 换个节点重试会导致同一次调度被执行两遍。connection reset 属于「对端异常关闭」，
+     * 无法区分是握手阶段还是响应阶段断开，因此这里按不可达处理；对重复执行敏感的任务
+     * 请在 Handler 内用 {@code JobContext#getLogId()} 自行去重。
+     *
+     * @param message 执行器返回或客户端捕获的失败描述
+     * @return true 表示可以摘除该节点并转移到下一个候选
      */
     private static boolean looksUnreachable(String message) {
         if (message == null) {
@@ -535,6 +612,12 @@ public class JobService {
                 || m.contains("connection reset");
     }
 
+    /**
+     * 按名称取任务，不存在时抛 {@link IllegalArgumentException}（对外表现为 400）。
+     *
+     * @param name 任务名称
+     * @return 任务对象
+     */
     private JobInfo require(String name) {
         return jobStore.findJobByName(name)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + name));
