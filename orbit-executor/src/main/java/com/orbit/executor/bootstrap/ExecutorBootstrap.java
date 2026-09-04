@@ -1,6 +1,9 @@
-package com.orbit.executor;
+package com.orbit.executor.bootstrap;
 
 import com.orbit.core.model.RegistryRequest;
+import com.orbit.executor.client.AdminClient;
+import com.orbit.executor.config.ExecutorProperties;
+import com.orbit.executor.handler.JobHandlerRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.web.context.WebServerInitializedEvent;

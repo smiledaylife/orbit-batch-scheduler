@@ -1,4 +1,4 @@
-package com.orbit.executor;
+package com.orbit.executor.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 

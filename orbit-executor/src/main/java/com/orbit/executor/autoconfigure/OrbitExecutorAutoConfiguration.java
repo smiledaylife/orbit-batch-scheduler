@@ -1,9 +1,9 @@
 package com.orbit.executor.autoconfigure;
 
-import com.orbit.executor.AdminClient;
-import com.orbit.executor.ExecutorBootstrap;
-import com.orbit.executor.ExecutorProperties;
-import com.orbit.executor.JobHandlerRegistry;
+import com.orbit.executor.bootstrap.ExecutorBootstrap;
+import com.orbit.executor.client.AdminClient;
+import com.orbit.executor.config.ExecutorProperties;
+import com.orbit.executor.handler.JobHandlerRegistry;
 import com.orbit.executor.web.ExecutorController;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;

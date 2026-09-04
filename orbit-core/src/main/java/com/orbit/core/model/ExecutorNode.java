@@ -7,7 +7,7 @@ import java.util.List;
 
 /**
  * 在线执行器节点模型。
- * 表示当前注册在调度中心内存注册表中的一个执行器实例状态信息。
+ * 表示当前注册在调度中心共享库注册表中的一个执行器实例状态信息。
  */
 public class ExecutorNode implements Serializable {
 
