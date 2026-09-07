@@ -18,7 +18,7 @@
         <!-- 示例业务应用：JRE 8 可运行 -->
         <java.release>8</java.release>
         <spring-boot.version>2.7.18</spring-boot.version>
-        <maven-compiler-plugin.version>3.10.1</maven-compiler-plugin.version>
+        <maven-compiler-plugin.version>3.16.0</maven-compiler-plugin.version>
         <maven-surefire-plugin.version>2.22.2</maven-surefire-plugin.version>
     </properties>
 
