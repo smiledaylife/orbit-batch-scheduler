@@ -19,7 +19,7 @@
         <java.release>11</java.release>
         <spring-boot.version>2.7.18</spring-boot.version>
         <quartz.version>2.5.2</quartz.version>
-        <druid.version>1.2.8</druid.version>
+        <druid.version>1.2.28</druid.version>
         <mybatis.version>3.5.19</mybatis.version>
         <mybatis-plus.version>3.5.7</mybatis-plus.version>
         <opengauss.version>5.0.1</opengauss.version>
