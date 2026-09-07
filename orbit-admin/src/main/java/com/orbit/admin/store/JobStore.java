@@ -395,7 +395,9 @@ public class JobStore {
     }
 
     /**
-     * 将 JSON 字符串解析为 Map
+     * 将 JSON 字符串解析为 Map。
+     * 解析失败时仍返回空 Map 兜底（避免一条脏数据让整个任务列表查不出来），
+     * 但必须留下日志：静默返回空 Map 会让「任务参数丢失」变成不可观测的故障。
      */
     @SuppressWarnings("unchecked")
     private Map<String, Object> parseMap(String json) {
@@ -406,12 +408,17 @@ public class JobStore {
             Map m = mapper.readValue(json, Map.class);
             return m == null ? new LinkedHashMap<String, Object>() : m;
         } catch (Exception e) {
+            log.warn("[orbit-admin] params column is not valid json, fallback to empty map: {}", e.getMessage());
             return new LinkedHashMap<String, Object>();
         }
     }
 
     /**
-     * 将 Map 序列化为 JSON 字符串
+     * 将 Map 序列化为 JSON 字符串。
+     * <p>
+     * 【修复】旧实现捕获异常后返回 null，等于把任务参数<b>静默清空</b>入库：
+     * 接口返回 200、任务照常调度，但执行器拿到的是空参数 —— 属于最难排查的一类故障。
+     * 现改为快速失败：调用方（创建/更新接口）会得到明确的 400 与原因。
      */
     private String toJson(Map<String, Object> map) {
         if (map == null || map.isEmpty()) {
@@ -420,7 +427,8 @@ public class JobStore {
         try {
             return mapper.writeValueAsString(map);
         } catch (Exception e) {
-            return null;
+            log.error("[orbit-admin] failed to serialize job params to json", e);
+            throw new IllegalArgumentException("params cannot be serialized to json: " + e.getMessage());
         }
     }
 

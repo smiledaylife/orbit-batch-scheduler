@@ -23,6 +23,7 @@ orbit:
     # worker-threads: 0 可退回旧版「在请求线程内联执行、无超时强制」的行为
     worker-threads: 8
     # 排队队列容量：队列满时新触发快速失败（调度中心可观测到并扩容副本）
+    # 0 = 不排队：并发超过 worker-threads 立即返回 executor saturated
     queue-capacity: 256
 
 management:

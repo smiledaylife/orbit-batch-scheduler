@@ -146,6 +146,22 @@ class JobStoreTest {
     }
 
     @Test
+    void rejectUnserializableParams() {
+        // 回归测试：旧实现在序列化失败时返回 null，等于把任务参数静默清空入库 ——
+        // 接口返回 200、任务照常调度，但执行器拿到的是空参数，属于不可观测的故障。
+        // 现要求快速失败并给出明确原因。
+        JobInfo job = newJob("badParams");
+        java.util.Map<String, Object> params = new java.util.HashMap<String, Object>();
+        // Jackson 默认 FAIL_ON_EMPTY_BEANS=true：没有任何可序列化属性的对象会抛异常
+        params.put("bad", new Object());
+        job.setParams(params);
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> jobStore.saveJob(job));
+        assertTrue(ex.getMessage().contains("params cannot be serialized"), ex.getMessage());
+    }
+
+    @Test
     void oversizedMessageIsTruncatedWithinColumnWidth() {
         // 回归测试：旧实现截断后拼接 "..." 会产生 2003 字符，超出 message VARCHAR(2000)，
         // 执行器返回长异常堆栈时 finishLog 直接报「value too long」入库失败。

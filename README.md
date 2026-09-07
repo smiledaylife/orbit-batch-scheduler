@@ -322,7 +322,7 @@ spring:
 | `node-id` | 空 | 节点唯一标识；空则取 `POD_NAME`/主机名 |
 | `heartbeat-interval-ms` | 20000 | 心跳间隔（保底不低于 5000） |
 | `worker-threads` | 8 | 任务工作线程数：单节点并发上限 + 超时强制中断；0 = 请求线程内联（旧行为） |
-| `queue-capacity` | 256 | 任务排队队列容量：满则新触发快速失败（executor saturated） |
+| `queue-capacity` | 256 | 任务排队队列容量：满则新触发快速失败（executor saturated）；`0` = 不排队（超出 `worker-threads` 直接快速失败） |
 | `access-token` | 空 | 令牌（双向常量时间比对） |
 
 ---

@@ -20,7 +20,9 @@ RUN mvn -q -pl ${MODULE} -am package -DskipTests
 FROM ${RUNTIME_IMAGE}
 ARG MODULE
 WORKDIR /app
-COPY --from=build /src/${MODULE}/target/${MODULE}-1.0.0.jar /app/app.jar
+# 用通配符匹配产物名：版本号写死在这里的话，每次改 <version> 都要同步改 Dockerfile，
+# 漏改时构建会以 "not found" 失败。spring-boot repackage 生成的 *.jar.original 不会被匹配到。
+COPY --from=build /src/${MODULE}/target/${MODULE}-*.jar /app/app.jar
 ENV JAVA_OPTS=""
 EXPOSE 8080 8081
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]

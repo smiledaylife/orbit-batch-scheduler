@@ -1,0 +1,23 @@
+# Dependabot 配置：依赖图已经通过 workflow 里的 maven-dependency-submission-action 上报，
+# 这里再让 Dependabot 自动开 PR 升级依赖与 Action，形成「发现漏洞 -> 自动修复」的闭环。
+version: 2
+
+updates:
+  # GitHub Actions 版本（actions/checkout、setup-java、maven-dependency-submission-action）
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    open-pull-requests-limit: 5
+
+  # Maven 依赖。根 pom 只是聚合器，各模块 POM 自治声明依赖，
+  # Dependabot 会自动扫描仓库内所有 pom.xml。
+  - package-ecosystem: "maven"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 10

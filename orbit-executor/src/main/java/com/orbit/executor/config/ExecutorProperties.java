@@ -81,6 +81,10 @@ public class ExecutorProperties {
     /**
      * 任务排队队列容量（默认 256）。仅当 {@code worker-threads > 0} 时生效。
      * 队列满后新触发立即失败返回，不会再占用请求线程等待。
+     * <p>
+     * 设为 0（或负数，按 0 处理）表示<b>不排队</b>：任务直接交付给工作线程，
+     * 并发数超过 {@code worker-threads} 时立即返回「executor saturated」，
+     * 适用于「宁可失败也不要积压」的强实时场景。
      */
     private int queueCapacity = 256;
 
