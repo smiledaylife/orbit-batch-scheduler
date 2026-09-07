@@ -17,7 +17,7 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <!-- 调度中心依赖 Quartz 2.5.x（class 文件版本 55），编译与运行均需 JDK 11+ -->
         <java.release>11</java.release>
-        <spring-boot.version>2.7.18</spring-boot.version>
+        <spring-boot.version>4.1.1</spring-boot.version>
         <quartz.version>2.5.2</quartz.version>
         <druid.version>1.2.8</druid.version>
         <mybatis.version>3.5.19</mybatis.version>
