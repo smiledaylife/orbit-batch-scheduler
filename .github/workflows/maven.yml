@@ -8,55 +8,38 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  # 允许在 Actions 页面手动触发（排障、或给非默认分支补交依赖图时很有用）
+  # 允许在 GitHub Actions 页面手动点击触发
   workflow_dispatch:
 
-# 默认最小权限；提交依赖图需要写权限，只在 build job 上放开
+# 最小权限原则：仅需读取仓库代码
 permissions:
   contents: read
 
-# 同一 ref 上有新提交时，取消仍在排队的旧构建，避免无意义的等待与额度消耗
+# 同一分支/PR 有新提交时，自动取消正在排队的旧构建，节省 CI 资源
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
-    # maven-dependency-submission-action 通过 Dependency Graph API 写入快照，
-    # 使用默认 GITHUB_TOKEN 时必须具备 contents: write（否则提交时报 403）。
-    permissions:
-      contents: write
-
     steps:
-      - uses: actions/checkout@v7
+      # 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      # 配置 JDK 11（对齐调度中心与 Docker 构建环境基线）
       - name: Set up JDK 11
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@v4
         with:
           java-version: '11'
           distribution: 'temurin'
           cache: maven
 
+      # 执行 Maven 编译、打包与全模块测试
+      # -B: 批处理（非交互）模式
+      # -ntp: 关闭依赖下载进度条，日志更清爽
+      # verify: 跑完各模块的单元测试与打包验证
       - name: Build with Maven
-        # -B  批处理（非交互）模式
-        # -ntp 关闭依赖下载进度条，日志更干净
-        # verify 会跑完单元测试（各模块 surefire），比 package 更符合 CI 语义
         run: mvn -B -ntp verify --file pom.xml
-
-      # 把完整依赖树上报给 GitHub，让 Dependabot 的告警能覆盖传递依赖。
-      #
-      # 【为什么必须升级版本】原先固定在 571e99aab1055c2e71a1e2309b9691de18d6b7d6（= v2.0.0，2022-10）。
-      # 该版本只支持「单模块、根 pom 自带依赖」的项目：本仓库根 pom 是纯聚合器
-      # （packaging=pom，无任何 <dependencies>），v2 解析时对根构件取不到依赖数组，
-      # 直接抛 TypeError: Cannot read properties of undefined (reading 'forEach')，
-      # 整个 job 失败（见 advanced-security/maven-dependency-submission-action#11）。
-      # 多模块 reactor 支持自 v3.0.0 起提供，v6 还会把依赖归属到各自的 pom.xml 上。
-      #
-      # 【为什么 PR 事件跳过】依赖图只对仓库默认分支有意义；而且来自 fork 的 PR
-      # 其 GITHUB_TOKEN 是只读的，跑这一步必然 403 失败，会把外部贡献者的 PR 卡红。
-      - name: Update dependency graph
-        if: github.event_name != 'pull_request'
-        uses: advanced-security/maven-dependency-submission-action@v6.0.1
