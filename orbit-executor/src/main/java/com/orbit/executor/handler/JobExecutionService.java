@@ -8,11 +8,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
 
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -26,7 +28,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <ol>
  *   <li><b>有界并发</b>：任务在专职线程池（orbit-job-worker-N）执行，单节点同时运行的任务数
  *       被限制为 worker-threads；超出部分进入有界队列排队，队列满则快速失败
- *       （executor saturated），保护业务应用不被触发风暴打爆；</li>
+ *       （executor saturated），保护业务应用不被触发风暴打爆。
+ *       {@code queue-capacity} 设为 0 表示「不排队」：超过 worker-threads 的触发直接快速失败；</li>
  *   <li><b>超时强制</b>：按任务 {@code timeoutSeconds} 到期后 {@code future.cancel(true)}
  *       中断任务线程。旧实现中调度中心 HTTP 读超时放弃后，执行器上的任务会<b>永久僵尸运行</b>，
  *       继续占用线程与资源——本组件消除该问题。注意中断是尽力而为（best-effort）：
@@ -53,20 +56,34 @@ public class JobExecutionService implements DisposableBean {
     /** 任务执行线程池；null 表示内联（旧版）模式 */
     private final ThreadPoolExecutor pool;
 
+    /** 生效的排队容量（负值归零后保存，仅用于日志与饱和提示，避免展示 -1 这类无意义值） */
+    private final int queueCapacity;
+
     public JobExecutionService(ExecutorProperties properties) {
         this.properties = properties;
         int threads = properties.getWorkerThreads();
         if (threads > 0) {
             int queue = Math.max(0, properties.getQueueCapacity());
+            this.queueCapacity = queue;
+            // queue-capacity <= 0 语义为「不排队」，必须换成 SynchronousQueue 直接交付。
+            // 【修复】旧实现无条件使用 new LinkedBlockingQueue<>(queue)，而 JDK 的
+            // LinkedBlockingQueue 构造器要求 capacity > 0，配 0（或负数）会抛
+            // IllegalArgumentException。该异常发生在 Bean 创建阶段，业务应用直接启动失败，
+            // 且报错信息里只有 "capacity must be greater than zero"，极难定位到是本配置项。
+            BlockingQueue<Runnable> workQueue = queue > 0
+                    ? new LinkedBlockingQueue<Runnable>(queue)
+                    : new SynchronousQueue<Runnable>();
             this.pool = new ThreadPoolExecutor(threads, threads, 60L, TimeUnit.SECONDS,
-                    new LinkedBlockingQueue<Runnable>(queue), newJobThreadFactory(),
+                    workQueue, newJobThreadFactory(),
                     new ThreadPoolExecutor.AbortPolicy());
             // 空闲时允许回收核心线程，避免常驻占用
             this.pool.allowCoreThreadTimeOut(true);
             log.info("[orbit-executor] job worker pool initialized: workers={}, queueCapacity={} "
-                    + "(timeout enforcement enabled)", threads, queue);
+                    + "(timeout enforcement enabled)", threads,
+                    queue > 0 ? String.valueOf(queue) : "0 (no queueing, hand-off only)");
         } else {
             this.pool = null;
+            this.queueCapacity = 0;
             log.info("[orbit-executor] job worker pool disabled (worker-threads=0), "
                     + "jobs run inline on request threads without timeout enforcement");
         }
@@ -92,7 +109,6 @@ public class JobExecutionService implements DisposableBean {
         }
 
         long waitMs = resolveWaitMs(request.getTimeoutSeconds());
-        Future<TriggerResult> future;
         FutureTask<TriggerResult> task = new FutureTask<TriggerResult>(
                 () -> invokeAndWrap(request, registry, workerNode, handler, start));
         try {
@@ -101,12 +117,11 @@ public class JobExecutionService implements DisposableBean {
             return TriggerResult.fail(request.getLogId(), request.getJobId(), workerNode,
                     System.currentTimeMillis() - start,
                     "executor saturated: job queue full (workers=" + properties.getWorkerThreads()
-                            + ", queueCapacity=" + properties.getQueueCapacity()
+                            + ", queueCapacity=" + queueCapacity
                             + "); consider scaling executor replicas or raising orbit.executor.queue-capacity");
         }
-        future = task;
+        Future<TriggerResult> future = task;
 
-        long deadline = start + waitMs;
         try {
             return future.get(waitMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException te) {

@@ -1,0 +1,37 @@
+# Docker 构建上下文过滤（构建上下文 = 仓库根目录，见 deploy/docker-compose.yml 的 context: ..）
+#
+# 目标：
+#   1. 不把本地脏产物 / 运行期数据带进镜像（尤其是 H2 文件库，会被 COPY orbit-admin 一起拷进去）；
+#   2. 缩小上下文体积，加快 docker build。
+
+# ---- Git / CI ----
+.git
+.gitignore
+.github
+
+# ---- IDE ----
+.idea
+.vscode
+.settings
+.project
+.classpath
+*.iml
+*.ipr
+*.iws
+
+# ---- 构建产物：镜像内会重新编译，绝不能用本地 target 覆盖 ----
+**/target/
+
+# ---- 运行期数据：H2 文件库、日志 ----
+**/data/
+**/logs/
+*.log
+*.db
+*.mv.db
+*.trace.db
+
+# ---- 构建镜像不需要的内容 ----
+deploy/
+README.md
+Dockerfile
+.dockerignore

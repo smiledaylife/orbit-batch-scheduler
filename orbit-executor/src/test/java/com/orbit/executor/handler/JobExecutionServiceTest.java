@@ -147,6 +147,55 @@ class JobExecutionServiceTest {
     }
 
     /**
+     * 回归测试：queue-capacity=0（不排队）时构造线程池不能失败。
+     * 旧实现无条件使用 {@code new LinkedBlockingQueue<>(0)}，而 JDK 要求 capacity > 0，
+     * 会抛 IllegalArgumentException；该异常发生在 Bean 创建阶段，执行器应用直接启动失败。
+     */
+    @Test
+    void zeroQueueCapacityBootsAndStillRunsJobs() {
+        boot(2, 0);
+        TriggerResult result = service.execute(req("quick", 10), registry(), "node-1");
+        assertTrue(result.isSuccess());
+        assertEquals("ok", result.getMessage());
+    }
+
+    /**
+     * queue-capacity=0 的语义验证：唯一工作线程被占满后，新触发必须<b>立即</b>被拒绝，
+     * 而不是排队等待 —— 这正是「不排队」配置想要的快速失败行为。
+     */
+    @Test
+    void zeroQueueCapacityFailsFastWhenAllWorkersBusy() throws Exception {
+        boot(1, 0);
+        JobHandlerRegistry reg = registry();
+
+        CountDownLatch blockerStarted = new CountDownLatch(1);
+        CountDownLatch releaseBlocker = new CountDownLatch(1);
+        PoolJobs.blockerStarted = blockerStarted;
+        PoolJobs.releaseBlocker = releaseBlocker;
+
+        // 占满唯一的工作线程
+        AtomicReference<TriggerResult> first = new AtomicReference<TriggerResult>();
+        Thread t1 = new Thread(() -> first.set(service.execute(req("blocker", 60), reg, "n")));
+        t1.start();
+        assertTrue(blockerStarted.await(5, TimeUnit.SECONDS), "blocker should start");
+
+        // 队列容量为 0：第二个触发无处排队，必须立即返回 saturated
+        long start = System.currentTimeMillis();
+        TriggerResult second = service.execute(req("quick", 60), reg, "n");
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertFalse(second.isSuccess());
+        assertTrue(second.getMessage().contains("saturated"), second.getMessage());
+        assertTrue(elapsed < 2000, "rejection should be immediate, elapsed=" + elapsed + "ms");
+
+        // 释放后在跑任务正常收尾
+        releaseBlocker.countDown();
+        t1.join(5000);
+        assertNotNull(first.get());
+        assertTrue(first.get().isSuccess());
+    }
+
+    /**
      * 测试用 JobHandler 集合。
      */
     @Configuration
