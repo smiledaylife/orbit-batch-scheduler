@@ -258,9 +258,17 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
      * 解析优先级规则：
      * 
      *   - 显式配置覆盖：若配置了 {@code orbit.executor.port} 且大于 0，优先采用该端口（适用于 Docker 宿主机端口映射场景）；
-     *   - Web 容器运行期端口：若内嵌 Web 容器已就绪（捕获到 WebServerInitializedEvent），获取容器实际监听的本地端口（完美兼容 server.port=0 随机端口）；
+     *   - Web 容器运行期端口：取 {@link WebServerInitializedEvent} 上报的容器实际监听端口，
+     *       {@code server.port=0}（随机端口）场景依赖这一条；
      *   - Spring 环境配置：从 Spring Environment 中读取 {@code server.port} 配置项；
      *   - 默认兜底：若均无法获取，则兜底采用 8080（Spring Boot 官方默认 Web 端口）。
+     * <p>
+     * 第 2 条之所以在 {@link #start()} 阶段就已可用：Spring Boot 2.3+ 由
+     * {@code WebServerStartStopLifecycle}（{@code SmartLifecycle}，phase = {@code Integer.MAX_VALUE - 1}）
+     * 启动容器并发布 {@link WebServerInitializedEvent}，而本类 phase 为 {@code Integer.MAX_VALUE}，
+     * 在同一轮 {@code DefaultLifecycleProcessor.onRefresh()} 中排在它之后启动。
+     * <b>若把本类的 phase 调到 {@code Integer.MAX_VALUE - 1} 或更小，这个先后关系就会反转</b>，
+     * 随机端口场景将退回 8080 兜底。
      * 
      * @return 执行器通信端口
      */

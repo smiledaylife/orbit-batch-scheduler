@@ -29,9 +29,14 @@ class JobExecutionServiceTest {
     private JobExecutionService service;
 
     private void boot(int workerThreads, int queueCapacity) {
+        boot(workerThreads, queueCapacity, new ExecutorProperties().getMaxJobWaitSeconds());
+    }
+
+    private void boot(int workerThreads, int queueCapacity, int maxJobWaitSeconds) {
         ExecutorProperties props = new ExecutorProperties();
         props.setWorkerThreads(workerThreads);
         props.setQueueCapacity(queueCapacity);
+        props.setMaxJobWaitSeconds(maxJobWaitSeconds);
         service = new JobExecutionService(props);
         ctx = new AnnotationConfigApplicationContext();
         ctx.register(PoolJobs.class, JobHandlerRegistry.class);
@@ -142,14 +147,14 @@ class JobExecutionServiceTest {
         boot(0, 0);
         TriggerResult result = service.execute(req("threadName", 10), registry(), "node-1");
         assertTrue(result.isSuccess());
-        // worker-threads=0 的旧版行为：任务在调用方（请求）线程内执行
+        // worker-threads=0 的内联模式：任务在调用方（请求）线程内执行
         assertEquals(Thread.currentThread().getName(), result.getMessage());
     }
 
     /**
-     * 回归测试：queue-capacity=0（不排队）时构造线程池不能失败。
-     * 旧实现无条件使用 {@code new LinkedBlockingQueue<>(0)}，而 JDK 要求 capacity > 0，
-     * 会抛 IllegalArgumentException；该异常发生在 Bean 创建阶段，执行器应用直接启动失败。
+     * queue-capacity=0（不排队）时线程池必须能正常构造。
+     * JDK 的 LinkedBlockingQueue 要求 capacity > 0，该场景必须改用 SynchronousQueue，
+     * 否则 Bean 创建阶段就抛 IllegalArgumentException、执行器应用直接启动失败。
      */
     @Test
     void zeroQueueCapacityBootsAndStillRunsJobs() {
@@ -193,6 +198,20 @@ class JobExecutionServiceTest {
         t1.join(5000);
         assertNotNull(first.get());
         assertTrue(first.get().isSuccess());
+    }
+
+    /**
+     * {@code max-job-wait-seconds} 被误配成 0（且请求未带 timeoutSeconds）时，
+     * 任务不能被瞬间判定为超时：等待时间有 1 秒下限，
+     * 否则 {@code future.get(0)} 会立刻抛 TimeoutException，
+     * 表现为「所有任务都在 0ms 超时失败」，与「任务真的跑不完」几乎无法区分。
+     */
+    @Test
+    void zeroMaxJobWaitStillRunsJobs() {
+        boot(2, 8, 0);
+        TriggerResult result = service.execute(req("quick", 0), registry(), "node-1");
+        assertTrue(result.isSuccess());
+        assertEquals("ok", result.getMessage());
     }
 
     /**

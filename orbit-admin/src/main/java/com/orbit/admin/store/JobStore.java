@@ -42,12 +42,6 @@ public class JobStore {
 
     private static final Logger log = LoggerFactory.getLogger(JobStore.class);
 
-    /** params 列宽（与 schema.sql 一致） */
-    private static final int PARAMS_MAX_LEN = 2000;
-    /** description 列宽（与 schema.sql 一致） */
-    private static final int DESC_MAX_LEN = 256;
-    /** message 列宽（与 schema.sql 一致） */
-    private static final int MESSAGE_MAX_LEN = 2000;
     /** 默认超时（秒） */
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
     /** 每页最大记录数 */
@@ -130,16 +124,10 @@ public class JobStore {
     public JobInfo saveJob(JobInfo job) {
         Date now = new Date();
 
-        // 入库前对可能超出列宽的字段做前置校验，避免触发 SQLException（列宽与 schema.sql 保持一致）
+        // 入库前校验列宽，超长直接以 400 返回，而不是等 INSERT/UPDATE 抛 SQLException
         String paramsJson = toJson(job.getParams());
-        if (paramsJson != null && paramsJson.length() > PARAMS_MAX_LEN) {
-            throw new IllegalArgumentException("params too long: serialized json length "
-                    + paramsJson.length() + " exceeds limit " + PARAMS_MAX_LEN);
-        }
-        if (job.getDescription() != null && job.getDescription().length() > DESC_MAX_LEN) {
-            throw new IllegalArgumentException("description too long: length "
-                    + job.getDescription().length() + " exceeds limit " + DESC_MAX_LEN);
-        }
+        ColumnLimits.requireMaxLength("params", paramsJson, ColumnLimits.JOB_PARAMS_JSON);
+        ColumnLimits.requireMaxLength("description", job.getDescription(), ColumnLimits.JOB_DESCRIPTION);
 
         // 1. 新增
         if (job.getId() == null) {
@@ -235,7 +223,7 @@ public class JobStore {
         po.setHandler(log.getHandler());
         po.setExecutorAddress(log.getExecutorAddress());
         po.setStatus(log.getStatus());
-        po.setMessage(abbreviate(log.getMessage()));
+        po.setMessage(ColumnLimits.abbreviate(log.getMessage(), ColumnLimits.LOG_MESSAGE));
         po.setCostMs(log.getCostMs());
         po.setStartTime(log.getStartTime());
         po.setEndTime(log.getEndTime());
@@ -260,7 +248,7 @@ public class JobStore {
                 .set(OrbitJobLogPO::getStatus, status)
                 .set(OrbitJobLogPO::getExecutorAddress, address)
                 .set(OrbitJobLogPO::getCostMs, costMs)
-                .set(OrbitJobLogPO::getMessage, abbreviate(message))
+                .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
                 .set(OrbitJobLogPO::getEndTime, new Date());
         logMapper.update(null, uw);
     }
@@ -268,8 +256,8 @@ public class JobStore {
     /**
      * 回收僵尸 RUNNING 日志：将早于 cutoff 的 RUNNING 记录收敛为 FAILED 终态。
      * <p>
-     * 场景：调度中心在派发中途崩溃/重启，插入的 RUNNING 日志无人收敛（此前会永久悬挂，
-     * 既误导 /logs 页面观测，也让分页统计失真）。后台任务周期调用本方法完成兑底。
+     * 场景：调度中心在派发中途崩溃/重启，插入的 RUNNING 日志无人收敛，
+     * 会永久悬挂并误导 /logs 页面观测、让分页统计失真。后台任务周期调用本方法完成兑底。
      *
      * @param cutoffMs 回收阈值：start_time 早于（now - cutoffMs）的 RUNNING 记录将被收敛
      * @param message  写入 message 字段的收敛原因说明
@@ -281,7 +269,7 @@ public class JobStore {
                 .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
                 .lt(OrbitJobLogPO::getStartTime, cutoff)
                 .set(OrbitJobLogPO::getStatus, JobLogStatus.FAILED)
-                .set(OrbitJobLogPO::getMessage, abbreviate(message))
+                .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
                 .set(OrbitJobLogPO::getEndTime, new Date());
         int updated = logMapper.update(null, uw);
         if (updated > 0) {
@@ -416,9 +404,9 @@ public class JobStore {
     /**
      * 将 Map 序列化为 JSON 字符串。
      * <p>
-     * 【修复】旧实现捕获异常后返回 null，等于把任务参数<b>静默清空</b>入库：
-     * 接口返回 200、任务照常调度，但执行器拿到的是空参数 —— 属于最难排查的一类故障。
-     * 现改为快速失败：调用方（创建/更新接口）会得到明确的 400 与原因。
+     * 序列化失败时快速失败：调用方（创建/更新接口）得到明确的 400 与原因。
+     * 这里不能吞掉异常返回 null —— 那等于把任务参数<b>静默清空</b>入库：
+     * 接口返回 200、任务照常调度，但执行器拿到的是空参数，属于最难排查的一类故障。
      */
     private String toJson(Map<String, Object> map) {
         if (map == null || map.isEmpty()) {
@@ -439,20 +427,4 @@ public class JobStore {
         return s == null || s.trim().isEmpty() ? null : s.trim();
     }
 
-    /**
-     * 截断超长字符串（防止数据库字段超长溢出）。
-     * <p>
-     * 修复：旧实现 {@code substring(0, 2000) + "..."} 会产生 2003 字符，
-     * 超过 message 列宽 VARCHAR(2000)，执行器返回长消息时入库直接报
-     * 「value too long」异常。现保证结果总长度（含省略号）不超过列宽。
-     */
-    private static String abbreviate(String s) {
-        if (s == null) {
-            return null;
-        }
-        if (s.length() <= MESSAGE_MAX_LEN) {
-            return s;
-        }
-        return s.substring(0, MESSAGE_MAX_LEN - 3) + "...";
-    }
 }

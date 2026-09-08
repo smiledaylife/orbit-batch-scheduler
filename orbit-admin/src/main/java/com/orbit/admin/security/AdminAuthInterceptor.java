@@ -17,10 +17,9 @@ import java.security.MessageDigest;
 /**
  * 调度中心管理接口统一鉴权拦截器。
  * <p>
- * 背景：此前只有 {@code /registry} 与 {@code /registry/remove} 两个端点调用了
- * {@code checkToken}，其余 11 个端点（含 {@code POST /jobs}、{@code DELETE /jobs/{name}}、
- * {@code POST /jobs/{name}/trigger}）即使在配置了 accessToken 的情况下也完全不校验 ——
- * 任何能访问到调度中心端口的人都可以建任务、删任务、立即触发任意 handler。
+ * {@code /orbit/admin/**} 下的全部端点都必须受令牌保护，包括 {@code POST /jobs}、
+ * {@code DELETE /jobs/{name}}、{@code POST /jobs/{name}/trigger} ——
+ * 否则任何能访问到调度中心端口的人都可以建任务、删任务、立即触发任意 handler。
  * <p>
  * 本拦截器覆盖 {@code /orbit/admin/**} 全部端点，令牌从请求头读取：
  * <ul>

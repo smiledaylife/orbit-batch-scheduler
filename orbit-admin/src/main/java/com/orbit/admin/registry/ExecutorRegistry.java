@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.orbit.admin.config.AdminProperties;
+import com.orbit.admin.store.ColumnLimits;
 import com.orbit.admin.store.mapper.OrbitExecutorRegistryMapper;
 import com.orbit.admin.store.po.OrbitExecutorRegistryPO;
 import com.orbit.core.model.ExecutorNode;
@@ -44,9 +45,6 @@ public class ExecutorRegistry {
 
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<List<String>>() {
     };
-
-    /** handlers 列宽（与 schema.sql 的 VARCHAR(2000) 一致），超出时收缩列表防溢出 */
-    private static final int HANDLERS_JSON_MAX_LEN = 2000;
 
     private final AdminProperties properties;
     private final OrbitExecutorRegistryMapper mapper;
@@ -108,6 +106,11 @@ public class ExecutorRegistry {
         String app = req.getAppName().trim();
         String addr = ExecutorAddressValidator.validateAndNormalize(
                 req.getAddress(), properties.getExecutorAddressAllowPattern());
+        // 列宽前置校验：这三个值都来自执行器上报，超长会让每一轮心跳都以 SQL 异常失败，
+        // 且日志里只有一句被截断的驱动报错。这里直接给出字段名与上限，便于定位到具体配置项。
+        ColumnLimits.requireMaxLength("appName", app, ColumnLimits.REG_APP_NAME);
+        ColumnLimits.requireMaxLength("address", addr, ColumnLimits.REG_ADDRESS);
+        ColumnLimits.requireMaxLength("nodeId", req.getNodeId(), ColumnLimits.REG_NODE_ID);
         Date now = new Date();
         String handlersJson = toHandlersJson(req.getHandlers());
 
@@ -229,7 +232,7 @@ public class ExecutorRegistry {
             return candidates.get(0);
         }
 
-        // ROUND（含未知策略的历史数据，与旧行为一致：按轮询处理）
+        // ROUND（未知策略同样按轮询处理，兼容库里已有的历史数据）
         AtomicInteger cursor = roundRobin.computeIfAbsent(appName, k -> new AtomicInteger(0));
         int idx = Math.floorMod(cursor.getAndIncrement(), candidates.size());
         return candidates.get(idx);
@@ -321,16 +324,16 @@ public class ExecutorRegistry {
         List<String> src = handlers == null ? Collections.<String>emptyList() : handlers;
         try {
             String s = json.writeValueAsString(src);
-            if (s.length() <= HANDLERS_JSON_MAX_LEN) {
+            if (s.length() <= ColumnLimits.REG_HANDLERS_JSON) {
                 return s;
             }
             List<String> shrink = new ArrayList<String>(src);
             while (!shrink.isEmpty()) {
                 shrink.remove(shrink.size() - 1);
                 s = json.writeValueAsString(shrink);
-                if (s.length() <= HANDLERS_JSON_MAX_LEN) {
+                if (s.length() <= ColumnLimits.REG_HANDLERS_JSON) {
                     log.warn("[orbit-admin] handlers json exceeds column width {}, truncated to {} entries",
-                            HANDLERS_JSON_MAX_LEN, shrink.size());
+                            ColumnLimits.REG_HANDLERS_JSON, shrink.size());
                     return s;
                 }
             }
@@ -355,4 +358,5 @@ public class ExecutorRegistry {
     private static String trimSlash(String s) {
         return s.endsWith("/") && s.length() > 1 ? s.substring(0, s.length() - 1) : s;
     }
+
 }

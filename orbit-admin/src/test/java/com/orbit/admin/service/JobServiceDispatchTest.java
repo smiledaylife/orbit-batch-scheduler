@@ -10,11 +10,14 @@ import com.orbit.core.model.TriggerResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.quartz.JobKey;
 import org.quartz.Scheduler;
+import org.quartz.JobPersistenceException;
 
 import java.util.Collections;
 import java.util.List;
@@ -36,12 +39,14 @@ import static org.mockito.Mockito.when;
 
 /**
  * {@link JobService} 派发与校验逻辑单元测试（Mock 依赖）。
- * 重点覆盖本轮优化：
+ * 重点覆盖：
  * <ul>
- *   <li>dispatch 单次查询：一次派发只允许调用一次 registry.listByApp（原先为两次）；</li>
+ *   <li>dispatch 单次查询：一次派发只允许调用一次 registry.listByApp；</li>
  *   <li>failover：首选节点连接拒绝时立即摘除并切换下一个节点；</li>
  *   <li>routeStrategy 合法性校验与规范化；</li>
  *   <li>create 的唯一键竞态兜底（DataIntegrityViolationException → 友好 400 语义）；</li>
+ *   <li>Quartz 编排失败时 create / update 的数据库回滚（不留幽灵任务、不留新旧不一致）；</li>
+ *   <li>超出数据库列宽的字段在入参校验阶段被拒绝（400 而非无信息的 500）；</li>
  *   <li>timezone 非法值启动失败（fail-fast）。</li>
  * </ul>
  */
@@ -194,5 +199,77 @@ class JobServiceDispatchTest {
         when(jobStore.findAllJobs()).thenReturn(Collections.<JobInfo>emptyList());
         jobService.init();
         verify(jobStore, times(1)).findAllJobs();
+    }
+
+    /**
+     * Quartz 编排失败时必须回滚已落库的新任务行：
+     * 否则会留下一条「任务列表里看得见、却永远不会触发」的幽灵任务，
+     * 且每次重启 init() 都会重新装载它并再报一次同样的错。
+     */
+    @Test
+    void createRollsBackWhenQuartzSchedulingFails() throws Exception {
+        JobInfo job = newJob("jobG", "app");
+        when(jobStore.findJobByName("jobG")).thenReturn(Optional.<JobInfo>empty());
+        when(jobStore.saveJob(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(scheduler.checkExists(any(JobKey.class))).thenThrow(new JobPersistenceException("quartz down"));
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class, () -> jobService.create(job));
+
+        assertTrue(ex.getMessage().contains("schedule failed"), ex.getMessage());
+        verify(jobStore, times(1)).deleteJob("jobG");
+    }
+
+    /**
+     * 更新场景的对称保证：Quartz 没换上新计划时，数据库也不能留着新定义，
+     * 否则会出现「接口说已保存、Quartz 仍按旧 cron 跑」的永久不一致。
+     * 同时验证回滚写入的版本号已对齐库里的当前值（否则会被乐观锁判定为冲突）。
+     */
+    @Test
+    void updateRollsBackWhenQuartzSchedulingFails() throws Exception {
+        JobInfo existing = newJob("jobH", "app");
+        existing.setDescription("original");
+        when(jobStore.findJobByName("jobH")).thenReturn(Optional.of(existing));
+        when(jobStore.saveJob(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(scheduler.checkExists(any(JobKey.class))).thenThrow(new JobPersistenceException("quartz down"));
+
+        JobInfo input = newJob("jobH", "app");
+        input.setDescription("updated");
+
+        assertThrows(IllegalStateException.class, () -> jobService.update("jobH", input));
+
+        ArgumentCaptor<JobInfo> captor = ArgumentCaptor.forClass(JobInfo.class);
+        verify(jobStore, times(2)).saveJob(captor.capture());
+        JobInfo rolledBack = captor.getAllValues().get(1);
+        // 第二次写入的必须是「更新前」的定义
+        assertEquals("original", rolledBack.getDescription());
+        // 快照版本号 0 -> 回滚时对齐到库里的当前值 1，避免乐观锁空更新
+        assertEquals(1, rolledBack.getVersion());
+    }
+
+    /**
+     * 超长字段必须在入参校验阶段被拒绝（明确的 400），
+     * 而不是等入库时抛 DataIntegrityViolationException、被压成无信息的 500。
+     */
+    @Test
+    void createRejectsOversizedAppNameAndHandler() {
+        JobInfo longApp = newJob("jobI", "app");
+        longApp.setAppName(repeat('a', 65));   // app_name VARCHAR(64)
+        IllegalArgumentException appEx = assertThrows(IllegalArgumentException.class,
+                () -> jobService.create(longApp));
+        assertTrue(appEx.getMessage().contains("appName too long"), appEx.getMessage());
+
+        JobInfo longHandler = newJob("jobJ", "app");
+        longHandler.setHandler(repeat('h', 129));   // handler VARCHAR(128)
+        IllegalArgumentException handlerEx = assertThrows(IllegalArgumentException.class,
+                () -> jobService.create(longHandler));
+        assertTrue(handlerEx.getMessage().contains("handler too long"), handlerEx.getMessage());
+    }
+
+    private static String repeat(char c, int times) {
+        StringBuilder sb = new StringBuilder(times);
+        for (int i = 0; i < times; i++) {
+            sb.append(c);
+        }
+        return sb.toString();
     }
 }

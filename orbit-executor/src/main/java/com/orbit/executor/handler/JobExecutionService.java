@@ -31,8 +31,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       （executor saturated），保护业务应用不被触发风暴打爆。
  *       {@code queue-capacity} 设为 0 表示「不排队」：超过 worker-threads 的触发直接快速失败；</li>
  *   <li><b>超时强制</b>：按任务 {@code timeoutSeconds} 到期后 {@code future.cancel(true)}
- *       中断任务线程。旧实现中调度中心 HTTP 读超时放弃后，执行器上的任务会<b>永久僵尸运行</b>，
- *       继续占用线程与资源——本组件消除该问题。注意中断是尽力而为（best-effort）：
+ *       中断任务线程，使调度中心 HTTP 读超时放弃后，执行器上的任务不会继续<b>僵尸运行</b>、
+ *       白占线程与资源。注意中断是尽力而为（best-effort）：
  *       响应 {@code InterruptedException} 的业务代码会被立即中止，CPU 密集死循环无法被打断；</li>
  *   <li><b>优雅停机</b>：应用关闭时先拒绝新任务、等待在跑任务收尾（最长 10 秒），超时再中断，
  *       避免硬杀导致业务半途而废。</li>
@@ -41,8 +41,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 超时计时口径与调度中心一致：从<b>触发请求到达本节点</b>起算（含排队等待时间），
  * 与调度中心 HTTP 读超时同时开始，两边判定天然对齐。
  * <p>
- * 兼容性：设为 {@code worker-threads: 0} 可退回旧行为（在 Web 请求线程内联执行，无超时强制）。
- * HTTP/JSON 协议完全不变：成功/失败仍以同步 {@link TriggerResult} 返回。
+ * 设为 {@code worker-threads: 0} 切换为内联模式（在 Web 请求线程内执行，无超时强制）。
+ * 两种模式的 HTTP/JSON 协议一致：成功/失败都以同步 {@link TriggerResult} 返回。
  */
 public class JobExecutionService implements DisposableBean {
 
@@ -51,9 +51,12 @@ public class JobExecutionService implements DisposableBean {
     /** 优雅停机时等待在跑任务收尾的最长时间（秒） */
     private static final int SHUTDOWN_GRACE_SECONDS = 10;
 
+    /** 单次任务等待下限（毫秒）：防止超时配置被误配成 0/负数导致所有任务瞬间「超时」 */
+    private static final long MIN_WAIT_MS = 1000L;
+
     private final ExecutorProperties properties;
 
-    /** 任务执行线程池；null 表示内联（旧版）模式 */
+    /** 任务执行线程池；null 表示内联模式 */
     private final ThreadPoolExecutor pool;
 
     /** 生效的排队容量（负值归零后保存，仅用于日志与饱和提示，避免展示 -1 这类无意义值） */
@@ -65,11 +68,10 @@ public class JobExecutionService implements DisposableBean {
         if (threads > 0) {
             int queue = Math.max(0, properties.getQueueCapacity());
             this.queueCapacity = queue;
-            // queue-capacity <= 0 语义为「不排队」，必须换成 SynchronousQueue 直接交付。
-            // 【修复】旧实现无条件使用 new LinkedBlockingQueue<>(queue)，而 JDK 的
-            // LinkedBlockingQueue 构造器要求 capacity > 0，配 0（或负数）会抛
-            // IllegalArgumentException。该异常发生在 Bean 创建阶段，业务应用直接启动失败，
-            // 且报错信息里只有 "capacity must be greater than zero"，极难定位到是本配置项。
+            // queue-capacity <= 0 语义为「不排队」，必须换成 SynchronousQueue 直接交付：
+            // JDK 的 LinkedBlockingQueue 构造器要求 capacity > 0，传 0（或负数）会在
+            // Bean 创建阶段抛 IllegalArgumentException，业务应用直接启动失败，
+            // 而报错信息里只有 "capacity must be greater than zero"，极难定位到是本配置项。
             BlockingQueue<Runnable> workQueue = queue > 0
                     ? new LinkedBlockingQueue<Runnable>(queue)
                     : new SynchronousQueue<Runnable>();
@@ -91,8 +93,8 @@ public class JobExecutionService implements DisposableBean {
 
     /**
      * 执行指定触发请求对应的 JobHandler。
-     * 调用方（Web 控制器线程）将阻塞直至执行完成、超时或被拒绝——与旧版同步协议一致；
-     * 区别在于业务方法运行在专职工作线程，且受超时强制与并发上限约束。
+     * 调用方（Web 控制器线程）将阻塞直至执行完成、超时或被拒绝（同步协议）；
+     * 业务方法运行在专职工作线程，受超时强制与并发上限约束。
      *
      * @param request   触发请求
      * @param registry  JobHandler 注册表
@@ -104,7 +106,7 @@ public class JobExecutionService implements DisposableBean {
         long start = System.currentTimeMillis();
 
         if (pool == null) {
-            // 内联模式：保持与旧版完全一致的行为
+            // 内联模式：直接在调用方线程内执行
             return invokeAndWrap(request, registry, workerNode, handler, start);
         }
 
@@ -171,11 +173,15 @@ public class JobExecutionService implements DisposableBean {
 
     /**
      * 计算本次执行的等待上限（毫秒）：timeoutSeconds&gt;0 用之；否则用兜底最大值。
+     * <p>
+     * 结果保证不小于 {@link #MIN_WAIT_MS}：{@code orbit.executor.max-job-wait-seconds}
+     * 被误配成 0 或负数时 {@code future.get(<=0)} 会立即抛 TimeoutException ——
+     * 表现为「所有任务都在 0ms 超时失败」，和「任务真的跑不完」几乎无法区分。
      */
     private long resolveWaitMs(int timeoutSeconds) {
         int seconds = timeoutSeconds > 0 ? timeoutSeconds : properties.getMaxJobWaitSeconds();
         long ms = seconds * 1000L;
-        return ms <= 0 ? properties.getMaxJobWaitSeconds() * 1000L : ms;
+        return ms < MIN_WAIT_MS ? MIN_WAIT_MS : ms;
     }
 
     /**

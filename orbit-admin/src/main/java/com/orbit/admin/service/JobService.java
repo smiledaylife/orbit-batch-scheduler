@@ -4,6 +4,7 @@ import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.dispatch.ExecutorClient;
 import com.orbit.admin.quartz.OrbitQuartzJob;
 import com.orbit.admin.registry.ExecutorRegistry;
+import com.orbit.admin.store.ColumnLimits;
 import com.orbit.admin.store.JobStore;
 import com.orbit.core.model.ExecutorNode;
 import com.orbit.core.model.JobInfo;
@@ -91,8 +92,8 @@ public class JobService {
         try {
             jobs = jobStore.findAllJobs();
         } catch (Exception e) {
-            // 读库失败意味着依赖不可用。原先这里把异常整体吞掉，会让调度中心
-            // 以「零调度但一切正常」的姿态启动，属于静默故障 —— 改为让启动失败。
+            // 读库失败意味着依赖不可用：让启动直接失败，
+            // 避免调度中心以「零调度但一切正常」的姿态静默启动。
             throw new IllegalStateException("[orbit-admin] failed to load jobs on startup", e);
         }
 
@@ -130,16 +131,44 @@ public class JobService {
             throw new IllegalArgumentException("job already exists: " + input.getJobName());
         }
 
+        JobInfo saved;
         try {
             // 保存至数据库
-            JobInfo saved = jobStore.saveJob(input);
-            // 同步应用到 Quartz 调度器
-            applySchedule(saved);
-            return saved;
+            saved = jobStore.saveJob(input);
         } catch (DataIntegrityViolationException dup) {
             // check-then-act 竞态兜底：并发创建同名任务时，唯一约束保证只有一个胜出者，
             // 败者在此转换为与串行路径一致的友好错误（否则会以裸 500 暴露给调用方）。
             throw new IllegalArgumentException("job already exists: " + input.getJobName());
+        }
+
+        try {
+            // 同步应用到 Quartz 调度器
+            applySchedule(saved);
+        } catch (RuntimeException scheduleFailed) {
+            // DB 与 Quartz 必须同生共死：编排失败就回滚刚写入的行，
+            // 否则会留下一条「任务列表里看得见、却永远不会触发」的幽灵任务，
+            // 且每次重启 init() 都会重新装载它、再报一次同样的错。
+            // 回滚之后，接口失败 == 什么都没发生。
+            rollbackCreatedJob(saved);
+            throw scheduleFailed;
+        }
+        return saved;
+    }
+
+    /**
+     * 回滚「已落库但 Quartz 编排失败」的新建任务。
+     * 回滚自身失败只记录不外抛，避免覆盖掉原始的调度失败原因。
+     *
+     * @param saved 已写入数据库的任务
+     */
+    private void rollbackCreatedJob(JobInfo saved) {
+        try {
+            jobStore.deleteJob(saved.getJobName());
+            log.warn("[orbit-admin] job {} rolled back from db because quartz scheduling failed",
+                    saved.getJobName());
+        } catch (Exception rollbackFailed) {
+            log.error("[orbit-admin] failed to roll back job {} after schedule failure",
+                    saved.getJobName(), rollbackFailed);
         }
     }
 
@@ -155,6 +184,10 @@ public class JobService {
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + jobName));
         validate(input, false);
 
+        // 更新前的快照：Quartz 编排失败时据此把库里的定义恢复原状。
+        // 必须在覆盖字段之前取，否则快照拿到的就是新值。
+        JobInfo snapshot = snapshotOf(existing);
+
         existing.setDescription(input.getDescription());
         existing.setAppName(input.getAppName());
         existing.setHandler(input.getHandler());
@@ -165,8 +198,63 @@ public class JobService {
         existing.setEnabled(input.isEnabled());
 
         JobInfo saved = jobStore.saveJob(existing);
-        applySchedule(saved);
+        try {
+            applySchedule(saved);
+        } catch (RuntimeException scheduleFailed) {
+            // 与 create 对称：Quartz 没换上新计划时，数据库也不能留着一份
+            // 「接口说已保存、Quartz 却仍按旧 cron 跑」的新定义，否则两边永久不一致。
+            rollbackUpdatedJob(snapshot);
+            throw scheduleFailed;
+        }
         return saved;
+    }
+
+    /**
+     * 生成任务定义的快照（params 做防御性拷贝），用于 Quartz 编排失败时回滚。
+     *
+     * @param source 源任务
+     * @return 与源任务字段一致、但相互独立的副本
+     */
+    private static JobInfo snapshotOf(JobInfo source) {
+        JobInfo copy = new JobInfo();
+        copy.setId(source.getId());
+        copy.setJobName(source.getJobName());
+        copy.setDescription(source.getDescription());
+        copy.setAppName(source.getAppName());
+        copy.setHandler(source.getHandler());
+        copy.setCron(source.getCron());
+        copy.setParams(source.getParams() == null ? null : new HashMap<String, Object>(source.getParams()));
+        copy.setTimeoutSeconds(source.getTimeoutSeconds());
+        copy.setRouteStrategy(source.getRouteStrategy());
+        copy.setEnabled(source.isEnabled());
+        copy.setVersion(source.getVersion());
+        copy.setCreatedAt(source.getCreatedAt());
+        copy.setUpdatedAt(source.getUpdatedAt());
+        return copy;
+    }
+
+    /**
+     * 回滚一次失败的更新：把数据库行与 Quartz 计划一起恢复到更新前的状态。
+     * <p>
+     * 版本号处理：第一次 {@code saveJob} 已经把库里的 version 从 N 抬到 N+1，
+     * 而快照里仍是 N，直接回写会被乐观锁判定为并发冲突（影响 0 行 → 抛异常）。
+     * 因此回滚前先把快照版本号对齐到库里当前的值。
+     * <p>
+     * 回滚自身失败只记录不外抛，避免覆盖掉原始的调度失败原因。
+     *
+     * @param snapshot 更新前的任务定义
+     */
+    private void rollbackUpdatedJob(JobInfo snapshot) {
+        try {
+            snapshot.setVersion(snapshot.getVersion() + 1);
+            jobStore.saveJob(snapshot);
+            applySchedule(snapshot);
+            log.warn("[orbit-admin] job {} rolled back to its previous definition "
+                    + "because quartz scheduling failed", snapshot.getJobName());
+        } catch (Exception rollbackFailed) {
+            log.error("[orbit-admin] failed to roll back job {} after schedule failure",
+                    snapshot.getJobName(), rollbackFailed);
+        }
     }
 
     /**
@@ -178,9 +266,9 @@ public class JobService {
         jobStore.findJobByName(jobName)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + jobName));
         // 以数据库为唯一事实来源：先删库，再清理 Quartz。
-        // 原先 Quartz 清理失败会抛异常，但此时 DB 行已删除 —— 接口报错却已生效，
+        // Quartz 清理失败仅记日志：DB 行已删除，此时抛异常等于「接口报错但改动已生效」，
         // 调用方重试只会得到 "job not found"，两边状态对不上。
-        // 改为 Quartz 失败仅记日志：DB 已无该任务，重启后 init() 也不会再装载它。
+        // DB 已无该任务，重启后 init() 也不会再装载它。
         jobStore.deleteJob(jobName);
         try {
             scheduler.deleteJob(jobKey(jobName));
@@ -308,8 +396,7 @@ public class JobService {
             // 先按路由策略选起点，再对剩余节点做故障转移：
             // Pod 重建后 IP/Pod 名都会变，旧地址在心跳超时前仍在表里；
             // 连不上就立刻摘除并换下一个（对齐 XXL-JOB FAILOVER）。
-            // 优化：直接在已查出的 candidates 上选点（原先 route(appName,...) 内部
-            // 会再执行一次 listByApp，每次派发实际查两遍库/缓存）。
+            // 直接在已查出的 candidates 上选点，避免一次派发查两遍库/缓存。
             ExecutorNode preferred = registry.route(candidates, job.getAppName(), job.getRouteStrategy());
             if (preferred != null) {
                 candidates = rotateToFront(candidates, preferred.getAddress());
@@ -575,12 +662,16 @@ public class JobService {
         if (job.getHandler() == null || job.getHandler().trim().isEmpty()) {
             throw new IllegalArgumentException("handler required");
         }
+        // 列宽前置校验：超长值在此以 400 拒绝，而不是等入库失败后只剩一句 internal error
+        ColumnLimits.requireMaxLength("appName", job.getAppName(), ColumnLimits.JOB_APP_NAME);
+        ColumnLimits.requireMaxLength("handler", job.getHandler(), ColumnLimits.JOB_HANDLER);
         if (job.getCron() != null && !job.getCron().trim().isEmpty()
                 && !CronExpression.isValidExpression(job.getCron())) {
             throw new IllegalArgumentException("invalid cron: " + job.getCron());
         }
-        // 路由策略：空值回填 ROUND；非空时必须属于合法集合（原先任意字符串都被
-        // 静默当作 ROUND 处理，排拼错误只能在事后翻日志发现），统一规范化为大写存储。
+        ColumnLimits.requireMaxLength("cron", job.getCron(), ColumnLimits.JOB_CRON_EXPR);
+        // 路由策略：空值回填 ROUND；非空时必须属于合法集合（拼错的策略在此直接拒绝，
+        // 而不是静默按 ROUND 处理、只能事后翻日志才发现），统一规范化为大写存储。
         if (job.getRouteStrategy() == null || job.getRouteStrategy().trim().isEmpty()) {
             job.setRouteStrategy(RouteStrategy.ROUND);
         } else {

@@ -36,7 +36,7 @@ services:
       - JAVA_OPTS=-Xms128m -Xmx256m
       - ORBIT_EXECUTOR_ADMIN_ADDRESSES=http://orbit-admin:8080
       - ORBIT_EXECUTOR_ADDRESS=http://orbit-executor:8081
-      # 单节点并发上限 + 超时强制中断（worker-threads: 0 可退回旧行为）
+      # 单节点并发上限 + 超时强制中断（worker-threads: 0 = 内联模式）
       - ORBIT_EXECUTOR_WORKER_THREADS=8
       - ORBIT_EXECUTOR_QUEUE_CAPACITY=256
     depends_on:

@@ -117,7 +117,7 @@ orbit:
     admin-addresses: http://orbit-admin:8080
     # address 留空：本地用本机 IP，K8s 用 POD_IP
     # port 无需配置，默认自动感知并继承应用自身的 server.port
-    worker-threads: 8                # 单节点并发上限 + 超时强制中断（0 = 旧行为）
+    worker-threads: 8                # 单节点并发上限 + 超时强制中断（0 = 内联模式）
     queue-capacity: 256              # 排队上限，满则快速失败
     access-token: ""                 # 与 admin 一致时可开启
 ```
@@ -142,7 +142,7 @@ public class OrderJobs {
 > 限制单节点并发执行数、队列满时快速失败返回 `executor saturated`；
 > 并按任务 `timeoutSeconds` **超时强制中断**（`interrupted=true`），
 > 彻底消除「调度中心 HTTP 读超时放弃后，执行器任务永久僵尸运行」的问题。
-> 设 `worker-threads: 0` 可退回旧版「请求线程内联执行」行为。
+> 设 `worker-threads: 0` 切换为内联模式：任务在请求线程内执行，无超时强制。
 
 > 执行器 SDK（`orbit-executor` + `orbit-core`）以 **Java 8 字节码**发布，业务应用运行在 **JRE 8 及以上 + Spring Boot 2.7** 即可接入，
 > 与调度中心使用 JDK 11 互不影响（两端仅经 HTTP/JSON 交互）。调度中心的 Quartz 依赖不会传递到业务侧。
@@ -171,16 +171,25 @@ public class OrderJobs {
 
 任务字段：
 
-| 字段 | 说明 |
-|------|------|
-| `jobName` | 唯一名 |
-| `appName` | 执行器应用名 |
-| `handler` | `@OrbitJob` 名 |
-| `cron` | Quartz Cron，空=仅手动 |
-| `params` | JSON 参数 |
-| `routeStrategy` | `ROUND` / `RANDOM` / `FIRST` |
-| `timeoutSeconds` | 读超时 |
-| `enabled` | 是否调度 |
+| 字段 | 说明 | 长度上限（与建表脚本一致，超出返回 400） |
+|------|------|------|
+| `jobName` | 唯一名，需匹配 `[A-Za-z0-9_-.]{1,64}` | 64 |
+| `appName` | 执行器应用名 | 64 |
+| `handler` | `@OrbitJob` 名 | 128 |
+| `cron` | Quartz Cron，空=仅手动 | 64 |
+| `params` | JSON 参数（序列化后的 JSON 长度受限） | 2000 |
+| `routeStrategy` | `ROUND` / `RANDOM` / `FIRST` | 16 |
+| `timeoutSeconds` | 读超时（≤0 回落 300，超过 `max-timeout-seconds` 封顶） | — |
+| `enabled` | 是否调度 | — |
+| `description` | 任务描述 | 256 |
+
+> 这些上限在**入参校验阶段**就检查，超限返回 400 并带上字段名；
+> 若等到入库才失败，只会被全局异常处理器压成一句没有信息的 `internal error`。
+
+> **创建/更新的原子性**：任务定义落库与 Quartz 编排是两步。若 Quartz 编排失败，
+> 创建会回滚刚写入的任务行、更新会回滚到修改前的定义，
+> 保证接口失败时数据库里既不会留下「看得见却永不触发」的幽灵任务，
+> 也不会出现「接口说已保存、Quartz 仍按旧 cron 跑」的不一致。
 
 ---
 
@@ -321,8 +330,9 @@ spring:
 | `port` | 0（自动感知） | 默认自动继承 `server.port`，无需配置；仅端口映射需覆盖时指定 |
 | `node-id` | 空 | 节点唯一标识；空则取 `POD_NAME`/主机名 |
 | `heartbeat-interval-ms` | 20000 | 心跳间隔（保底不低于 5000） |
-| `worker-threads` | 8 | 任务工作线程数：单节点并发上限 + 超时强制中断；0 = 请求线程内联（旧行为） |
+| `worker-threads` | 8 | 任务工作线程数：单节点并发上限 + 超时强制中断；0 = 内联模式（在请求线程内执行） |
 | `queue-capacity` | 256 | 任务排队队列容量：满则新触发快速失败（executor saturated）；`0` = 不排队（超出 `worker-threads` 直接快速失败） |
+| `max-job-wait-seconds` | 86400 | 请求未带 `timeoutSeconds` 时的兜底等待秒数（实际等待有 1 秒下限，误配 0/负数不会让任务瞬间「超时」） |
 | `access-token` | 空 | 令牌（双向常量时间比对） |
 
 ---
@@ -342,3 +352,17 @@ spring:
 | ORM/连接池 | — | MyBatis 3.5.19 + MyBatis-Plus 3.5.7 + Druid 1.2.8 |
 
 设计刻意保持精简：无独立 Web 控制台 UI（用 REST API / 自行对接前端）、无 GLUE 模式、无子任务 DAG，满足「中心调度 + 业务侧执行」的云原生批量场景即可扩展。
+
+---
+
+## 8. 已知限制
+
+刻意列出来，避免踩坑后才回头翻代码：
+
+| # | 限制 | 影响与缓解 |
+|---|------|-----------|
+| 1 | **派发是同步阻塞的**：定时触发时 Quartz 工作线程会一直被占住，直到执行器返回（最长 `max-timeout-seconds`） | `org.quartz.threadPool.threadCount`（默认 10）个长任务同时运行会拖住整个调度器，其它任务的 Cron 到点也发不出去。`@DisallowConcurrentExecution` 只防住「同一任务自我堆叠」，防不住跨任务占满线程池。长任务请把 `timeoutSeconds` 调小，或调大 `threadCount`。彻底解耦需要异步派发队列（XXL-JOB 的 ring buffer 做法），本项目刻意未做 |
+| 2 | **手动触发同样阻塞调用方**：`POST /jobs/{name}/trigger` 会占住一个 Tomcat 线程直到任务结束 | 长任务请走 Cron，不要用手动触发接口做压测 |
+| 3 | **注册地址校验不解析 DNS**（见 `ExecutorAddressValidator` 类注释） | 攻击者仍可能用一个解析到 `169.254.169.254` 的域名绕过保留地址拦截。需要彻底封堵 SSRF 请配置 `orbit.admin.executor-address-allow-pattern` 白名单 |
+| 4 | **执行器 SDK 面向 Spring Boot 2.7 + Servlet**：自动装配走 `META-INF/spring.factories`（Spring Boot 3 已不再读取该文件），`/orbit/executor/run` 也只在 Servlet Web 环境装配 | Spring Boot 3（`jakarta.*`）与 WebFlux 应用暂不能直接接入 |
+| 5 | **默认单副本内存 JobStore** | 多副本必须启用 cluster profile + 真实数据库，否则同一个 Cron 会被每个副本各触发一次（见第 5 节） |

@@ -147,9 +147,9 @@ class JobStoreTest {
 
     @Test
     void rejectUnserializableParams() {
-        // 回归测试：旧实现在序列化失败时返回 null，等于把任务参数静默清空入库 ——
-        // 接口返回 200、任务照常调度，但执行器拿到的是空参数，属于不可观测的故障。
-        // 现要求快速失败并给出明确原因。
+        // 序列化失败必须快速失败并给出明确原因：若吞掉异常返回 null，
+        // 任务参数会被静默清空入库 —— 接口返回 200、任务照常调度，
+        // 但执行器拿到的是空参数，属于不可观测的故障。
         JobInfo job = newJob("badParams");
         java.util.Map<String, Object> params = new java.util.HashMap<String, Object>();
         // Jackson 默认 FAIL_ON_EMPTY_BEANS=true：没有任何可序列化属性的对象会抛异常
@@ -163,8 +163,8 @@ class JobStoreTest {
 
     @Test
     void oversizedMessageIsTruncatedWithinColumnWidth() {
-        // 回归测试：旧实现截断后拼接 "..." 会产生 2003 字符，超出 message VARCHAR(2000)，
-        // 执行器返回长异常堆栈时 finishLog 直接报「value too long」入库失败。
+        // 截断后的总长度（含省略号）必须不超过 message VARCHAR(2000)，
+        // 否则执行器返回长异常堆栈时 finishLog 会报「value too long」入库失败。
         JobInfo job = jobStore.saveJob(newJob("bigMsg"));
         JobLog running = new JobLog();
         running.setLogId("log-big");

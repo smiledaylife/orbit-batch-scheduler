@@ -42,9 +42,9 @@ public class ExecutorClient {
     private final HttpHeaders jsonHeaders;
 
     /**
-     * RestTemplate 缓存，按 readTimeout 复用。
-     * 原先每次派发都 new 一个 RestTemplate + SimpleClientHttpRequestFactory（底层 HttpURLConnection、
-     * 无连接池），高频调度下是持续的无谓分配。key 的取值受任务 timeoutSeconds 上限约束，规模可控。
+     * RestTemplate 缓存，按 readTimeout 复用，避免每次派发都新建
+     * RestTemplate + SimpleClientHttpRequestFactory（底层 HttpURLConnection、无连接池）。
+     * key 的取值受任务 timeoutSeconds 上限约束，规模可控。
      */
     private final ConcurrentHashMap<Integer, RestTemplate> restTemplates =
             new ConcurrentHashMap<Integer, RestTemplate>();
@@ -100,10 +100,9 @@ public class ExecutorClient {
     /**
      * 解析本次调用的 readTimeout（毫秒）。
      * <p>
-     * 两点修正：
-     *   - 用 {@code long} 做乘法：原先 {@code timeoutSeconds * 1000} 是 int 运算，
-     *       timeoutSeconds 超过 2147483 时会溢出为负数，而负的 readTimeout 在
-     *       {@code HttpURLConnection} 中等同于「无限等待」；
+     * 两点实现约束：
+     *   - 乘法必须用 {@code long}：int 运算在 timeoutSeconds 超过 2147483 时会溢出为负数，
+     *       而负的 readTimeout 在 {@code HttpURLConnection} 中等同于「无限等待」；
      *   - 按 {@code orbit.admin.max-timeout-seconds} 封顶，避免单次派发长时间占住线程。
      *
      * @param timeoutSeconds 任务配置的超时秒数，&lt;=0 表示使用全局默认

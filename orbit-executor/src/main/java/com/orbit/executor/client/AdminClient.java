@@ -24,8 +24,8 @@ import java.util.List;
  *   - 在 HTTP 请求头中携带双向约定的安全访问令牌（{@code X-Orbit-Token}）。
  *
  * 性能设计：admin 地址列表（逗号分隔）与鉴权请求头在构造时<b>一次性预解析 / 预构建</b>。
- * 心跳默认 20 秒一次、多地址场景下原先每轮都要重复 split、trim、去尾斜杠与 Header 对象分配，
- * 配置在运行期不可变，预构建可完全消除该重复开销。
+ * 心跳默认 20 秒一次且配置在运行期不可变，预构建消除了每轮心跳重复
+ * split、trim、去尾斜杠与分配 Header 对象的开销。
  */
 public class AdminClient {
 
@@ -87,7 +87,7 @@ public class AdminClient {
             return false;
         }
 
-        // 若配置了访问令牌，同步设置到请求体中（兼容仅从 Body 读令牌的旧版调度中心）
+        // 若配置了访问令牌，同时写入请求体（调度中心既接受请求头、也接受请求体中的令牌）
         applyBodyToken(req);
 
         boolean anyOk = false;

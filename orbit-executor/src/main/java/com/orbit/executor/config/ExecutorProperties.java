@@ -74,7 +74,7 @@ public class ExecutorProperties {
      *       解决「调度中心 HTTP 读超时放弃后，执行器任务永久僵尸运行」的问题；</li>
      *   <li>任务线程独立命名（orbit-job-worker-N），便于线程 dump 定位。</li>
      * </ul>
-     * 设为 0 表示退回旧版行为：任务直接在 Web 容器请求线程内执行，无超时强制。
+     * 设为 0 表示内联模式：任务直接在 Web 容器请求线程内执行，无超时强制。
      */
     private int workerThreads = 8;
 
