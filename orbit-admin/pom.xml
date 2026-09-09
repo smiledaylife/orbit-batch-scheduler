@@ -188,7 +188,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>${maven-surefire-plugin.version}</version>
             </plugin>
-            <!-- 不再继承 spring-boot-starter-parent，需显式声明版本与 repackage 执行，才能产出可执行 jar -->
+            <!-- 本模块不继承 spring-boot-starter-parent，因此需显式声明版本与 repackage 执行，才能产出可执行 jar -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

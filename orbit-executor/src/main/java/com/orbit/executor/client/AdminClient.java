@@ -106,7 +106,7 @@ public class AdminClient {
      * 向调度中心的指定端点发送一次 POST。
      *
      * 多个调度中心地址逐个尝试，任一成功即算成功（多中心容灾）。
-     * 令牌统一走请求头，不再冗余写进请求体。
+     * 令牌走请求头 {@code X-Orbit-Token}。
      *
      * @param path 端点路径（以 / 开头）
      * @param body 请求体

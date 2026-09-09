@@ -39,7 +39,7 @@ public class ExecutorClient {
 
     /**
      * 触发调用共用的 RestTemplate。读超时对所有任务一致，因此一个实例即可复用
-     * （RestTemplate 配置完成后是线程安全的），不必再按超时档位缓存多份。
+     * （RestTemplate 配置完成后是线程安全的）。
      */
     private final RestTemplate restTemplate;
 

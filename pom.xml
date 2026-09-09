@@ -17,9 +17,9 @@
 
       设计取舍（各模块 POM 自治）：
       · 每个模块独立声明自己的坐标、编译级别、依赖与插件版本，可脱离本仓库单独构建；
-      · 依赖版本各自通过 import spring-boot-dependencies BOM 收敛，不再依靠父 POM 属性覆盖
-        （BOM 用 import 引入时，父级 <properties> 覆盖版本的写法是无效的，必须显式声明版本 —— 
-         例如 orbit-admin 的 Quartz 2.5.2 就在其自身 dependencyManagement 中显式锁定）；
+      · 依赖版本各自通过 import spring-boot-dependencies BOM 收敛；BOM 以 import 方式引入时，
+        父级 <properties> 覆盖版本的写法无效，需要偏离 BOM 的版本必须在模块自身 dependencyManagement
+        中显式声明（例如 orbit-admin 的 Quartz 2.5.2）；
       · 模块间引用统一用 ${project.version}，同版本号发布，避免版本漂移。
 
       构建方式（聚合与继承相互独立，reactor 依旧可用）：

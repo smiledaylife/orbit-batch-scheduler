@@ -165,7 +165,7 @@ public class OrderJobs {
 | POST | `/orbit/admin/jobs/{name}/trigger` | 立即触发一次（body 可传本次临时参数 JSON）。返回**受理回执**而非执行结果，结果查 `/logs` |
 | GET | `/orbit/admin/logs` | 执行日志分页（`jobName`/`page`/`size`） |
 | GET | `/orbit/admin/executors` | 在线执行器（`appName` 可选过滤） |
-| POST | `/orbit/admin/callback` | 执行器回传执行结果（执行器调用；按 `logId` 幂等收敛日志） |
+| POST | `/orbit/admin/callback` | 执行器**批量**回传执行结果（执行器调用；body 为结果数组，逐条按 `logId` 幂等收敛，响应返回实际收敛条数） |
 | GET | `/orbit/admin/overview` | 总览（含触发通道指标：`dispatchActive` / `dispatchQueueSize` / `dispatchRejected` / `dispatchSkipped` / `dispatchOutstanding`） |
 | POST | `/orbit/executor/run` | 执行器：受理调度触发（调度中心调用）。入队即返回 `accepted=true`，不等待任务执行 |
 | GET | `/orbit/executor/handlers` | 执行器：查询本节点注册的 Handler 列表 |
@@ -209,9 +209,9 @@ Cron 到点 / 手动触发
       │
       ▼  工作线程执行 @OrbitJob（到期由看门狗 cancel(true) 中断）
       │
-      │  POST /orbit/admin/callback（失败按 callback-retry-* 退避重试）
+      │  POST /orbit/admin/callback（一次最多 200 条；失败按 callback-retry-* 退避重试，重试耗尽整批退回队列）
       ▼
-[admin] 按 logId 把 RUNNING 收敛为 SUCCESS / FAILED
+[admin] 逐条按 logId 把 RUNNING 收敛为 SUCCESS / FAILED
 ```
 
 几个由此而来的性质：
@@ -220,6 +220,9 @@ Cron 到点 / 手动触发
   跑一天的任务也不会占住 Quartz 工作线程或触发线程；
 - **日志有两段生命**：触发时写入 RUNNING，回传到达时才写终态。
   `orbit_job_log` 里 `status='RUNNING'` 表示「已触发、结果未回传」，不代表卡死；
+- **回传是批量的**：执行器把结果先压进有界队列，发送线程一次取一条、再把队列里已积压的一起打包
+  （上限 200 条）成一个请求。调度中心短暂不可用后恢复时，积压的结果一次补发完，不必逐条重连；
+  单批失败按 `callback-retry-*` 退避重试，重试耗尽则整批退回队列而不是丢弃，靠队列容量做背压；
 - **回传幂等**：`finishLogFromRunning` 的 `WHERE` 带 `status='RUNNING'`，
   所以执行器重试、重复回传、以及与孤儿回收的竞态都不会覆盖已写入的真实结果。
   重复回传同样返回成功，避免执行器把「已处理过」误判为失败而无限重试；
@@ -229,6 +232,9 @@ Cron 到点 / 手动触发
 > **升级注意（破坏性变更）**：`/orbit/executor/run` 的响应语义从「执行结果」变成了「受理回执」。
 > 旧版执行器对新版调度中心会返回 `accepted=false` 的结果对象，被当成触发失败；
 > 新版执行器对旧版调度中心则会让日志永远停在 RUNNING。**调度中心与执行器必须同版本升级。**
+>
+> 同批变更：令牌只走 `X-Orbit-Token` 请求头（调度中心侧也接受 `Authorization: Bearer`），
+> 请求体里的 `accessToken` 字段已移除；`/orbit/admin/callback` 的请求体从单个对象变成数组。
 
 ---
 
@@ -273,7 +279,7 @@ GaussDB 请把 `ORBIT_DB_URL` / `ORBIT_DB_DRIVER` 换成 openGauss 驱动，并�
 > `schedulerFactoryBean.setDataSource(...)`，让 Quartz 直接复用 Spring 管理的 Druid 连接池，
 > 不走 Quartz 自己的 `org.quartz.dataSource.*`，因此不需要 c3p0 / HikariCP。
 
-> 执行器心跳落库后，admin 多副本不再要求 StatefulSet。心跳打到任意副本即可。
+> 执行器心跳落库，admin 多副本无需 StatefulSet。心跳打到任意副本即可。
 > 多副本**调度**仍依赖 Quartz JDBC 集群（上面 1~4），与注册表无关。
 
 ```bash
@@ -340,10 +346,10 @@ spring:
 
 | 项 | 默认 | 说明 |
 |----|------|------|
-| `access-token` | 空 | 与执行器双向校验（比对采用常量时间算法，防时序侧信道） |
+| `access-token` | 空 | 非空时开启鉴权，与执行器双向校验；令牌取自 `X-Orbit-Token` 或 `Authorization: Bearer`，比对采用常量时间算法防时序侧信道 |
 | `heartbeat-timeout-seconds` | 90 | 超时摘除执行器 |
 | `evict-interval-ms` | 30000 | 后台扫描摘除失联节点的频率 |
-| `timezone` | Asia/Shanghai | Cron 时区（非法值启动即失败，不再静默回退 GMT） |
+| `timezone` | Asia/Shanghai | Cron 时区（非法值启动即失败） |
 | `group` | ORBIT | Quartz Job/Trigger 分组名 |
 | `connect-timeout-ms` | 3000 | 调执行器连接超时 |
 | `max-timeout-seconds` | 3600 | 单任务执行超时上限：随触发下发给执行器做超时强制，同时是僵尸 RUNNING 回收阈值基准 |
@@ -375,7 +381,7 @@ spring:
 | `worker-threads` | 8 | 任务工作线程数：单节点并发上限 + 超时强制中断。下限为 1（误配 0/负数按 1 处理） |
 | `queue-capacity` | 256 | 任务排队队列容量：满则新触发快速失败（executor saturated）；`0` = 不排队（超出 `worker-threads` 直接快速失败） |
 | `max-job-wait-seconds` | 86400 | 请求未带 `timeoutSeconds` 时的兜底等待秒数（实际等待有 1 秒下限，误配 0/负数不会让任务瞬间「超时」） |
-| `access-token` | 空 | 令牌（双向常量时间比对） |
+| `access-token` | 空 | 令牌，随 `X-Orbit-Token` 请求头发出（双向常量时间比对） |
 | `callback-retry-times` | 3 | 结果回传失败的重试次数（不含首次）。回传失败会让日志停在 RUNNING 直到被回收 |
 | `callback-retry-interval-ms` | 2000 | 回传重试的退避间隔 |
 | `callback-queue-capacity` | 1000 | 待回传队列容量：满则丢弃最旧一条并打 ERROR |
@@ -391,7 +397,7 @@ spring:
 | 任务注解 | `@XxlJob` | `@OrbitJob` |
 | 注册 | 心跳写入 `xxl_job_registry`（MySQL） | 心跳写入 `orbit_executor_registry`（共享库，无状态 Deployment） |
 | 触发 | HTTP，`ExecutorBizClient` 硬编码 3 秒超时 | HTTP `/orbit/executor/run`，超时 `trigger-timeout-seconds`（默认 10 秒） |
-| 结果回传 | 执行器 `TriggerCallbackThread` 批量回调 | 执行器 `CallbackClient`：有界队列 + 退避重试 + 满则丢最旧 |
+| 结果回传 | 执行器 `TriggerCallbackThread` 批量回调，失败落盘 `callbacklog/` 文件由重试线程补发 | 执行器 `CallbackClient`：有界队列 + 单请求最多 200 条 + 退避重试；重试耗尽整批退回队列（仅队列满才丢弃并打 ERROR），不落盘 |
 | 阻塞策略 | 执行器侧 `SERIAL_EXECUTION` / `DISCARD_LATER` / `COVER_EARLY`，每 job 一条 `JobThread` + 无界队列 | 调度中心侧 `dispatch-serial-per-job` 串行；执行器侧共享有界线程池 + 有界队列（满则同步快速失败） |
 | 触发线程池 | fast/slow 双池，1 分钟内慢触发 >10 次改投慢池 | 单一有界触发池 + `/overview` 水位指标 |
 | 路由 | 轮询/随机/故障转移… | ROUND / RANDOM / FIRST（非法值创建/更新时拒绝） |
