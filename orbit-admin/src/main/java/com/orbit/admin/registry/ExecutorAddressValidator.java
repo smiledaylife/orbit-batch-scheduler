@@ -1,5 +1,7 @@
 package com.orbit.admin.registry;
 
+import com.orbit.core.protocol.OrbitProtocol;
+
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.regex.Pattern;
@@ -46,7 +48,7 @@ public final class ExecutorAddressValidator {
         if (rawAddress == null || rawAddress.trim().isEmpty()) {
             throw new IllegalArgumentException("address required");
         }
-        String address = trimSlash(rawAddress.trim());
+        String address = OrbitProtocol.trimTrailingSlash(rawAddress.trim());
 
         URI uri;
         try {
@@ -135,7 +137,4 @@ public final class ExecutorAddressValidator {
     /**
      * 去掉末尾多余的斜杠（保留单独的 "/"）。
      */
-    private static String trimSlash(String s) {
-        return s.endsWith("/") && s.length() > 1 ? s.substring(0, s.length() - 1) : s;
-    }
 }

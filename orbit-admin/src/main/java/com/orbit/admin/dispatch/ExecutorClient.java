@@ -3,6 +3,7 @@ package com.orbit.admin.dispatch;
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.core.model.TriggerRequest;
 import com.orbit.core.model.TriggerResult;
+import com.orbit.core.protocol.OrbitProtocol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
@@ -32,13 +33,6 @@ public class ExecutorClient {
     private static final Logger log = LoggerFactory.getLogger(ExecutorClient.class);
 
     /**
-     * 安全令牌 Header 字段名称
-     */
-    public static final String TOKEN_HEADER = "X-Orbit-Token";
-
-    private final AdminProperties properties;
-
-    /**
      * 预构建的 JSON + 鉴权 Header（accessToken 在运行期不可变，构造时一次性构建）
      */
     private final HttpHeaders jsonHeaders;
@@ -50,7 +44,6 @@ public class ExecutorClient {
     private final RestTemplate restTemplate;
 
     public ExecutorClient(AdminProperties properties) {
-        this.properties = properties;
         this.jsonHeaders = buildJsonHeaders(properties.getAccessToken());
         this.restTemplate = buildRest(properties.getConnectTimeoutMs(), triggerReadTimeoutMs(properties));
     }
@@ -63,13 +56,8 @@ public class ExecutorClient {
      * @return 受理回执（accepted=true）；若请求失败或超时则返回包含错误原因的失败结果（accepted=false）
      */
     public TriggerResult trigger(String executorBaseUrl, TriggerRequest request) {
-        // 1. 设置鉴权令牌（若配置）
-        if (properties.getAccessToken() != null && !properties.getAccessToken().isEmpty()) {
-            request.setAccessToken(properties.getAccessToken());
-        }
-
-        // 2. 拼接执行器触发端点 URL
-        String url = trimSlash(executorBaseUrl) + "/orbit/executor/run";
+        // 1. 拼接执行器触发端点 URL（令牌在构造时已预置进 jsonHeaders）
+        String url = OrbitProtocol.trimTrailingSlash(executorBaseUrl) + "/orbit/executor/run";
         try {
             TriggerResult result = restTemplate.postForObject(url,
                     new HttpEntity<TriggerRequest>(request, jsonHeaders), TriggerResult.class);
@@ -94,16 +82,18 @@ public class ExecutorClient {
     /**
      * 解析触发调用的 readTimeout（毫秒）。
      *
-     * 取 {@code orbit.admin.trigger-timeout-seconds}，配置为 0 或负数时退回全局 readTimeoutMs，
+     * 取 {@code orbit.admin.trigger-timeout-seconds}，下限 1 秒，
      * 避免负的 readTimeout 在 {@code HttpURLConnection} 中等同于「无限等待」。
      *
      * @param properties 调度中心配置
      * @return 读取超时毫秒数
      */
     private static int triggerReadTimeoutMs(AdminProperties properties) {
+        // 下限 1 秒：配成 0 或负数会让 HttpURLConnection 的 readTimeout 变成「无限等待」，
+        // 表现为触发线程被永久占住且没有任何报错。
         int seconds = properties.getTriggerTimeoutSeconds();
-        if (seconds <= 0) {
-            return properties.getReadTimeoutMs();
+        if (seconds < 1) {
+            seconds = 1;
         }
         long ms = seconds * 1000L;
         if (ms > Integer.MAX_VALUE) {
@@ -119,7 +109,7 @@ public class ExecutorClient {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         if (accessToken != null && !accessToken.isEmpty()) {
-            headers.set(TOKEN_HEADER, accessToken);
+            headers.set(OrbitProtocol.TOKEN_HEADER, accessToken);
         }
         return headers;
     }
@@ -138,13 +128,4 @@ public class ExecutorClient {
         return new RestTemplate(f);
     }
 
-    /**
-     * 规范化 URL 地址，去除末尾可能多余的斜杠
-     *
-     * @param s 原始 URL
-     * @return 规范化后的 URL
-     */
-    private static String trimSlash(String s) {
-        return s.endsWith("/") && s.length() > 1 ? s.substring(0, s.length() - 1) : s;
-    }
 }

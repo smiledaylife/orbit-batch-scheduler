@@ -2,7 +2,6 @@ package com.orbit.admin.web;
 
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.dispatch.DispatchExecutor;
-import com.orbit.admin.dispatch.ExecutorClient;
 import com.orbit.admin.registry.ExecutorRegistry;
 import com.orbit.admin.service.JobService;
 import com.orbit.core.model.ApiResult;
@@ -22,14 +21,11 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -78,15 +74,10 @@ public class AdminApiController {
      * 接收执行器的心跳上报或初次注册请求。
      *
      * @param req   注册请求数据
-     * @param token HTTP Header 中的安全令牌
      * @return 成功响应
      */
     @PostMapping("/registry")
-    public ApiResult<Void> registry(@RequestBody RegistryRequest req,
-                                    @RequestHeader(value = ExecutorClient.TOKEN_HEADER, required = false) String token) {
-        // 校验安全令牌
-        checkToken(token, req.getAccessToken());
-        // 注册或刷新节点
+    public ApiResult<Void> registry(@RequestBody RegistryRequest req) {
         registry.register(req);
         return ApiResult.ok();
     }
@@ -95,13 +86,10 @@ public class AdminApiController {
      * 接收执行器主动下线注销通知。
      *
      * @param req   下线请求数据
-     * @param token HTTP Header 中的安全令牌
      * @return 成功响应
      */
     @PostMapping("/registry/remove")
-    public ApiResult<Void> registryRemove(@RequestBody RegistryRequest req,
-                                          @RequestHeader(value = ExecutorClient.TOKEN_HEADER, required = false) String token) {
-        checkToken(token, req.getAccessToken());
+    public ApiResult<Void> registryRemove(@RequestBody RegistryRequest req) {
         registry.remove(req.getAppName(), req.getAddress());
         return ApiResult.ok();
     }
@@ -121,13 +109,10 @@ public class AdminApiController {
      * 避免执行器把「已处理过」误判为失败而无限重试。
      *
      * @param results 执行器回传的一批最终结果（accepted=false）
-     * @param token   HTTP Header 中的安全令牌
      * @return data 为本批中真正完成状态转换的条数
      */
     @PostMapping("/callback")
-    public ApiResult<Integer> callback(@RequestBody List<TriggerResult> results,
-                                       @RequestHeader(value = ExecutorClient.TOKEN_HEADER, required = false) String token) {
-        checkToken(token, null);
+    public ApiResult<Integer> callback(@RequestBody List<TriggerResult> results) {
         return ApiResult.ok(jobService.handleCallbacks(results));
     }
 
@@ -309,22 +294,4 @@ public class AdminApiController {
         return ApiResult.fail(500, "internal error");
     }
 
-    /**
-     * 校验安全令牌。
-     *
-     * @param headerToken 请求头中的 Token
-     * @param bodyToken   请求体中的 Token
-     */
-    private void checkToken(String headerToken, String bodyToken) {
-        String expect = properties.getAccessToken();
-        if (expect == null || expect.isEmpty()) {
-            return;
-        }
-        String actual = headerToken != null && !headerToken.isEmpty() ? headerToken : bodyToken;
-        // 常量时间比对（MessageDigest.isEqual）：抵御时序侧信道逐字节猜测令牌
-        if (actual == null || !MessageDigest.isEqual(
-                expect.getBytes(StandardCharsets.UTF_8), actual.getBytes(StandardCharsets.UTF_8))) {
-            throw new IllegalArgumentException("invalid access token");
-        }
-    }
 }

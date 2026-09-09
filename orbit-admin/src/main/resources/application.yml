@@ -69,8 +69,6 @@ orbit:
     access-token: ""
     heartbeat-timeout-seconds: 90
     connect-timeout-ms: 3000
-    # 触发请求的读超时兜底值（仅在 trigger-timeout-seconds <= 0 时生效）
-    read-timeout-ms: 10000
     group: ORBIT
     timezone: Asia/Shanghai
     evict-interval-ms: 30000

@@ -31,12 +31,6 @@ public class AdminProperties {
     private int connectTimeoutMs = 3000;
 
     /**
-     * 调度中心调用执行器时的全局默认数据读取超时时间（毫秒），默认为 300000ms（5分钟）。
-     * 若具体任务中单独配置了 {@code timeoutSeconds}，则优先以任务自身的超时配置为准。
-     */
-    private int readTimeoutMs = 300000;
-
-    /**
      * Quartz 调度框架内部的任务分组名称，默认为 "ORBIT"。
      */
     private String group = "ORBIT";
@@ -144,14 +138,6 @@ public class AdminProperties {
 
     public void setConnectTimeoutMs(int connectTimeoutMs) {
         this.connectTimeoutMs = connectTimeoutMs;
-    }
-
-    public int getReadTimeoutMs() {
-        return readTimeoutMs;
-    }
-
-    public void setReadTimeoutMs(int readTimeoutMs) {
-        this.readTimeoutMs = readTimeoutMs;
     }
 
     public String getGroup() {

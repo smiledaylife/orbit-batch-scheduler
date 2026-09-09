@@ -11,6 +11,7 @@ import com.orbit.admin.store.po.OrbitExecutorRegistryPO;
 import com.orbit.core.model.ExecutorNode;
 import com.orbit.core.model.RegistryRequest;
 import com.orbit.core.model.RouteStrategy;
+import com.orbit.core.protocol.OrbitProtocol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -151,7 +152,7 @@ public class ExecutorRegistry {
         if (appName == null || address == null) {
             return;
         }
-        String addr = trimSlash(address.trim());
+        String addr = OrbitProtocol.trimTrailingSlash(address.trim());
         int deleted = mapper.delete(new LambdaQueryWrapper<OrbitExecutorRegistryPO>()
                 .eq(OrbitExecutorRegistryPO::getAppName, appName.trim())
                 .eq(OrbitExecutorRegistryPO::getAddress, addr));
@@ -199,14 +200,6 @@ public class ExecutorRegistry {
         return matched;
     }
 
-    /**
-     * 便捷路由入口：自行查询候选列表并按策略选点。
-     * 热路径（任务派发）请改用 {@link #route(List, String, String)} 复用已查出的候选列表，
-     * 避免一次派发查两遍库。
-     */
-    public ExecutorNode route(String appName, String strategy) {
-        return route(listByApp(appName), appName, strategy);
-    }
 
     /**
      * 在已查出的候选列表上按路由策略选点。
@@ -273,15 +266,17 @@ public class ExecutorRegistry {
     }
 
     /**
-     * 从数据库加载快照（按地址升序，与既有排序语义一致）。
+     * 从数据库加载快照，并在内存里按地址升序排列。
+     *
+     * 排序只在内存做一次：BY_ADDRESS 对 null 地址有确定语义，而各数据库 ASC 的 NULL 位置并不一致，
+     * 交给 SQL 排反而要额外约束；在线节点数量级为几十到几百，内存排序成本可忽略。
      *
      * @param ttl 缓存有效期（毫秒）；&lt;=0 表示不做缓存复用
      */
     private RegistrySnapshot loadSnapshot(long ttl) {
         List<OrbitExecutorRegistryPO> rows = mapper.selectList(
                 new LambdaQueryWrapper<OrbitExecutorRegistryPO>()
-                        .ge(OrbitExecutorRegistryPO::getLastHeartbeat, aliveSince())
-                        .orderByAsc(OrbitExecutorRegistryPO::getAddress));
+                        .ge(OrbitExecutorRegistryPO::getLastHeartbeat, aliveSince()));
         List<ExecutorNode> nodes = new ArrayList<ExecutorNode>(rows.size());
         for (OrbitExecutorRegistryPO po : rows) {
             nodes.add(toNode(po));
@@ -367,8 +362,5 @@ public class ExecutorRegistry {
         }
     }
 
-    private static String trimSlash(String s) {
-        return s.endsWith("/") && s.length() > 1 ? s.substring(0, s.length() - 1) : s;
-    }
 
 }

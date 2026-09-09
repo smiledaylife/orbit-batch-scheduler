@@ -42,11 +42,6 @@ public class TriggerRequest implements Serializable {
      */
     private int timeoutSeconds = 300;
 
-    /**
-     * 安全访问令牌，用于执行器端安全校验
-     */
-    private String accessToken;
-
     public long getJobId() {
         return jobId;
     }
@@ -95,11 +90,4 @@ public class TriggerRequest implements Serializable {
         this.timeoutSeconds = timeoutSeconds;
     }
 
-    public String getAccessToken() {
-        return accessToken;
-    }
-
-    public void setAccessToken(String accessToken) {
-        this.accessToken = accessToken;
-    }
 }

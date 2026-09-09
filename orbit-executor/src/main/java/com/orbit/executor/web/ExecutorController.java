@@ -1,6 +1,7 @@
 package com.orbit.executor.web;
 
 import com.orbit.core.model.ApiResult;
+import com.orbit.core.protocol.OrbitProtocol;
 import com.orbit.core.model.TriggerRequest;
 import com.orbit.core.model.TriggerResult;
 import com.orbit.executor.bootstrap.ExecutorBootstrap;
@@ -19,8 +20,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -40,11 +39,6 @@ import java.util.Map;
 public class ExecutorController {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutorController.class);
-
-    /**
-     * 安全鉴权请求头名称
-     */
-    public static final String TOKEN_HEADER = "X-Orbit-Token";
 
     private final JobHandlerRegistry registry;
     private final ExecutorProperties properties;
@@ -80,9 +74,9 @@ public class ExecutorController {
      */
     @PostMapping("/run")
     public TriggerResult run(@RequestBody TriggerRequest request,
-                             @RequestHeader(value = TOKEN_HEADER, required = false) String token) {
+                             @RequestHeader(value = OrbitProtocol.TOKEN_HEADER, required = false) String token) {
         // 1. 安全访问令牌校验
-        checkToken(token, request.getAccessToken());
+        checkToken(token);
 
         String handler = request.getHandler();
         String node = bootstrap.getResolvedNodeId() == null ? "executor" : bootstrap.getResolvedNodeId();
@@ -110,8 +104,9 @@ public class ExecutorController {
      * @return 执行器概况与 Handler 列表数据
      */
     @GetMapping("/handlers")
-    public Map<String, Object> handlers(@RequestHeader(value = TOKEN_HEADER, required = false) String token) {
-        checkToken(token, null);
+    public Map<String, Object> handlers(
+            @RequestHeader(value = OrbitProtocol.TOKEN_HEADER, required = false) String token) {
+        checkToken(token);
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("appName", properties.getAppName());
         m.put("address", bootstrap.getResolvedAddress());
@@ -133,32 +128,18 @@ public class ExecutorController {
     }
 
     /**
-     * 双向安全令牌校验逻辑。
-     * 若本地未配置 accessToken，则跳过校验；若配置了 accessToken，优先比对 Header 中的 Token，其次比对 Body 中的 Token。
-     * 比对使用常量时间算法（{@link MessageDigest#isEqual}），抵御时序侧信道逐字节猜测令牌。
+     * 校验安全令牌：未配置 accessToken 时跳过校验。
+     * 比对使用常量时间算法，抵御时序侧信道逐字节猜测令牌。
      *
      * @param header Header 携带的令牌
-     * @param body   Body 携带的令牌
      */
-    private void checkToken(String header, String body) {
+    private void checkToken(String header) {
         String expect = properties.getAccessToken();
         if (expect == null || expect.isEmpty()) {
             return;
         }
-        String actual = header != null && !header.isEmpty() ? header : body;
-        if (!constantTimeEquals(expect, actual)) {
+        if (!OrbitProtocol.constantTimeEquals(expect, header)) {
             throw new IllegalArgumentException("invalid access token");
         }
-    }
-
-    /**
-     * 常量时间字符串比对：除不等长立即返回 false 之外，逐字节比较耗时与内容无关。
-     */
-    static boolean constantTimeEquals(String a, String b) {
-        if (a == null || b == null) {
-            return false;
-        }
-        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8),
-                b.getBytes(StandardCharsets.UTF_8));
     }
 }

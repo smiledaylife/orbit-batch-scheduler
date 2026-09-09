@@ -56,7 +56,7 @@ class ExecutorRegistryTest {
 
         Set<String> hit = new HashSet<String>();
         for (int i = 0; i < 4; i++) {
-            ExecutorNode n = registry.route("demo", "ROUND");
+            ExecutorNode n = registry.route(registry.listByApp("demo"), "demo", "ROUND");
             assertNotNull(n);
             hit.add(n.getAddress());
         }
@@ -65,7 +65,7 @@ class ExecutorRegistryTest {
 
     @Test
     void routeEmptyReturnsNull() {
-        assertNull(registry.route("missing", "ROUND"));
+        assertNull(registry.route(registry.listByApp("missing"), "missing", "ROUND"));
     }
 
     @Test

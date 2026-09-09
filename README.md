@@ -346,7 +346,6 @@ spring:
 | `timezone` | Asia/Shanghai | Cron 时区（非法值启动即失败，不再静默回退 GMT） |
 | `group` | ORBIT | Quartz Job/Trigger 分组名 |
 | `connect-timeout-ms` | 3000 | 调执行器连接超时 |
-| `read-timeout-ms` | 10000 | 触发读超时兜底值（仅在 `trigger-timeout-seconds` ≤ 0 时生效） |
 | `max-timeout-seconds` | 3600 | 单任务执行超时上限：随触发下发给执行器做超时强制，同时是僵尸 RUNNING 回收阈值基准 |
 | `trigger-timeout-seconds` | 10 | 触发请求的 HTTP 读超时。触发是「受理即返回」，只需覆盖网络往返与入队，不随 `max-timeout-seconds` 放大 |
 | `registry-cache-ttl-ms` | 3000 | 注册表本地缓存 TTL：调度热路径免查库；写操作立即失效；0 = 关闭 |

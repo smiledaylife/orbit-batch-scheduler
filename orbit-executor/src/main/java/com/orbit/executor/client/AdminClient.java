@@ -2,6 +2,7 @@ package com.orbit.executor.client;
 
 import com.orbit.core.model.ApiResult;
 import com.orbit.core.model.RegistryRequest;
+import com.orbit.core.protocol.OrbitProtocol;
 import com.orbit.executor.config.ExecutorProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,11 +33,6 @@ import java.util.List;
 public class AdminClient {
 
     private static final Logger log = LoggerFactory.getLogger(AdminClient.class);
-
-    /**
-     * 安全令牌约定的 HTTP Header 名称
-     */
-    public static final String TOKEN_HEADER = "X-Orbit-Token";
 
     /**
      * 执行器配置属性
@@ -156,10 +152,7 @@ public class AdminClient {
             if (base.isEmpty()) {
                 continue;
             }
-            if (base.endsWith("/")) {
-                base = base.substring(0, base.length() - 1);
-            }
-            bases.add(base);
+            bases.add(OrbitProtocol.trimTrailingSlash(base));
         }
         return Collections.unmodifiableList(bases);
     }
@@ -171,7 +164,7 @@ public class AdminClient {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         if (accessToken != null && !accessToken.isEmpty()) {
-            headers.set(TOKEN_HEADER, accessToken);
+            headers.set(OrbitProtocol.TOKEN_HEADER, accessToken);
         }
         return headers;
     }
