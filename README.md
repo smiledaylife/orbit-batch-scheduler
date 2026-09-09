@@ -89,10 +89,10 @@ curl -X POST http://localhost:8080/orbit/admin/jobs \
     "enabled": true
   }'
 
-# 立即执行一次
+# 立即触发一次（返回受理回执 accepted=true，不是执行结果）
 curl -X POST http://localhost:8080/orbit/admin/jobs/dailyReportJob/trigger
 
-# 查日志
+# 查日志（执行器跑完后回传，日志才从 RUNNING 变成 SUCCESS/FAILED）
 curl 'http://localhost:8080/orbit/admin/logs?jobName=dailyReportJob'
 ```
 
@@ -162,11 +162,12 @@ public class OrderJobs {
 | DELETE | `/orbit/admin/jobs/{name}` | 删除 |
 | POST | `/orbit/admin/jobs/{name}/pause` | 暂停（持久化 `enabled=false`，重启后保持） |
 | POST | `/orbit/admin/jobs/{name}/resume` | 恢复（持久化 `enabled=true`） |
-| POST | `/orbit/admin/jobs/{name}/trigger` | 立即执行（body 可传本次临时参数 JSON） |
+| POST | `/orbit/admin/jobs/{name}/trigger` | 立即触发一次（body 可传本次临时参数 JSON）。返回**受理回执**而非执行结果，结果查 `/logs` |
 | GET | `/orbit/admin/logs` | 执行日志分页（`jobName`/`page`/`size`） |
 | GET | `/orbit/admin/executors` | 在线执行器（`appName` 可选过滤） |
-| GET | `/orbit/admin/overview` | 总览（含派发通道指标：`dispatchActive` / `dispatchQueueSize` / `dispatchRejected` / `dispatchSkipped`） |
-| POST | `/orbit/executor/run` | 执行器：接收调度触发（调度中心调用） |
+| POST | `/orbit/admin/callback` | 执行器回传执行结果（执行器调用；按 `logId` 幂等收敛日志） |
+| GET | `/orbit/admin/overview` | 总览（含触发通道指标：`dispatchActive` / `dispatchQueueSize` / `dispatchRejected` / `dispatchSkipped` / `dispatchOutstanding`） |
+| POST | `/orbit/executor/run` | 执行器：受理调度触发（调度中心调用）。入队即返回 `accepted=true`，不等待任务执行 |
 | GET | `/orbit/executor/handlers` | 执行器：查询本节点注册的 Handler 列表 |
 
 任务字段：
@@ -190,6 +191,44 @@ public class OrderJobs {
 > 创建会回滚刚写入的任务行、更新会回滚到修改前的定义，
 > 保证接口失败时数据库里既不会留下「看得见却永不触发」的幽灵任务，
 > 也不会出现「接口说已保存、Quartz 仍按旧 cron 跑」的不一致。
+
+---
+
+### 4.1 触发-回传异步模型
+
+触发与执行是解耦的，一次调度的完整链路：
+
+```
+Cron 到点 / 手动触发
+      │
+      ▼
+[admin] 写 RUNNING 日志（生成 logId）
+      │  POST /orbit/executor/run（读超时 trigger-timeout-seconds，默认 10s）
+      ▼
+[executor] 入队 → 立即回 accepted=true        ← 调度中心到此为止，日志保持 RUNNING
+      │
+      ▼  工作线程执行 @OrbitJob（到期由看门狗 cancel(true) 中断）
+      │
+      │  POST /orbit/admin/callback（失败按 callback-retry-* 退避重试）
+      ▼
+[admin] 按 logId 把 RUNNING 收敛为 SUCCESS / FAILED
+```
+
+几个由此而来的性质：
+
+- **调度中心为一次触发最多占用 `trigger-timeout-seconds`（默认 10 秒）**，与任务真实耗时无关。
+  跑一天的任务也不会占住 Quartz 工作线程或触发线程；
+- **日志有两段生命**：触发时写入 RUNNING，回传到达时才写终态。
+  `orbit_job_log` 里 `status='RUNNING'` 表示「已触发、结果未回传」，不代表卡死；
+- **回传幂等**：`finishLogFromRunning` 的 `WHERE` 带 `status='RUNNING'`，
+  所以执行器重试、重复回传、以及与孤儿回收的竞态都不会覆盖已写入的真实结果。
+  重复回传同样返回成功，避免执行器把「已处理过」误判为失败而无限重试；
+- **兜底**：执行器崩溃或回传彻底丢失时，日志由后台的僵尸回收
+  （`log-reap-interval-ms`，阈值 = `max-timeout-seconds` + 5 分钟宽限）判为 FAILED。
+
+> **升级注意（破坏性变更）**：`/orbit/executor/run` 的响应语义从「执行结果」变成了「受理回执」。
+> 旧版执行器对新版调度中心会返回 `accepted=false` 的结果对象，被当成触发失败；
+> 新版执行器对旧版调度中心则会让日志永远停在 RUNNING。**调度中心与执行器必须同版本升级。**
 
 ---
 
@@ -307,15 +346,16 @@ spring:
 | `timezone` | Asia/Shanghai | Cron 时区（非法值启动即失败，不再静默回退 GMT） |
 | `group` | ORBIT | Quartz Job/Trigger 分组名 |
 | `connect-timeout-ms` | 3000 | 调执行器连接超时 |
-| `read-timeout-ms` | 300000 | 默认读超时 |
-| `max-timeout-seconds` | 3600 | 单任务超时上限（派发封顶 + 僵尸 RUNNING 回收阈值基准） |
+| `read-timeout-ms` | 10000 | 触发读超时兜底值（仅在 `trigger-timeout-seconds` ≤ 0 时生效） |
+| `max-timeout-seconds` | 3600 | 单任务执行超时上限：随触发下发给执行器做超时强制，同时是僵尸 RUNNING 回收阈值基准 |
+| `trigger-timeout-seconds` | 10 | 触发请求的 HTTP 读超时。触发是「受理即返回」，只需覆盖网络往返与入队，不随 `max-timeout-seconds` 放大 |
 | `registry-cache-ttl-ms` | 3000 | 注册表本地缓存 TTL：调度热路径免查库；写操作立即失效；0 = 关闭 |
 | `log-retention-days` | 30 | 执行日志保留天数：后台分批删除更早日志；0 = 关闭 |
 | `log-reap-interval-ms` | 60000 | 僵尸 RUNNING 日志回收频率（阈值 = max-timeout + 5 分钟宽限） |
 | `log-cleanup-interval-ms` | 3600000 | 日志保留期清理频率 |
-| `dispatch-threads` | 64 | 定时派发线程数。派发是纯 I/O 等待，可远大于 `org.quartz.threadPool.threadCount`，两者独立 |
-| `dispatch-queue-capacity` | 256 | 派发排队上限：满则新触发快速失败并写一条 FAILED 日志（`scheduler saturated`）；`0` = 不排队 |
-| `dispatch-serial-per-job` | true | 同名任务串行：上一轮未结束时本次到点跳过（只计数，见 `/overview` 的 `dispatchSkipped`） |
+| `dispatch-threads` | 64 | 定时触发线程数。线程只在一次触发往返期间被占用，可远大于 `org.quartz.threadPool.threadCount`，两者独立 |
+| `dispatch-queue-capacity` | 256 | 触发排队上限：满则新触发快速失败并写一条 FAILED 日志（`scheduler saturated`）；`0` = 不排队 |
+| `dispatch-serial-per-job` | true | 同名任务串行：上一轮**执行结果未回传**时本次到点跳过（只计数，见 `/overview` 的 `dispatchSkipped`） |
 
 > **注册表缓存说明**：TTL（默认 3s）远小于心跳超时（90s），多副本间写传播延迟上界即
 > TTL；本进程写操作（注册/摘除/剔除）立即失效缓存；派发命中已下线节点由既有
@@ -333,10 +373,13 @@ spring:
 | `port` | 0（自动感知） | 默认自动继承 `server.port`，无需配置；仅端口映射需覆盖时指定 |
 | `node-id` | 空 | 节点唯一标识；空则取 `POD_NAME`/主机名 |
 | `heartbeat-interval-ms` | 20000 | 心跳间隔（保底不低于 5000） |
-| `worker-threads` | 8 | 任务工作线程数：单节点并发上限 + 超时强制中断；0 = 内联模式（在请求线程内执行） |
+| `worker-threads` | 8 | 任务工作线程数：单节点并发上限 + 超时强制中断。下限为 1（误配 0/负数按 1 处理） |
 | `queue-capacity` | 256 | 任务排队队列容量：满则新触发快速失败（executor saturated）；`0` = 不排队（超出 `worker-threads` 直接快速失败） |
 | `max-job-wait-seconds` | 86400 | 请求未带 `timeoutSeconds` 时的兜底等待秒数（实际等待有 1 秒下限，误配 0/负数不会让任务瞬间「超时」） |
 | `access-token` | 空 | 令牌（双向常量时间比对） |
+| `callback-retry-times` | 3 | 结果回传失败的重试次数（不含首次）。回传失败会让日志停在 RUNNING 直到被回收 |
+| `callback-retry-interval-ms` | 2000 | 回传重试的退避间隔 |
+| `callback-queue-capacity` | 1000 | 待回传队列容量：满则丢弃最旧一条并打 ERROR |
 
 ---
 
@@ -348,7 +391,10 @@ spring:
 | 执行器 | xxl-job-core | orbit-executor |
 | 任务注解 | `@XxlJob` | `@OrbitJob` |
 | 注册 | 心跳写入 `xxl_job_registry`（MySQL） | 心跳写入 `orbit_executor_registry`（共享库，无状态 Deployment） |
-| 触发 | HTTP | HTTP `/orbit/executor/run` |
+| 触发 | HTTP，`ExecutorBizClient` 硬编码 3 秒超时 | HTTP `/orbit/executor/run`，超时 `trigger-timeout-seconds`（默认 10 秒） |
+| 结果回传 | 执行器 `TriggerCallbackThread` 批量回调 | 执行器 `CallbackClient`：有界队列 + 退避重试 + 满则丢最旧 |
+| 阻塞策略 | 执行器侧 `SERIAL_EXECUTION` / `DISCARD_LATER` / `COVER_EARLY`，每 job 一条 `JobThread` + 无界队列 | 调度中心侧 `dispatch-serial-per-job` 串行；执行器侧共享有界线程池 + 有界队列（满则同步快速失败） |
+| 触发线程池 | fast/slow 双池，1 分钟内慢触发 >10 次改投慢池 | 单一有界触发池 + `/overview` 水位指标 |
 | 路由 | 轮询/随机/故障转移… | ROUND / RANDOM / FIRST（非法值创建/更新时拒绝） |
 | 超时 | — | 双端对齐：admin 读超时 + 执行器强制中断（消除僵尸任务） |
 | 存储 | MySQL | H2（默认）/ PostgreSQL / GaussDB |
@@ -364,9 +410,10 @@ spring:
 
 | # | 限制 | 影响与缓解 |
 |---|------|-----------|
-| 1 | **派发线程数是每副本的硬预算**：定时触发经 `DispatchExecutor` 异步派发，Quartz 工作线程微秒级返回，但阻塞转移到了 `dispatch-threads`（默认 64）个专职线程上 | 同时运行的任务数超过 `dispatch-threads` 会开始排队，再超过 `dispatch-queue-capacity` 则快速失败并写 FAILED 日志。按「预期并发长任务数 × 2」调 `dispatch-threads`；`/overview` 的 `dispatchActive` / `dispatchQueueSize` / `dispatchRejected` 可直接观测 |
-| 2 | **手动触发同样阻塞调用方**：`POST /jobs/{name}/trigger` 会占住一个 Tomcat 线程直到任务结束 | 长任务请走 Cron，不要用手动触发接口做压测 |
+| 1 | **触发线程数仍是每副本的预算**：Quartz 工作线程微秒级返回，但每次触发仍要占用一条 `dispatch-threads` 线程，最长 `trigger-timeout-seconds` | 与任务耗时无关，默认 64 条 × 10 秒足以支撑很高的触发频率。真要打满说明执行器普遍响应慢，`/overview` 的 `dispatchActive` / `dispatchQueueSize` / `dispatchRejected` 可直接观测 |
+| 2 | **手动触发不再返回执行结果**：`POST /jobs/{name}/trigger` 只返回受理回执 | 需要结果请轮询 `/orbit/admin/logs?jobName=...`，或对接 `/callback` 之后的日志 |
+| 2b | **回传丢失会把成功的任务记成失败**：执行器跑完但回传重试耗尽（或执行器在完成与回传之间崩溃）时，日志会被孤儿回收判为 FAILED | 业务侧要保证幂等；`callback-retry-times` 调大、并保证执行器能访问 `admin-addresses` 中的至少一个地址 |
 | 3 | **注册地址校验不解析 DNS**（见 `ExecutorAddressValidator` 类注释） | 攻击者仍可能用一个解析到 `169.254.169.254` 的域名绕过保留地址拦截。需要彻底封堵 SSRF 请配置 `orbit.admin.executor-address-allow-pattern` 白名单 |
 | 4 | **执行器 SDK 面向 Spring Boot 2.7 + Servlet**：自动装配走 `META-INF/spring.factories`（Spring Boot 3 已不再读取该文件），`/orbit/executor/run` 也只在 Servlet Web 环境装配 | Spring Boot 3（`jakarta.*`）与 WebFlux 应用暂不能直接接入 |
-| 5 | **同名任务串行守卫是进程内的**：`dispatch-serial-per-job` 只保证单副本内不重叠 | 多副本部署时两个副本可能同时跑同一个任务。跨副本不重叠依赖 Quartz 集群行锁（同一 trigger 只被一个副本触发），但它不保证「上一轮已结束」。任务不幂等时请自行加分布式锁 |
+| 5 | **同名任务串行守卫是进程内的**：`dispatch-serial-per-job` 的在途登记簿只在本副本内存里，且调度中心重启即清空 | 多副本部署时两个副本可能同时跑同一个任务；调度中心重启后、旧一轮结果回传前也可能重叠。跨副本不重叠依赖 Quartz 集群行锁（同一 trigger 只被一个副本触发），但它不保证「上一轮已结束」。任务不幂等时请自行加分布式锁 |
 | 6 | **默认单副本内存 JobStore** | 多副本必须启用 cluster profile + 真实数据库，否则同一个 Cron 会被每个副本各触发一次（见第 5 节） |
