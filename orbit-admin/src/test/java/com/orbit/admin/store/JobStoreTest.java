@@ -190,14 +190,37 @@ class JobStoreTest {
         insertRunningLog("log-old", new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L));
         insertRunningLog("log-new", new java.util.Date());
 
-        int reaped = jobStore.reapOrphanedRunning(3600 * 1000L, "orphaned running log");
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(3600 * 1000L, "orphaned running log");
 
-        assertEquals(1, reaped);
+        // 返回被回收的 logId：调用方要据此释放这些任务的串行守卫
+        assertEquals(1, reaped.size());
+        assertEquals("log-old", reaped.get(0));
         JobLog old = findByLogId("log-old");
         JobLog fresh = findByLogId("log-new");
         assertEquals("FAILED", old.getStatus());
         assertEquals("RUNNING", fresh.getStatus());
         assertNotNull(old.getEndTime());
+    }
+
+    @Test
+    void finishLogFromRunningOnlyConvergesRunningLogs() {
+        insertRunningLog("log-cb", new java.util.Date());
+
+        // 首次回传：RUNNING -> SUCCESS
+        assertTrue(jobStore.finishLogFromRunning("log-cb", true, "http://10.0.0.1:8081", 123L, "done"));
+        assertEquals("SUCCESS", findByLogId("log-cb").getStatus());
+        assertEquals(123L, findByLogId("log-cb").getCostMs());
+
+        // 重复回传（执行器重试）：已经不是 RUNNING，必须被忽略，不能覆盖真实结果
+        assertEquals(false, jobStore.finishLogFromRunning("log-cb", false, "http://10.0.0.2:8081", 999L, "late fail"));
+        JobLog after = findByLogId("log-cb");
+        assertEquals("SUCCESS", after.getStatus());
+        assertEquals(123L, after.getCostMs());
+    }
+
+    @Test
+    void finishLogFromRunningIgnoresUnknownLogId() {
+        assertEquals(false, jobStore.finishLogFromRunning("log-absent", true, "n", 1L, "x"));
     }
 
     @Test

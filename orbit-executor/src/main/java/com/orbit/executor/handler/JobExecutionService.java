@@ -159,8 +159,11 @@ public class JobExecutionService implements DisposableBean {
         ScheduledFuture<?> deadline = watchdog.schedule(new Runnable() {
             @Override
             public void run() {
-                timedOut.set(true);
-                task.cancel(true);
+                // cancel 仅在任务仍处于 NEW 状态时返回 true；返回 false 说明任务
+                // 刚好在到期前跑完，此时应保留真实结果，不能改判为超时。
+                if (task.cancel(true)) {
+                    timedOut.set(true);
+                }
             }
         }, waitMs, TimeUnit.MILLISECONDS);
 
