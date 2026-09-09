@@ -64,6 +64,24 @@ class DispatchExecutorTest {
         return p;
     }
 
+    /**
+     * 轮询等待条件成立。
+     *
+     * 守卫的 bind / release 在 {@code dispatch()} 返回之后才执行，而测试桩的 countDown()
+     * 在 {@code dispatch()} 内部就已触发，因此在 countDown 之后立刻断言守卫状态会与之竞态。
+     */
+    private static void awaitUntil(String what, java.util.function.BooleanSupplier condition)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5000L;
+        while (System.currentTimeMillis() < deadline) {
+            if (condition.getAsBoolean()) {
+                return;
+            }
+            Thread.sleep(10L);
+        }
+        throw new AssertionError("condition not met within 5s: " + what);
+    }
+
     private static JobInfo job(String name) {
         JobInfo j = new JobInfo();
         j.setId(1L);
@@ -133,8 +151,9 @@ class DispatchExecutorTest {
         assertTrue(first.await(5, TimeUnit.SECONDS));
         assertEquals(1, outstanding.outstanding());
 
-        // 执行器回传 -> 释放守卫 -> 下一次到点可以正常触发
-        assertTrue(outstanding.release("log-c1"));
+        // 执行器回传 -> 释放守卫 -> 下一次到点可以正常触发。
+        // 轮询等待：bind 在 dispatch 返回后才发生，此刻 logId 可能还没登记。
+        awaitUntil("callback released the guard", () -> outstanding.release("log-c1"));
         assertEquals(0, outstanding.outstanding());
 
         final CountDownLatch second = new CountDownLatch(1);
@@ -161,7 +180,8 @@ class DispatchExecutorTest {
 
         assertTrue(done.await(5, TimeUnit.SECONDS));
         // 触发同步失败不会有回传，守卫必须已经释放，否则任务永久锁死
-        assertEquals(0, outstanding.outstanding());
+        awaitUntil("guard released after synchronous trigger failure",
+                () -> outstanding.outstanding() == 0);
         assertEquals(0L, outstanding.skipped());
     }
 
@@ -179,7 +199,7 @@ class DispatchExecutorTest {
 
         assertTrue(done.await(5, TimeUnit.SECONDS));
         // insertLog 抛异常会逃出 dispatch 的 try：不兜住既会杀死工作线程，也会永久泄漏守卫
-        assertEquals(0, outstanding.outstanding());
+        awaitUntil("guard released after dispatch threw", () -> outstanding.outstanding() == 0);
     }
 
     @Test
