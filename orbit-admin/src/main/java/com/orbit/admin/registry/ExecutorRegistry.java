@@ -27,15 +27,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 调度中心执行器在线注册表（共享库，对齐 XXL-JOB {@code xxl_job_registry}）。
- * <p>
+ *
  * 心跳 upsert 写入 {@code orbit_executor_registry}，任意 admin 副本读到同一份在线节点。
  * 因此调度中心可用无状态 Deployment + 普通 Service：执行器只需把心跳打到
  * {@code http://orbit-admin:8080}，不必 StatefulSet / Headless DNS 逐副本上报。
  * 轮询游标仍为本进程内存（负载略偏也可接受，各副本独立 ROUND）。
- * <p>
- * 性能设计：读路径（调度派发 / API 查询 / 在线计数）经<b>短 TTL 本地缓存</b>提供，
+ *
+ * 性能设计：读路径（调度派发 / API 查询 / 在线计数）经短 TTL 本地缓存提供，
  * 由 {@code orbit.admin.registry-cache-ttl-ms} 控制（默认 3 秒，0 = 关闭）。
- * 写操作（注册 / 摘除 / 超时剔除）在变更数据库的同时<b>立即失效本进程缓存</b>；
+ * 写操作（注册 / 摘除 / 超时剔除）在变更数据库的同时立即失效本进程缓存；
  * 多副本间的一致性由 TTL 上界保证，命中已下线节点的派发由 failover 兜底。
  */
 @Component
@@ -200,7 +200,7 @@ public class ExecutorRegistry {
     }
 
     /**
-     * 便捷路由入口：自行查询候选列表并按策略选点（保留旧 API）。
+     * 便捷路由入口：自行查询候选列表并按策略选点。
      * 热路径（任务派发）请改用 {@link #route(List, String, String)} 复用已查出的候选列表，
      * 避免一次派发查两遍库。
      */
@@ -209,7 +209,7 @@ public class ExecutorRegistry {
     }
 
     /**
-     * 在<b>已查出的候选列表</b>上按路由策略选点。
+     * 在已查出的候选列表上按路由策略选点。
      * 新增该方法使 {@code dispatch} 能以一次数据库（或缓存）查询完成「取候选 + 选起点」。
      *
      * @param candidates 候选节点列表（非空时生效）
@@ -318,7 +318,7 @@ public class ExecutorRegistry {
     /**
      * 序列化 handler 列表为 JSON，并确保不超过 {@code handlers} 列宽（2000）。
      * 超出时自尾部收缩列表直至可完整入库——否则海量 handler 的执行器心跳会因
-     * DataIntegrityViolationException 而<b>永久注册失败</b>（每轮心跳都撞列宽）。
+     * DataIntegrityViolationException 而永久注册失败（每轮心跳都撞列宽）。
      */
     private String toHandlersJson(List<String> handlers) {
         List<String> src = handlers == null ? Collections.<String>emptyList() : handlers;

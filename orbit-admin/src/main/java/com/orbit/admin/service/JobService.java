@@ -47,11 +47,11 @@ import java.util.UUID;
 /**
  * 调度中心核心业务服务。
  * 核心职责：
- * 
+ *
  *   - 任务元数据生命周期管理（CRUD、校验、状态控制）；
  *   - Quartz 定时任务的动态编排、启动加载、Cron 动态刷新、暂停与恢复；
  *   - 任务统一派发（分发）：生成日志追踪链路 ID、按路由策略寻址、向执行器派发 HTTP 触发请求、记录执行日志与耗时。
- * 
+ *
  */
 @Service
 public class JobService {
@@ -235,11 +235,11 @@ public class JobService {
 
     /**
      * 回滚一次失败的更新：把数据库行与 Quartz 计划一起恢复到更新前的状态。
-     * <p>
+     *
      * 版本号处理：第一次 {@code saveJob} 已经把库里的 version 从 N 抬到 N+1，
      * 而快照里仍是 N，直接回写会被乐观锁判定为并发冲突（影响 0 行 → 抛异常）。
      * 因此回滚前先把快照版本号对齐到库里当前的值。
-     * <p>
+     *
      * 回滚自身失败只记录不外抛，避免覆盖掉原始的调度失败原因。
      *
      * @param snapshot 更新前的任务定义
@@ -352,14 +352,39 @@ public class JobService {
     }
 
     /**
+     * 记录一次「未能派发」的触发。
+     * 调度侧派发通道饱和时由 {@link com.orbit.admin.dispatch.DispatchExecutor} 调用：
+     * 直接落一条 FAILED 终态日志，让 /logs 里每次 Cron 到点都有记录，
+     * 否则「派发被拒绝」与「任务根本没被触发」在观测上无法区分。
+     *
+     * @param job    任务定义
+     * @param reason 未派发的原因
+     */
+    public void recordRejectedDispatch(JobInfo job, String reason) {
+        Date now = new Date();
+        JobLog rejected = new JobLog();
+        rejected.setLogId(UUID.randomUUID().toString().replace("-", ""));
+        rejected.setJobId(job.getId());
+        rejected.setJobName(job.getJobName());
+        rejected.setAppName(job.getAppName());
+        rejected.setHandler(job.getHandler());
+        rejected.setStatus(JobLogStatus.FAILED);
+        rejected.setMessage(reason);
+        rejected.setCostMs(0);
+        rejected.setStartTime(now);
+        rejected.setEndTime(now);
+        jobStore.insertLog(rejected);
+    }
+
+    /**
      * 调度中心统一派发执行逻辑（无论是 Quartz 定时触发还是手动触发，均走本方法）。
-     * 
+     *
      *   - 生成全链路唯一追踪日志 ID，初始化 RUNNING 状态日志入库；
      *   - 从注册表中根据任务路由策略选取一个在线执行器节点；
      *   - 若无可用节点，更新日志为 FAILED 并终止；
      *   - 合并静态参数与动态参数，通过 HTTP 调用执行器端 /run 接口；
      *   - 计算本次调用耗时，根据执行结果更新日志状态为 SUCCESS 或 FAILED。
-     * 
+     *
      * @param job         任务元数据
      * @param extraParams 单次触发传入的覆盖参数（可为空）
      * @return 任务执行结果

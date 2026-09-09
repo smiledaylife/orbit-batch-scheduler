@@ -23,24 +23,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 任务执行服务：把「接收触发」与「执行业务方法」解耦，并提供三项生产级保障。
- * <p>
+ *
  * 核心能力（当 {@code orbit.executor.worker-threads > 0}，默认 8）：
- * <ol>
- *   <li><b>有界并发</b>：任务在专职线程池（orbit-job-worker-N）执行，单节点同时运行的任务数
+ *   1. 有界并发：任务在专职线程池（orbit-job-worker-N）执行，单节点同时运行的任务数
  *       被限制为 worker-threads；超出部分进入有界队列排队，队列满则快速失败
  *       （executor saturated），保护业务应用不被触发风暴打爆。
- *       {@code queue-capacity} 设为 0 表示「不排队」：超过 worker-threads 的触发直接快速失败；</li>
- *   <li><b>超时强制</b>：按任务 {@code timeoutSeconds} 到期后 {@code future.cancel(true)}
- *       中断任务线程，使调度中心 HTTP 读超时放弃后，执行器上的任务不会继续<b>僵尸运行</b>、
+ *       {@code queue-capacity} 设为 0 表示「不排队」：超过 worker-threads 的触发直接快速失败；
+ *   2. 超时强制：按任务 {@code timeoutSeconds} 到期后 {@code future.cancel(true)}
+ *       中断任务线程，使调度中心 HTTP 读超时放弃后，执行器上的任务不会继续僵尸运行、
  *       白占线程与资源。注意中断是尽力而为（best-effort）：
- *       响应 {@code InterruptedException} 的业务代码会被立即中止，CPU 密集死循环无法被打断；</li>
- *   <li><b>优雅停机</b>：应用关闭时先拒绝新任务、等待在跑任务收尾（最长 10 秒），超时再中断，
- *       避免硬杀导致业务半途而废。</li>
- * </ol>
- * <p>
- * 超时计时口径与调度中心一致：从<b>触发请求到达本节点</b>起算（含排队等待时间），
+ *       响应 {@code InterruptedException} 的业务代码会被立即中止，CPU 密集死循环无法被打断；
+ *   3. 优雅停机：应用关闭时先拒绝新任务、等待在跑任务收尾（最长 10 秒），超时再中断，
+ *       避免硬杀导致业务半途而废。
+ *
+ * 超时计时口径与调度中心一致：从触发请求到达本节点起算（含排队等待时间），
  * 与调度中心 HTTP 读超时同时开始，两边判定天然对齐。
- * <p>
+ *
  * 设为 {@code worker-threads: 0} 切换为内联模式（在 Web 请求线程内执行，无超时强制）。
  * 两种模式的 HTTP/JSON 协议一致：成功/失败都以同步 {@link TriggerResult} 返回。
  */
@@ -173,7 +171,7 @@ public class JobExecutionService implements DisposableBean {
 
     /**
      * 计算本次执行的等待上限（毫秒）：timeoutSeconds&gt;0 用之；否则用兜底最大值。
-     * <p>
+     *
      * 结果保证不小于 {@link #MIN_WAIT_MS}：{@code orbit.executor.max-job-wait-seconds}
      * 被误配成 0 或负数时 {@code future.get(<=0)} 会立即抛 TimeoutException ——
      * 表现为「所有任务都在 0ms 超时失败」，和「任务真的跑不完」几乎无法区分。

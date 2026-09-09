@@ -17,12 +17,12 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 调度中心向执行器派发任务的 HTTP 通信客户端。
  * 核心职责：
- * 
+ *
  *   - 负责调用执行器暴露的 {@code POST /orbit/executor/run} 接口；
  *   - 动态适配不同任务指定的读取超时时间（ReadTimeout）；
  *   - 携带鉴权安全令牌（{@code X-Orbit-Token}）；
  *   - 捕获网络连通性异常、超时异常，并优雅封装为失败的 {@link TriggerResult}。
- * 
+ *
  */
 @Component
 public class ExecutorClient {
@@ -99,7 +99,7 @@ public class ExecutorClient {
 
     /**
      * 解析本次调用的 readTimeout（毫秒）。
-     * <p>
+     *
      * 两点实现约束：
      *   - 乘法必须用 {@code long}：int 运算在 timeoutSeconds 超过 2147483 时会溢出为负数，
      *       而负的 readTimeout 在 {@code HttpURLConnection} 中等同于「无限等待」；
@@ -126,7 +126,7 @@ public class ExecutorClient {
 
     /**
      * 取得（或创建）指定 readTimeout 对应的 RestTemplate。
-     * 使用 computeIfAbsent 原子复用：并发首次派发同一超时档位时不再重复构建。
+     * 使用 computeIfAbsent 原子复用，并发首次派发同一超时档位时也只构建一次。
      *
      * @param readTimeoutMs 读取超时毫秒数
      * @return 可复用的 RestTemplate

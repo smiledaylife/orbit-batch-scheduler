@@ -28,14 +28,14 @@ import java.util.Optional;
  * 任务与日志持久化存储层（MyBatis-Plus 实现）。
  * 技术栈：Druid 连接池 + MyBatis-Plus（{@link com.baomidou.mybatisplus.core.mapper.BaseMapper}）。
  * 设计说明：
- * 
+ *
  *   - 对外暴露/返回的是 {@code orbit-core} 的协议模型（{@link JobInfo}/{@link JobLog}），
  *       持久层内部使用 {@code po} 包下的实体（{@link OrbitJobPO}/{@link OrbitJobLogPO}），
  *       二者在此处相互转换，保证共享协议模块不依赖任何 ORM 框架；
  *   - {@code orbit_job} 通过 {@code @Version} + 乐观锁插件实现并发更新控制；
  *   - {@code params} 以 JSON 字符串落库；日志 {@code message} 超长截断；
  *   - 分页依赖 {@link com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor}。
- * 
+ *
  */
 @Repository
 public class JobStore {
@@ -255,7 +255,7 @@ public class JobStore {
 
     /**
      * 回收僵尸 RUNNING 日志：将早于 cutoff 的 RUNNING 记录收敛为 FAILED 终态。
-     * <p>
+     *
      * 场景：调度中心在派发中途崩溃/重启，插入的 RUNNING 日志无人收敛，
      * 会永久悬挂并误导 /logs 页面观测、让分页统计失真。后台任务周期调用本方法完成兑底。
      *
@@ -280,7 +280,7 @@ public class JobStore {
 
     /**
      * 删除早于 cutoff 的历史日志（分批删除，避免大事务长锁）。
-     * <p>
+     *
      * 实现说明：不用 {@code DELETE ... LIMIT}——PostgreSQL 不支持该语法（仅 H2/GaussDB 支持），
      * 故采用「先按 id 分页选出，再按主键批删」的通用写法，三种库全部兼容。
      *
@@ -403,9 +403,9 @@ public class JobStore {
 
     /**
      * 将 Map 序列化为 JSON 字符串。
-     * <p>
+     *
      * 序列化失败时快速失败：调用方（创建/更新接口）得到明确的 400 与原因。
-     * 这里不能吞掉异常返回 null —— 那等于把任务参数<b>静默清空</b>入库：
+     * 这里不能吞掉异常返回 null —— 那等于把任务参数静默清空入库：
      * 接口返回 200、任务照常调度，但执行器拿到的是空参数，属于最难排查的一类故障。
      */
     private String toJson(Map<String, Object> map) {

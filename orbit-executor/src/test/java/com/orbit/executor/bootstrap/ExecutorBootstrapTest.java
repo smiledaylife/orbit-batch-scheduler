@@ -16,7 +16,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * {@link ExecutorBootstrap} 注册地址与端口解析测试。
- * <p>
+ *
  * 用例一律按真实启动顺序驱动：{@code WebServerInitializedEvent} 先于 {@link ExecutorBootstrap#start()}。
  * Spring Boot 2.3+ 由 {@code WebServerStartStopLifecycle}（{@code SmartLifecycle}，
  * phase = {@code Integer.MAX_VALUE - 1}）启动容器并发布该事件，

@@ -40,15 +40,13 @@ import static org.mockito.Mockito.when;
 /**
  * {@link JobService} 派发与校验逻辑单元测试（Mock 依赖）。
  * 重点覆盖：
- * <ul>
- *   <li>dispatch 单次查询：一次派发只允许调用一次 registry.listByApp；</li>
- *   <li>failover：首选节点连接拒绝时立即摘除并切换下一个节点；</li>
- *   <li>routeStrategy 合法性校验与规范化；</li>
- *   <li>create 的唯一键竞态兜底（DataIntegrityViolationException → 友好 400 语义）；</li>
- *   <li>Quartz 编排失败时 create / update 的数据库回滚（不留幽灵任务、不留新旧不一致）；</li>
- *   <li>超出数据库列宽的字段在入参校验阶段被拒绝（400 而非无信息的 500）；</li>
- *   <li>timezone 非法值启动失败（fail-fast）。</li>
- * </ul>
+ *   - dispatch 单次查询：一次派发只允许调用一次 registry.listByApp；
+ *   - failover：首选节点连接拒绝时立即摘除并切换下一个节点；
+ *   - routeStrategy 合法性校验与规范化；
+ *   - create 的唯一键竞态兜底（DataIntegrityViolationException → 友好 400 语义）；
+ *   - Quartz 编排失败时 create / update 的数据库回滚（不留幽灵任务、不留新旧不一致）；
+ *   - 超出数据库列宽的字段在入参校验阶段被拒绝（400 而非无信息的 500）；
+ *   - timezone 非法值启动失败（fail-fast）。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)

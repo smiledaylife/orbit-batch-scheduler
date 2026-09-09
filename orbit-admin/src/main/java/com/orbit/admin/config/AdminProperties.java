@@ -64,28 +64,50 @@ public class AdminProperties {
 
     /**
      * 执行器注册表本地缓存 TTL（毫秒），默认 3000。
-     * <p>
+     *
      * 调度热路径（Quartz 每次触发、手动触发、API 查询）经本缓存提供，
      * 高频调度下注册表查询 QPS 比逐次直查数据库低 1~2 个数量级。
      * 缓存要点：
-     * <ul>
-     *   <li>TTL 远小于心跳超时阈值（默认 90s），陈旧度上界可控；
-     *       （XXL-JOB 调度中心为纯内存注册表 + 30 秒 DB 拉取，本实现 3 秒 TTL 远比其新鲜）；</li>
-     *   <li>本进程内的 register / remove / evict 写操作会立即失效缓存；</li>
-     *   <li>多副本部署时其他副本的写入经 TTL 自然传播，最大延迟即 TTL；</li>
-     *   <li>命中过期节点的派发由既有的 failover（不可达即摘除换节点）兜底。</li>
-     * </ul>
+     *   - TTL 远小于心跳超时阈值（默认 90s），陈旧度上界可控；
+     *       （XXL-JOB 调度中心为纯内存注册表 + 30 秒 DB 拉取，本实现 3 秒 TTL 远比其新鲜）；
+     *   - 本进程内的 register / remove / evict 写操作会立即失效缓存；
+     *   - 多副本部署时其他副本的写入经 TTL 自然传播，最大延迟即 TTL；
+     *   - 命中过期节点的派发由既有的 failover（不可达即摘除换节点）兜底。
      * 设为 0 表示关闭缓存，恢复每次直查数据库。
      */
     private long registryCacheTtlMs = 3000;
 
     /**
      * 调度执行日志保留天数，默认 30 天（0 表示关闭自动清理）。
-     * <p>
+     *
      * {@code orbit_job_log} 无限增长会拖垮查询与备份；后台任务周期性
      * 删除 start_time 早于保留期的日志（分批删除，避免大事务锁表）。
      */
     private int logRetentionDays = 30;
+
+    /**
+     * 定时派发线程池大小，默认 64。
+     * 派发线程绝大部分时间阻塞在对执行器的 HTTP 读上，属于纯 I/O 等待，
+     * 因此可以远大于 {@code org.quartz.threadPool.threadCount}，两者相互独立。
+     */
+    private int dispatchThreads = 64;
+
+    /**
+     * 定时派发排队队列容量，默认 256；0 表示不排队。
+     * 队列满时新触发快速失败，并写入一条 FAILED 调度日志（reason = scheduler saturated）。
+     */
+    private int dispatchQueueCapacity = 256;
+
+    /**
+     * 同一任务串行执行开关，默认 true。
+     * 开启时，上一轮派发尚未结束的任务在本次 Cron 到点会被跳过：只累加计数、不写日志，
+     * 避免高频 Cron 配慢 Handler 时刷爆日志表；计数经 /orbit/admin/overview 的
+     * dispatchSkipped 暴露。
+     *
+     * 该守卫是进程内的，只保证单副本内不重叠；
+     * 跨副本不重叠依赖 Quartz 集群的行锁（同一 trigger 只被一个副本触发）。
+     */
+    private boolean dispatchSerialPerJob = true;
 
     public String getAccessToken() {
         return accessToken;
@@ -165,5 +187,29 @@ public class AdminProperties {
 
     public void setLogRetentionDays(int logRetentionDays) {
         this.logRetentionDays = logRetentionDays;
+    }
+
+    public int getDispatchThreads() {
+        return dispatchThreads;
+    }
+
+    public void setDispatchThreads(int dispatchThreads) {
+        this.dispatchThreads = dispatchThreads;
+    }
+
+    public int getDispatchQueueCapacity() {
+        return dispatchQueueCapacity;
+    }
+
+    public void setDispatchQueueCapacity(int dispatchQueueCapacity) {
+        this.dispatchQueueCapacity = dispatchQueueCapacity;
+    }
+
+    public boolean isDispatchSerialPerJob() {
+        return dispatchSerialPerJob;
+    }
+
+    public void setDispatchSerialPerJob(boolean dispatchSerialPerJob) {
+        this.dispatchSerialPerJob = dispatchSerialPerJob;
     }
 }

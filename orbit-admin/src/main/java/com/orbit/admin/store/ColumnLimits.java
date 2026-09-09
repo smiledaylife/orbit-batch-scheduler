@@ -3,11 +3,11 @@ package com.orbit.admin.store;
 /**
  * 数据库列宽上限的唯一事实来源，取值与 {@code src/main/resources/schema.sql}
  * 以及 {@code deploy/sql/schema-*.sql} 的 VARCHAR 定义一一对应。
- * <p>
+ *
  * 所有写入路径（{@code JobStore}、{@code JobService}、{@code ExecutorRegistry}）统一引用本类，
- * 同一个宽度不再散落在多处；调整列宽时只需同步修改本类与建表脚本。
- * <p>
- * 这些上限都在<b>入库之前</b>校验：超长值若等到 INSERT/UPDATE 才失败，
+ * 调整列宽时只需同步修改本类与建表脚本。
+ *
+ * 这些上限都在入库之前校验：超长值若等到 INSERT/UPDATE 才失败，
  * 会被全局异常处理器压成一句没有信息的 {@code internal error}，调用方看不出是哪个入参的问题。
  */
 public final class ColumnLimits {

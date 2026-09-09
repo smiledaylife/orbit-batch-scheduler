@@ -56,11 +56,11 @@ public class JobInfo implements Serializable {
 
     /**
      * 多实例路由策略，支持：
-     * 
+     *
      *   - ROUND: 轮询（默认）
      *   - RANDOM: 随机
      *   - FIRST: 首个节点
-     * 
+     *
      */
     private String routeStrategy = "ROUND";
 

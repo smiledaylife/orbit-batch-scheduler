@@ -85,6 +85,14 @@ orbit:
     registry-cache-ttl-ms: 3000
     # 调度执行日志保留天数：后台任务分批删除更早日志，防止日志表无限增长。0 = 关闭清理。
     log-retention-days: 30
+    # ---- 定时派发通道（Cron 到点后异步派发，不占用 Quartz 工作线程）----
+    # 派发线程数：派发是纯 I/O 等待，可远大于 org.quartz.threadPool.threadCount，两者独立
+    dispatch-threads: 64
+    # 排队上限：满则新触发快速失败并写一条 FAILED 日志（scheduler saturated）；0 = 不排队
+    dispatch-queue-capacity: 256
+    # 同名任务串行：上一轮未结束时本次到点跳过（只计数，见 /overview 的 dispatchSkipped）。
+    # 该守卫是进程内的，跨副本不重叠依赖 Quartz 集群行锁。
+    dispatch-serial-per-job: true
     # 僵尸 RUNNING 日志回收/日志清理的后台任务频率（毫秒），一般无需调整
     log-reap-interval-ms: 60000
     log-cleanup-interval-ms: 3600000

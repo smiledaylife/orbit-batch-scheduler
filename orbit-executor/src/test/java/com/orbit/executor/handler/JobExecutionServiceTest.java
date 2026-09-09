@@ -165,7 +165,7 @@ class JobExecutionServiceTest {
     }
 
     /**
-     * queue-capacity=0 的语义验证：唯一工作线程被占满后，新触发必须<b>立即</b>被拒绝，
+     * queue-capacity=0 的语义验证：唯一工作线程被占满后，新触发必须立即被拒绝，
      * 而不是排队等待 —— 这正是「不排队」配置想要的快速失败行为。
      */
     @Test

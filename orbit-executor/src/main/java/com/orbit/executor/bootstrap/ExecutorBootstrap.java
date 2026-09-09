@@ -21,12 +21,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * 执行器生命周期管理与心跳自注册启动器。
  * 核心职责：
- * 
+ *
  *   - 在 Spring 容器启动完成并且内嵌 Web 容器就绪后，解析当前执行器的可访问地址与节点标识；
  *   - 向调度中心发送首次上线注册请求，并开启定时线程池周期性上报心跳维持在线状态；
  *   - 在 Spring 容器关闭（优雅停机）时，注销心跳定时任务并向调度中心主动发起下线通知；
  *   - 自动感知应用的实际监听端口（{@code server.port}），无需用户显式配置 {@code orbit.executor.port}。
- * 
+ *
  */
 public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, ApplicationListener<WebServerInitializedEvent> {
 
@@ -214,12 +214,12 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
     /**
      * 解析执行器对外暴露的访问基地址（Base URL）
      * 解析优先级规则：
-     * 
+     *
      *   - 显式配置：若显式配置了 {@code orbit.executor.address}（如 K8s Service 域名），直接使用该地址；
      *   - 云原生环境：若环境变量中存在 {@code POD_IP}，拼接为 {@code http://${POD_IP}:${port}}；
      *   - 本地网卡探测：通过 {@link InetAddress#getLocalHost()} 获取本机有效 IP 并拼接端口；
      *   - 兜底方案：使用 {@code http://127.0.0.1:${port}}。
-     * 
+     *
      * @return 执行器对外访问基地址
      */
     private String resolveAddress() {
@@ -256,20 +256,20 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
      * 解析执行器自身通信端口。
      * 默认直接继承业务应用的 {@code server.port}，无需显式配置。
      * 解析优先级规则：
-     * 
+     *
      *   - 显式配置覆盖：若配置了 {@code orbit.executor.port} 且大于 0，优先采用该端口（适用于 Docker 宿主机端口映射场景）；
      *   - Web 容器运行期端口：取 {@link WebServerInitializedEvent} 上报的容器实际监听端口，
      *       {@code server.port=0}（随机端口）场景依赖这一条；
      *   - Spring 环境配置：从 Spring Environment 中读取 {@code server.port} 配置项；
      *   - 默认兜底：若均无法获取，则兜底采用 8080（Spring Boot 官方默认 Web 端口）。
-     * <p>
+     *
      * 第 2 条之所以在 {@link #start()} 阶段就已可用：Spring Boot 2.3+ 由
      * {@code WebServerStartStopLifecycle}（{@code SmartLifecycle}，phase = {@code Integer.MAX_VALUE - 1}）
      * 启动容器并发布 {@link WebServerInitializedEvent}，而本类 phase 为 {@code Integer.MAX_VALUE}，
      * 在同一轮 {@code DefaultLifecycleProcessor.onRefresh()} 中排在它之后启动。
-     * <b>若把本类的 phase 调到 {@code Integer.MAX_VALUE - 1} 或更小，这个先后关系就会反转</b>，
+     * 若把本类的 phase 调到 {@code Integer.MAX_VALUE - 1} 或更小，这个先后关系就会反转，
      * 随机端口场景将退回 8080 兜底。
-     * 
+     *
      * @return 执行器通信端口
      */
     private int resolvePort() {
@@ -298,12 +298,12 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
     /**
      * 解析执行器节点唯一标识符（Node ID）
      * 解析优先级规则：
-     * 
+     *
      *   - 显式配置：若配置了 {@code orbit.executor.node-id}，直接使用；
      *   - 云原生环境：读取环境变量 {@code POD_NAME}；
      *   - 本地主机名：通过 {@link InetAddress#getLocalHost()} 获取 HostName；
      *   - 兜底方案：生成带时间戳的临时标识 {@code executor-${timestamp}}。
-     * 
+     *
      * @return 节点唯一标识
      */
     private String resolveNodeId() {

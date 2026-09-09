@@ -165,7 +165,7 @@ public class OrderJobs {
 | POST | `/orbit/admin/jobs/{name}/trigger` | 立即执行（body 可传本次临时参数 JSON） |
 | GET | `/orbit/admin/logs` | 执行日志分页（`jobName`/`page`/`size`） |
 | GET | `/orbit/admin/executors` | 在线执行器（`appName` 可选过滤） |
-| GET | `/orbit/admin/overview` | 总览 |
+| GET | `/orbit/admin/overview` | 总览（含派发通道指标：`dispatchActive` / `dispatchQueueSize` / `dispatchRejected` / `dispatchSkipped`） |
 | POST | `/orbit/executor/run` | 执行器：接收调度触发（调度中心调用） |
 | GET | `/orbit/executor/handlers` | 执行器：查询本节点注册的 Handler 列表 |
 
@@ -313,6 +313,9 @@ spring:
 | `log-retention-days` | 30 | 执行日志保留天数：后台分批删除更早日志；0 = 关闭 |
 | `log-reap-interval-ms` | 60000 | 僵尸 RUNNING 日志回收频率（阈值 = max-timeout + 5 分钟宽限） |
 | `log-cleanup-interval-ms` | 3600000 | 日志保留期清理频率 |
+| `dispatch-threads` | 64 | 定时派发线程数。派发是纯 I/O 等待，可远大于 `org.quartz.threadPool.threadCount`，两者独立 |
+| `dispatch-queue-capacity` | 256 | 派发排队上限：满则新触发快速失败并写一条 FAILED 日志（`scheduler saturated`）；`0` = 不排队 |
+| `dispatch-serial-per-job` | true | 同名任务串行：上一轮未结束时本次到点跳过（只计数，见 `/overview` 的 `dispatchSkipped`） |
 
 > **注册表缓存说明**：TTL（默认 3s）远小于心跳超时（90s），多副本间写传播延迟上界即
 > TTL；本进程写操作（注册/摘除/剔除）立即失效缓存；派发命中已下线节点由既有
@@ -361,8 +364,9 @@ spring:
 
 | # | 限制 | 影响与缓解 |
 |---|------|-----------|
-| 1 | **派发是同步阻塞的**：定时触发时 Quartz 工作线程会一直被占住，直到执行器返回（最长 `max-timeout-seconds`） | `org.quartz.threadPool.threadCount`（默认 10）个长任务同时运行会拖住整个调度器，其它任务的 Cron 到点也发不出去。`@DisallowConcurrentExecution` 只防住「同一任务自我堆叠」，防不住跨任务占满线程池。长任务请把 `timeoutSeconds` 调小，或调大 `threadCount`。彻底解耦需要异步派发队列（XXL-JOB 的 ring buffer 做法），本项目刻意未做 |
+| 1 | **派发线程数是每副本的硬预算**：定时触发经 `DispatchExecutor` 异步派发，Quartz 工作线程微秒级返回，但阻塞转移到了 `dispatch-threads`（默认 64）个专职线程上 | 同时运行的任务数超过 `dispatch-threads` 会开始排队，再超过 `dispatch-queue-capacity` 则快速失败并写 FAILED 日志。按「预期并发长任务数 × 2」调 `dispatch-threads`；`/overview` 的 `dispatchActive` / `dispatchQueueSize` / `dispatchRejected` 可直接观测 |
 | 2 | **手动触发同样阻塞调用方**：`POST /jobs/{name}/trigger` 会占住一个 Tomcat 线程直到任务结束 | 长任务请走 Cron，不要用手动触发接口做压测 |
 | 3 | **注册地址校验不解析 DNS**（见 `ExecutorAddressValidator` 类注释） | 攻击者仍可能用一个解析到 `169.254.169.254` 的域名绕过保留地址拦截。需要彻底封堵 SSRF 请配置 `orbit.admin.executor-address-allow-pattern` 白名单 |
 | 4 | **执行器 SDK 面向 Spring Boot 2.7 + Servlet**：自动装配走 `META-INF/spring.factories`（Spring Boot 3 已不再读取该文件），`/orbit/executor/run` 也只在 Servlet Web 环境装配 | Spring Boot 3（`jakarta.*`）与 WebFlux 应用暂不能直接接入 |
-| 5 | **默认单副本内存 JobStore** | 多副本必须启用 cluster profile + 真实数据库，否则同一个 Cron 会被每个副本各触发一次（见第 5 节） |
+| 5 | **同名任务串行守卫是进程内的**：`dispatch-serial-per-job` 只保证单副本内不重叠 | 多副本部署时两个副本可能同时跑同一个任务。跨副本不重叠依赖 Quartz 集群行锁（同一 trigger 只被一个副本触发），但它不保证「上一轮已结束」。任务不幂等时请自行加分布式锁 |
+| 6 | **默认单副本内存 JobStore** | 多副本必须启用 cluster profile + 真实数据库，否则同一个 Cron 会被每个副本各触发一次（见第 5 节） |
