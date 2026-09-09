@@ -113,21 +113,22 @@ public class AdminApiController {
      * 因此这里是调度日志从 RUNNING 走向 SUCCESS/FAILED 的唯一正常路径
      * （另一条是孤儿回收，用于执行器崩溃或回传丢失的兜底）。
      *
+     * 执行器会把积压的结果打包成一个请求发送，因此请求体是一个结果数组；
+     * 单条被忽略不影响同批其余结果。
+     *
      * 幂等：存储层只允许 RUNNING -> 终态 的一次转换，所以执行器重试、重复回传
      * 以及与孤儿回收的竞态都不会覆盖已写入的真实结果。重复回传同样返回成功，
      * 避免执行器把「已处理过」误判为失败而无限重试。
      *
-     * 令牌只从 Header 取：请求体是执行结果本身，不承载凭证。
-     *
-     * @param result 执行器回传的最终结果（accepted=false）
-     * @param token  HTTP Header 中的安全令牌
-     * @return data=true 表示本次完成了状态转换；false 表示日志已不是 RUNNING，本次被忽略
+     * @param results 执行器回传的一批最终结果（accepted=false）
+     * @param token   HTTP Header 中的安全令牌
+     * @return data 为本批中真正完成状态转换的条数
      */
     @PostMapping("/callback")
-    public ApiResult<Boolean> callback(@RequestBody TriggerResult result,
+    public ApiResult<Integer> callback(@RequestBody List<TriggerResult> results,
                                        @RequestHeader(value = ExecutorClient.TOKEN_HEADER, required = false) String token) {
         checkToken(token, null);
-        return ApiResult.ok(jobService.handleCallback(result));
+        return ApiResult.ok(jobService.handleCallbacks(results));
     }
 
     // ==========================================

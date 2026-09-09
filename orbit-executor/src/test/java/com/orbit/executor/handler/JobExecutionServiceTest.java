@@ -3,6 +3,7 @@ package com.orbit.executor.handler;
 import com.orbit.core.model.TriggerRequest;
 import com.orbit.core.model.TriggerResult;
 import com.orbit.executor.annotation.OrbitJob;
+import com.orbit.executor.client.AdminClient;
 import com.orbit.executor.client.CallbackClient;
 import com.orbit.executor.config.ExecutorProperties;
 import org.junit.jupiter.api.AfterEach;
@@ -42,7 +43,7 @@ class JobExecutionServiceTest {
         final List<TriggerResult> results = new CopyOnWriteArrayList<TriggerResult>();
 
         CapturingCallback(ExecutorProperties properties) {
-            super(properties);
+            super(properties, new AdminClient(properties));
         }
 
         @Override

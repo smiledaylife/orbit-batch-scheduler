@@ -64,15 +64,17 @@ public class OrbitExecutorAutoConfiguration {
     }
 
     /**
-     * 注册执行结果回传客户端 Bean（有界队列 + 专职发送线程 + 退避重试）
+     * 注册执行结果回传客户端 Bean（有界队列 + 批量发送 + 退避重试）。
+     * 复用 AdminClient 作为访问调度中心的唯一 HTTP 出口。
      *
-     * @param properties 执行器配置属性
+     * @param properties  执行器配置属性
+     * @param adminClient 调度中心 HTTP 客户端
      * @return CallbackClient 实例
      */
     @Bean
     @ConditionalOnMissingBean
-    public CallbackClient orbitCallbackClient(ExecutorProperties properties) {
-        return new CallbackClient(properties);
+    public CallbackClient orbitCallbackClient(ExecutorProperties properties, AdminClient adminClient) {
+        return new CallbackClient(properties, adminClient);
     }
 
     /**

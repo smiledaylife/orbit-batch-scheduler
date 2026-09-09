@@ -179,6 +179,23 @@ class JobServiceDispatchTest {
     }
 
     @Test
+    void handleCallbacksProcessesWholeBatchAndCountsApplied() {
+        // 批量里一条有效、一条重复（已被忽略），不能因为其中一条而整批失败
+        when(jobStore.finishLogFromRunning(eq("log-b1"), org.mockito.ArgumentMatchers.anyBoolean(),
+                any(), anyLong(), any())).thenReturn(true);
+        when(jobStore.finishLogFromRunning(eq("log-b2"), org.mockito.ArgumentMatchers.anyBoolean(),
+                any(), anyLong(), any())).thenReturn(false);
+
+        int applied = jobService.handleCallbacks(java.util.Arrays.asList(
+                TriggerResult.ok("log-b1", 1L, "n", 1L, "ok"),
+                TriggerResult.ok("log-b2", 1L, "n", 1L, "ok")));
+
+        assertEquals(1, applied);
+        assertEquals(0, jobService.handleCallbacks(null));
+        assertEquals(0, jobService.handleCallbacks(java.util.Collections.<TriggerResult>emptyList()));
+    }
+
+    @Test
     void handleCallbackWithoutLogIdIsIgnored() {
         assertEquals(false, jobService.handleCallback(null));
         assertEquals(false, jobService.handleCallback(TriggerResult.ok(null, 1L, "n", 0, "x")));

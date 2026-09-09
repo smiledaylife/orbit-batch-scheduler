@@ -377,6 +377,31 @@ public class JobService {
      * @param result 执行器回传的最终结果
      * @return 是否真的完成了 RUNNING -> 终态的转换（false 表示日志已不是 RUNNING，本次回传被忽略）
      */
+    /**
+     * 处理执行器批量回传的一批执行结果。
+     *
+     * 执行器会把积压的结果打包成一个请求发送，因此这里是逐条处理、逐条幂等，
+     * 单条被忽略（重复回传或已被回收）不影响同批其余结果。
+     *
+     * @param results 执行器回传的一批最终结果
+     * @return 其中真正完成 RUNNING -> 终态 转换的条数
+     */
+    public int handleCallbacks(List<TriggerResult> results) {
+        if (results == null || results.isEmpty()) {
+            return 0;
+        }
+        int applied = 0;
+        for (TriggerResult result : results) {
+            if (handleCallback(result)) {
+                applied++;
+            }
+        }
+        if (results.size() > 1) {
+            log.info("[orbit-admin] callback batch of {} item(s), {} applied", results.size(), applied);
+        }
+        return applied;
+    }
+
     public boolean handleCallback(TriggerResult result) {
         if (result == null || result.getLogId() == null || result.getLogId().trim().isEmpty()) {
             log.warn("[orbit-admin] callback without logId ignored");
