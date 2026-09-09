@@ -505,6 +505,8 @@ public class JobService {
             // 等执行器回传 /orbit/admin/callback 时再由 handleCallback 收敛到终态。
             // 此处若误判为终态，长任务会在真正跑完前就被记成 SUCCESS/FAILED。
             if (result.isAccepted()) {
+                // 立刻记录承接节点：孤儿回收靠它判断执行器是否还活着
+                jobStore.markDispatched(logId, address);
                 log.info("[orbit-admin] job={} -> {} @ {} accepted, awaiting callback (logId={})",
                         job.getJobName(), job.getHandler(), address, logId);
                 return result;
@@ -763,7 +765,8 @@ public class JobService {
         if (job.getTimeoutSeconds() <= 0) {
             job.setTimeoutSeconds(300);
         }
-        // 按全局上限封顶：派发是同步阻塞的，无上限的 timeoutSeconds 会让单次调用
+        // 按全局上限封顶：该值随触发下发给执行器做超时强制，也是孤儿回收硬上界的基准，
+        // 无上限会让单个任务的超时口径脱离调度中心的回收阈值。
         // 长时间占住 Tomcat 线程（手动触发）或 Quartz 工作线程（定时触发）。
         int maxTimeout = properties.getMaxTimeoutSeconds();
         if (maxTimeout > 0 && job.getTimeoutSeconds() > maxTimeout) {

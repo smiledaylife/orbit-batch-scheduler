@@ -190,7 +190,8 @@ class JobStoreTest {
         insertRunningLog("log-old", new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L));
         insertRunningLog("log-new", new java.util.Date());
 
-        java.util.List<String> reaped = jobStore.reapOrphanedRunning(3600 * 1000L, "orphaned running log");
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(3600 * 1000L, 600 * 1000L,
+                java.util.Collections.<String>emptySet(), "hard cap", "executor offline");
 
         // 返回被回收的 logId：调用方要据此释放这些任务的串行守卫
         assertEquals(1, reaped.size());
@@ -200,6 +201,53 @@ class JobStoreTest {
         assertEquals("FAILED", old.getStatus());
         assertEquals("RUNNING", fresh.getStatus());
         assertNotNull(old.getEndTime());
+    }
+
+    @Test
+    void reapKeepsRunningJobWhoseExecutorIsStillAlive() {
+        // 执行器还在线、只是任务跑得久：不能判失败（对齐 XXL-JOB findLostJobIds 的 t2.id IS NULL 条件）
+        java.util.Date old = new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L);
+        insertRunningLog("log-alive", old, "http://10.0.0.1:8081");
+
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+                6 * 3600 * 1000L, 600 * 1000L,
+                java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
+
+        assertEquals(0, reaped.size());
+        assertEquals("RUNNING", findByLogId("log-alive").getStatus());
+        // 运行中的日志也应能看到承接节点
+        assertEquals("http://10.0.0.1:8081", findByLogId("log-alive").getExecutorAddress());
+    }
+
+    @Test
+    void reapFailsRunningJobWhoseExecutorWentOffline() {
+        java.util.Date old = new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L);
+        insertRunningLog("log-dead", old, "http://10.0.0.9:8081");
+
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+                6 * 3600 * 1000L, 600 * 1000L,
+                java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
+
+        assertEquals(1, reaped.size());
+        JobLog gone = findByLogId("log-dead");
+        assertEquals("FAILED", gone.getStatus());
+        assertTrue(gone.getMessage().contains("offline"), "got: " + gone.getMessage());
+    }
+
+    @Test
+    void reapHardCapAppliesEvenWhenExecutorIsAlive() {
+        // 硬上界兜底：执行器活着但结果永远回不来时，不能留下永久 RUNNING 的日志
+        java.util.Date old = new java.util.Date(System.currentTimeMillis() - 5 * 3600 * 1000L);
+        insertRunningLog("log-stuck", old, "http://10.0.0.1:8081");
+
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+                3600 * 1000L, 600 * 1000L,
+                java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
+
+        assertEquals(1, reaped.size());
+        JobLog stuck = findByLogId("log-stuck");
+        assertEquals("FAILED", stuck.getStatus());
+        assertTrue(stuck.getMessage().contains("hard cap"), "got: " + stuck.getMessage());
     }
 
     @Test
@@ -241,6 +289,10 @@ class JobStoreTest {
     }
 
     private void insertRunningLog(String logId, java.util.Date startTime) {
+        insertRunningLog(logId, startTime, null);
+    }
+
+    private void insertRunningLog(String logId, java.util.Date startTime, String executorAddress) {
         JobLog running = new JobLog();
         running.setLogId(logId);
         running.setJobName("jobLog");
@@ -249,6 +301,10 @@ class JobStoreTest {
         running.setStatus("RUNNING");
         running.setStartTime(startTime);
         jobStore.insertLog(running);
+        if (executorAddress != null) {
+            // 模拟 dispatch 受理时写入的承接节点
+            jobStore.markDispatched(logId, executorAddress);
+        }
     }
 
     private void insertFinishedLog(String logId, java.util.Date startTime) {

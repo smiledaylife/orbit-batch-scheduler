@@ -164,7 +164,7 @@ public class ExecutorRegistry {
      * 物理删除心跳超时的失联节点。
      */
     public int evictExpired() {
-        Date cutoff = new Date(System.currentTimeMillis() - properties.getHeartbeatTimeoutSeconds() * 1000L);
+        Date cutoff = new Date(System.currentTimeMillis() - heartbeatTimeoutMs());
         int deleted = mapper.delete(new LambdaQueryWrapper<OrbitExecutorRegistryPO>()
                 .lt(OrbitExecutorRegistryPO::getLastHeartbeat, cutoff));
         if (deleted > 0) {
@@ -299,7 +299,19 @@ public class ExecutorRegistry {
     }
 
     private Date aliveSince() {
-        return new Date(System.currentTimeMillis() - properties.getHeartbeatTimeoutSeconds() * 1000L);
+        return new Date(System.currentTimeMillis() - heartbeatTimeoutMs());
+    }
+
+    /**
+     * 心跳超时时长（毫秒），下限 5 秒。
+     *
+     * 该项直接来自配置且没有下限保护：配成 0 或负数时 cutoff 会落到当前时刻甚至未来，
+     * evictExpired 会在每一轮扫描里删掉整张注册表，aliveSince 则让所有节点都查不出来 ——
+     * 表现为「执行器明明在心跳，调度中心却说没有在线执行器」，且没有任何报错。
+     */
+    private long heartbeatTimeoutMs() {
+        int seconds = properties.getHeartbeatTimeoutSeconds();
+        return (seconds < 5 ? 5 : seconds) * 1000L;
     }
 
     // ============================ 转换与工具 ============================

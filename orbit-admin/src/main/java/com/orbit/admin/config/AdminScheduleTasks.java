@@ -25,7 +25,7 @@ public class AdminScheduleTasks {
 
     private static final Logger log = LoggerFactory.getLogger(AdminScheduleTasks.class);
 
-    /** 回收僵尸 RUNNING 日志前的额外宽限（毫秒）：在 maxTimeoutSeconds 之上再放宽 5 分钟 */
+    /** 回收僵尸 RUNNING 日志前的额外宽限（毫秒）：在阈值之上再放宽 5 分钟 */
     private static final long REAP_EXTRA_GRACE_MS = 5 * 60 * 1000L;
 
     private final ExecutorRegistry registry;
@@ -74,9 +74,24 @@ public class AdminScheduleTasks {
     @Scheduled(fixedDelayString = "${orbit.admin.log-reap-interval-ms:60000}")
     public void reapOrphanedRunningLogs() {
         try {
-            long cutoffMs = properties.getMaxTimeoutSeconds() * 1000L + REAP_EXTRA_GRACE_MS;
-            java.util.List<String> reaped = jobStore.reapOrphanedRunning(cutoffMs,
-                    "orphaned running log: executor never called back (crashed, or callback lost)");
+            // 硬上界：任务 timeoutSeconds 在保存时已被 max-timeout-seconds 封顶，
+            // 因此超过这个时长的一定是异常，无论执行器是否在线都收敛掉，
+            // 保证不会有永久 RUNNING 的日志和永久被占用的串行守卫。
+            long hardCapMs = properties.getMaxTimeoutSeconds() * 1000L + REAP_EXTRA_GRACE_MS;
+            // 存活判定的宽限：心跳超时之上再放宽 5 分钟，
+            // 避免执行器短暂网络抖动就被判死、把仍在正常运行的任务记成失败。
+            long offlineMs = properties.getHeartbeatTimeoutSeconds() * 1000L + REAP_EXTRA_GRACE_MS;
+
+            java.util.Set<String> live = new java.util.HashSet<String>();
+            for (com.orbit.core.model.ExecutorNode node : registry.listAll()) {
+                if (node.getAddress() != null) {
+                    live.add(node.getAddress());
+                }
+            }
+
+            java.util.List<String> reaped = jobStore.reapOrphanedRunning(hardCapMs, offlineMs, live,
+                    "orphaned running log: execution exceeded max-timeout and no callback arrived",
+                    "orphaned running log: executor went offline before calling back");
             // 日志已收敛到终态，必须同步释放串行守卫，
             // 否则这些任务会被登记簿一直判定为「上一轮在跑」而永久不再触发。
             for (String logId : reaped) {

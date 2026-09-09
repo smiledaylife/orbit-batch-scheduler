@@ -254,6 +254,24 @@ public class JobStore {
     }
 
     /**
+     * 记录本次触发被哪个执行器受理，日志仍保持 RUNNING。
+     *
+     * 必须在受理时就写：孤儿回收要靠 executor_address 判断「承接任务的那个节点还活着吗」，
+     * 若只在收尾时写，RUNNING 期间该字段恒为 NULL，就无法把「执行器崩了」和
+     * 「任务还在正常跑」区分开。顺带让运行中的日志在查询接口里就能看到落在哪个节点。
+     *
+     * @param logId   日志 ID
+     * @param address 受理该触发的执行器地址
+     */
+    public void markDispatched(String logId, String address) {
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .eq(OrbitJobLogPO::getLogId, logId)
+                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
+                .set(OrbitJobLogPO::getExecutorAddress, address);
+        logMapper.update(null, uw);
+    }
+
+    /**
      * 由执行器回传驱动，把一条 RUNNING 日志收敛到终态。
      *
      * 与 {@link #finishLog} 的关键差别是 WHERE 里多了 {@code status = 'RUNNING'}：
@@ -290,26 +308,57 @@ public class JobStore {
      * @param message  写入 message 字段的收敛原因说明
      * @return 本次收敛的记录数
      */
-    public List<String> reapOrphanedRunning(long cutoffMs, String message) {
-        Date cutoff = new Date(System.currentTimeMillis() - Math.max(0L, cutoffMs));
+    public List<String> reapOrphanedRunning(long hardCapMs, long offlineMs,
+                                            java.util.Set<String> liveAddresses, String hardMessage,
+                                            String offlineMessage) {
+        long now = System.currentTimeMillis();
+        Date hardCap = new Date(now - Math.max(0L, hardCapMs));
+        // 两个阈值共用同一个下界：未超过 offlineMs 的日志一律不碰，
+        // 避免刚触发出去、执行器还没来得及回传就被误判。
+        Date scanBefore = new Date(now - Math.max(0L, Math.min(offlineMs, hardCapMs)));
 
-        // 先查出待回收的 logId：调用方需要据此释放这些任务的串行守卫，
-        // 否则守卫会一直占着，任务再也无法被触发。
         LambdaQueryWrapper<OrbitJobLogPO> qw = new LambdaQueryWrapper<OrbitJobLogPO>()
-                .select(OrbitJobLogPO::getLogId)
+                .select(OrbitJobLogPO::getLogId, OrbitJobLogPO::getExecutorAddress,
+                        OrbitJobLogPO::getStartTime)
                 .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
-                .lt(OrbitJobLogPO::getStartTime, cutoff);
+                .lt(OrbitJobLogPO::getStartTime, scanBefore);
         List<OrbitJobLogPO> rows = logMapper.selectList(qw);
         if (rows == null || rows.isEmpty()) {
             return new ArrayList<String>();
         }
-        List<String> logIds = new ArrayList<String>(rows.size());
+
+        // 候选量极小（正常运行时为空），存活判定放在内存里做，
+        // 比在 SQL 里对在线节点列表做 NOT IN 更直观，也避免超长 IN 列表。
+        List<String> hardExpired = new ArrayList<String>();
+        List<String> executorGone = new ArrayList<String>();
         for (OrbitJobLogPO row : rows) {
-            logIds.add(row.getLogId());
+            String address = row.getExecutorAddress();
+            boolean alive = address != null && !address.trim().isEmpty() && liveAddresses.contains(address);
+            if (row.getStartTime() != null && row.getStartTime().before(hardCap)) {
+                hardExpired.add(row.getLogId());
+            } else if (!alive) {
+                executorGone.add(row.getLogId());
+            }
         }
 
-        // 更新时再带一次 status = RUNNING：查询与更新之间可能有回传到达并已收敛，
-        // 这一条件保证不会把已经拿到真实结果的日志改写成「孤儿失败」。
+        List<String> reaped = new ArrayList<String>(hardExpired.size() + executorGone.size());
+        reaped.addAll(markFailed(hardExpired, hardMessage));
+        reaped.addAll(markFailed(executorGone, offlineMessage));
+        return reaped;
+    }
+
+    /**
+     * 把给定日志从 RUNNING 收敛为 FAILED。更新条件再带一次 status = RUNNING：
+     * 查询与更新之间可能有回传到达并已收敛，该条件保证不会把已经拿到真实结果的日志改写掉。
+     *
+     * @param logIds  待回收的日志 ID
+     * @param message 写入日志的原因
+     * @return 实际被回收的日志 ID（与入参一致；未匹配到行的不会被计入调用方语义之外的状态）
+     */
+    private List<String> markFailed(List<String> logIds, String message) {
+        if (logIds.isEmpty()) {
+            return logIds;
+        }
         LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
                 .in(OrbitJobLogPO::getLogId, logIds)
                 .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
@@ -318,7 +367,7 @@ public class JobStore {
                 .set(OrbitJobLogPO::getEndTime, new Date());
         int updated = logMapper.update(null, uw);
         if (updated > 0) {
-            log.warn("[orbit-admin] reaped {} orphaned RUNNING log(s) older than {}s", updated, cutoffMs / 1000);
+            log.warn("[orbit-admin] reaped {} orphaned RUNNING log(s): {}", updated, message);
         }
         return logIds;
     }
