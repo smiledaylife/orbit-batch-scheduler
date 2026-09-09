@@ -30,7 +30,8 @@ import java.util.Map;
  *
  *   - 接收调度中心派发的任务触发请求（{@code POST /orbit/executor/run}）；
  *   - 校验安全访问令牌（{@code X-Orbit-Token}）；
- *   - 委托 {@link JobExecutionService} 在有界工作线程池中执行任务（含超时强制与饱和保护）；
+ *   - 委托 {@link JobExecutionService} 受理触发：入队后立即返回受理回执，
+ *       业务方法在工作线程池中异步执行，结果由回传客户端推回调度中心；
  *   - 提供当前节点在线信息与支持的 Handler 查询端点（{@code GET /orbit/executor/handlers}，同样受令牌保护）。
  *
  */
@@ -67,11 +68,15 @@ public class ExecutorController {
     }
 
     /**
-     * 接收调度中心的任务触发执行请求。
+     * 接收调度中心的任务触发请求。
+     *
+     * 本接口是异步契约：返回值只表示「是否受理」，accepted=true 表示任务已入队、尚未执行完毕，
+     * 任务的真实成败由执行器通过 {@code POST /orbit/admin/callback} 异步回传。
+     * 因此这里的响应时间与任务耗时无关，调度中心不必为长任务长时间占住连接。
      *
      * @param request 任务触发参数实体
      * @param token   HTTP Header 中的鉴权令牌
-     * @return 任务执行结果
+     * @return 受理回执；线程池饱和时返回同步失败结果
      */
     @PostMapping("/run")
     public TriggerResult run(@RequestBody TriggerRequest request,
@@ -93,8 +98,8 @@ public class ExecutorController {
                     "handler not found on this executor: " + handler);
         }
 
-        // 4. 委托执行服务：有界线程池 + 超时强制 + 饱和保护
-        return executionService.execute(request, registry, node);
+        // 4. 委托执行服务受理：入队即返回，结果异步回传
+        return executionService.submit(request, registry, node);
     }
 
     /**

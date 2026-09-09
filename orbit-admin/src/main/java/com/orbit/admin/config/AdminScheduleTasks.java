@@ -1,6 +1,7 @@
 package com.orbit.admin.config;
 
 import com.orbit.admin.registry.ExecutorRegistry;
+import com.orbit.admin.dispatch.OutstandingDispatches;
 import com.orbit.admin.store.JobStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,18 +31,22 @@ public class AdminScheduleTasks {
     private final ExecutorRegistry registry;
     private final JobStore jobStore;
     private final AdminProperties properties;
+    private final OutstandingDispatches outstanding;
 
     /**
      * 构造方法，注入执行器注册表、存储层与配置
      *
-     * @param registry   执行器注册表
-     * @param jobStore   任务与日志存储
-     * @param properties 调度中心配置
+     * @param registry    执行器注册表
+     * @param jobStore    任务与日志存储
+     * @param properties  调度中心配置
+     * @param outstanding 在途执行登记簿
      */
-    public AdminScheduleTasks(ExecutorRegistry registry, JobStore jobStore, AdminProperties properties) {
+    public AdminScheduleTasks(ExecutorRegistry registry, JobStore jobStore, AdminProperties properties,
+                              OutstandingDispatches outstanding) {
         this.registry = registry;
         this.jobStore = jobStore;
         this.properties = properties;
+        this.outstanding = outstanding;
     }
 
     /**
@@ -70,8 +75,13 @@ public class AdminScheduleTasks {
     public void reapOrphanedRunningLogs() {
         try {
             long cutoffMs = properties.getMaxTimeoutSeconds() * 1000L + REAP_EXTRA_GRACE_MS;
-            jobStore.reapOrphanedRunning(cutoffMs,
-                    "orphaned running log: admin crashed or restarted mid-dispatch");
+            java.util.List<String> reaped = jobStore.reapOrphanedRunning(cutoffMs,
+                    "orphaned running log: executor never called back (crashed, or callback lost)");
+            // 日志已收敛到终态，必须同步释放串行守卫，
+            // 否则这些任务会被登记簿一直判定为「上一轮在跑」而永久不再触发。
+            for (String logId : reaped) {
+                outstanding.release(logId);
+            }
         } catch (Exception e) {
             log.error("[orbit-admin] failed to reap orphaned running logs: {}", e.getMessage(), e);
         }

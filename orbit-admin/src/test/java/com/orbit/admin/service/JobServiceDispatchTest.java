@@ -2,6 +2,7 @@ package com.orbit.admin.service;
 
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.dispatch.ExecutorClient;
+import com.orbit.admin.dispatch.OutstandingDispatches;
 import com.orbit.admin.registry.ExecutorRegistry;
 import com.orbit.admin.store.JobStore;
 import com.orbit.core.model.ExecutorNode;
@@ -41,6 +42,7 @@ import static org.mockito.Mockito.when;
  * {@link JobService} 派发与校验逻辑单元测试（Mock 依赖）。
  * 重点覆盖：
  *   - dispatch 单次查询：一次派发只允许调用一次 registry.listByApp；
+ *   - 异步派发契约：受理回执下日志保持 RUNNING，终态只能由回传收敛；
  *   - failover：首选节点连接拒绝时立即摘除并切换下一个节点；
  *   - routeStrategy 合法性校验与规范化；
  *   - create 的唯一键竞态兜底（DataIntegrityViolationException → 友好 400 语义）；
@@ -62,6 +64,7 @@ class JobServiceDispatchTest {
     private ExecutorClient executorClient;
 
     private AdminProperties properties;
+    private OutstandingDispatches outstanding;
     private JobService jobService;
 
     @BeforeEach
@@ -69,7 +72,8 @@ class JobServiceDispatchTest {
         properties = new AdminProperties();
         properties.setTimezone("Asia/Shanghai");
         properties.setGroup("ORBIT");
-        jobService = new JobService(scheduler, jobStore, registry, executorClient, properties);
+        outstanding = new OutstandingDispatches();
+        jobService = new JobService(scheduler, jobStore, registry, executorClient, properties, outstanding);
     }
 
     private static JobInfo newJob(String name, String appName) {
@@ -99,16 +103,16 @@ class JobServiceDispatchTest {
         when(registry.listByApp("app")).thenReturn(candidates);
         when(registry.route(anyList(), eq("app"), anyString())).thenReturn(candidates.get(0));
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
-                TriggerResult.ok("log-1", 1L, "http://10.0.0.1:8081", 12L, "ok"));
+                TriggerResult.accepted("log-1", 1L, "http://10.0.0.1:8081", "accepted"));
 
         TriggerResult result = jobService.dispatch(job, null);
 
         assertTrue(result.isSuccess());
-        // 核心断言：单次派发只查一次候选列表（优化前 route(appName,...) 内部会再查一次）
+        assertTrue(result.isAccepted());
+        // 核心断言：单次派发只查一次候选列表
         verify(registry, times(1)).listByApp("app");
-        // logId 由 dispatch 内部生成（UUID），用 anyString 匹配；其余参数精确匹配
-        verify(jobStore, times(1)).finishLog(anyString(), eq("SUCCESS"),
-                eq("http://10.0.0.1:8081"), eq(12L), eq("ok"));
+        // 受理回执不代表任务跑完：日志必须保持 RUNNING，一次 finishLog 都不能有
+        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
     }
 
     @Test
@@ -121,16 +125,65 @@ class JobServiceDispatchTest {
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
                 TriggerResult.fail("log-2", 1L, "http://10.0.0.1:8081", 0, "Connection refused"));
         when(executorClient.trigger(eq("http://10.0.0.2:8081"), any())).thenReturn(
-                TriggerResult.ok("log-2", 1L, "http://10.0.0.2:8081", 5L, "ok"));
+                TriggerResult.accepted("log-2", 1L, "http://10.0.0.2:8081", "accepted"));
 
         TriggerResult result = jobService.dispatch(job, null);
 
         assertTrue(result.isSuccess());
+        assertTrue(result.isAccepted());
         // 不可达节点被立即摘除（不等心跳超时）
         verify(registry, times(1)).remove("app", "http://10.0.0.1:8081");
-        // logId 由 dispatch 内部生成（UUID），用 anyString 匹配
-        verify(jobStore, times(1)).finishLog(anyString(), eq("SUCCESS"),
-                eq("http://10.0.0.2:8081"), anyLong(), anyString());
+        // 第二个节点受理成功，日志同样保持 RUNNING 等回传
+        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
+    }
+
+    @Test
+    void dispatchMarksFailedWhenExecutorRejectsTrigger() {
+        JobInfo job = newJob("jobRejected", "app");
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
+        when(registry.route(anyList(), eq("app"), anyString())).thenReturn(null);
+        // 执行器同步失败（饱和、handler 不存在等）：accepted=false
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
+                TriggerResult.fail("log-r", 1L, "http://10.0.0.1:8081", 3L, "executor saturated"));
+
+        TriggerResult result = jobService.dispatch(job, null);
+
+        assertEquals(false, result.isSuccess());
+        assertEquals(false, result.isAccepted());
+        // 不会有回传到达，必须立刻收敛到 FAILED，不能留在 RUNNING 等孤儿回收
+        verify(jobStore, times(1)).finishLog(anyString(), eq("FAILED"),
+                eq("http://10.0.0.1:8081"), anyLong(), eq("executor saturated"));
+    }
+
+    @Test
+    void handleCallbackConvergesRunningLog() {
+        TriggerResult cb = TriggerResult.ok("log-cb", 1L, "http://10.0.0.9:8081", 4321L, "done");
+        when(jobStore.finishLogFromRunning("log-cb", true, "http://10.0.0.9:8081", 4321L, "done"))
+                .thenReturn(true);
+
+        assertTrue(jobService.handleCallback(cb));
+        verify(jobStore, times(1)).finishLogFromRunning("log-cb", true, "http://10.0.0.9:8081", 4321L, "done");
+    }
+
+    @Test
+    void handleCallbackIsIdempotentOnDuplicate() {
+        // 存储层匹配不到 RUNNING 行 -> 返回 false；重复回传不能被当成错误
+        when(jobStore.finishLogFromRunning(anyString(), org.mockito.ArgumentMatchers.anyBoolean(),
+                any(), anyLong(), any())).thenReturn(false);
+        TriggerResult cb = TriggerResult.ok("log-dup", 1L, "n", 1L, "done");
+
+        assertEquals(false, jobService.handleCallback(cb));
+        assertEquals(false, jobService.handleCallback(cb));
+        verify(jobStore, times(2)).finishLogFromRunning(anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(), any(), anyLong(), any());
+    }
+
+    @Test
+    void handleCallbackWithoutLogIdIsIgnored() {
+        assertEquals(false, jobService.handleCallback(null));
+        assertEquals(false, jobService.handleCallback(TriggerResult.ok(null, 1L, "n", 0, "x")));
+        verify(jobStore, never()).finishLogFromRunning(anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(), any(), anyLong(), any());
     }
 
     @Test

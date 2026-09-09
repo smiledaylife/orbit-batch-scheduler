@@ -19,12 +19,18 @@ orbit:
     access-token: ""
     heartbeat-interval-ms: 20000
     node-id: ${POD_NAME:}
-    # 任务工作线程池：单节点并发上限 + 按任务超时强制中断（消除调度中心超时放弃后的僵尸任务）
-    # worker-threads: 0 切换为内联模式：在请求线程内执行、无超时强制
+    # 任务工作线程池：单节点并发上限 + 按任务超时强制中断（消除僵尸任务）。下限为 1。
     worker-threads: 8
-    # 排队队列容量：队列满时新触发快速失败（调度中心可观测到并扩容副本）
-    # 0 = 不排队：并发超过 worker-threads 立即返回 executor saturated
+    # 排队队列容量：队列满时新触发同步返回 executor saturated（调度中心立刻判失败）
+    # 0 = 不排队：并发超过 worker-threads 立即快速失败
     queue-capacity: 256
+    # ---- 执行结果回传（触发是异步的，任务成败只能靠回传送达调度中心）----
+    # 回传失败的重试次数（不含首次）与退避间隔；重试耗尽会打 ERROR，
+    # 对应日志将由调度中心的孤儿回收兜底判失败
+    callback-retry-times: 3
+    callback-retry-interval-ms: 2000
+    # 待回传队列容量：满则丢弃最旧一条并打 ERROR
+    callback-queue-capacity: 1000
 
 management:
   endpoints:

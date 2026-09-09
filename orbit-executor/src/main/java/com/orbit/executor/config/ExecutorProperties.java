@@ -92,6 +92,22 @@ public class ExecutorProperties {
      */
     private int maxJobWaitSeconds = 86400;
 
+    /**
+     * 结果回传失败后的重试次数（不含首次发送）。
+     * 回传失败会让调度中心那条日志一直停在 RUNNING 直到孤儿回收，因此默认重试 3 次。
+     */
+    private int callbackRetryTimes = 3;
+
+    /**
+     * 结果回传重试间隔（毫秒），退避等待时间。
+     */
+    private long callbackRetryIntervalMs = 2000;
+
+    /**
+     * 待回传结果的内存队列容量。队列满时丢弃最旧的一条并打 ERROR 日志。
+     */
+    private int callbackQueueCapacity = 1000;
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -178,5 +194,29 @@ public class ExecutorProperties {
 
     public void setMaxJobWaitSeconds(int maxJobWaitSeconds) {
         this.maxJobWaitSeconds = maxJobWaitSeconds;
+    }
+
+    public int getCallbackRetryTimes() {
+        return callbackRetryTimes;
+    }
+
+    public void setCallbackRetryTimes(int callbackRetryTimes) {
+        this.callbackRetryTimes = callbackRetryTimes;
+    }
+
+    public long getCallbackRetryIntervalMs() {
+        return callbackRetryIntervalMs;
+    }
+
+    public void setCallbackRetryIntervalMs(long callbackRetryIntervalMs) {
+        this.callbackRetryIntervalMs = callbackRetryIntervalMs;
+    }
+
+    public int getCallbackQueueCapacity() {
+        return callbackQueueCapacity;
+    }
+
+    public void setCallbackQueueCapacity(int callbackQueueCapacity) {
+        this.callbackQueueCapacity = callbackQueueCapacity;
     }
 }

@@ -254,6 +254,33 @@ public class JobStore {
     }
 
     /**
+     * 由执行器回传驱动，把一条 RUNNING 日志收敛到终态。
+     *
+     * 与 {@link #finishLog} 的关键差别是 WHERE 里多了 {@code status = 'RUNNING'}：
+     * 回传可能重复到达（执行器重试）、也可能与孤儿回收竞态，
+     * 只允许从 RUNNING 出发的一次转换可以让这些情况天然幂等 ——
+     * 第二次更新匹配不到行，返回 false，日志保持第一次写入的真实结果。
+     *
+     * @param logId   日志 ID
+     * @param success 执行是否成功
+     * @param address 执行节点地址
+     * @param costMs  耗时（毫秒）
+     * @param message 结果或失败原因
+     * @return 是否真的发生了状态转换（false 表示该日志已不是 RUNNING，本次回传被忽略）
+     */
+    public boolean finishLogFromRunning(String logId, boolean success, String address, long costMs, String message) {
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .eq(OrbitJobLogPO::getLogId, logId)
+                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
+                .set(OrbitJobLogPO::getStatus, success ? JobLogStatus.SUCCESS : JobLogStatus.FAILED)
+                .set(OrbitJobLogPO::getExecutorAddress, address)
+                .set(OrbitJobLogPO::getCostMs, costMs)
+                .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
+                .set(OrbitJobLogPO::getEndTime, new Date());
+        return logMapper.update(null, uw) > 0;
+    }
+
+    /**
      * 回收僵尸 RUNNING 日志：将早于 cutoff 的 RUNNING 记录收敛为 FAILED 终态。
      *
      * 场景：调度中心在派发中途崩溃/重启，插入的 RUNNING 日志无人收敛，
@@ -263,11 +290,29 @@ public class JobStore {
      * @param message  写入 message 字段的收敛原因说明
      * @return 本次收敛的记录数
      */
-    public int reapOrphanedRunning(long cutoffMs, String message) {
+    public List<String> reapOrphanedRunning(long cutoffMs, String message) {
         Date cutoff = new Date(System.currentTimeMillis() - Math.max(0L, cutoffMs));
-        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+
+        // 先查出待回收的 logId：调用方需要据此释放这些任务的串行守卫，
+        // 否则守卫会一直占着，任务再也无法被触发。
+        LambdaQueryWrapper<OrbitJobLogPO> qw = new LambdaQueryWrapper<OrbitJobLogPO>()
+                .select(OrbitJobLogPO::getLogId)
                 .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
-                .lt(OrbitJobLogPO::getStartTime, cutoff)
+                .lt(OrbitJobLogPO::getStartTime, cutoff);
+        List<OrbitJobLogPO> rows = logMapper.selectList(qw);
+        if (rows == null || rows.isEmpty()) {
+            return new ArrayList<String>();
+        }
+        List<String> logIds = new ArrayList<String>(rows.size());
+        for (OrbitJobLogPO row : rows) {
+            logIds.add(row.getLogId());
+        }
+
+        // 更新时再带一次 status = RUNNING：查询与更新之间可能有回传到达并已收敛，
+        // 这一条件保证不会把已经拿到真实结果的日志改写成「孤儿失败」。
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .in(OrbitJobLogPO::getLogId, logIds)
+                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
                 .set(OrbitJobLogPO::getStatus, JobLogStatus.FAILED)
                 .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
                 .set(OrbitJobLogPO::getEndTime, new Date());
@@ -275,7 +320,7 @@ public class JobStore {
         if (updated > 0) {
             log.warn("[orbit-admin] reaped {} orphaned RUNNING log(s) older than {}s", updated, cutoffMs / 1000);
         }
-        return updated;
+        return logIds;
     }
 
     /**

@@ -86,9 +86,10 @@ public class AdminProperties {
     private int logRetentionDays = 30;
 
     /**
-     * 定时派发线程池大小，默认 64。
-     * 派发线程绝大部分时间阻塞在对执行器的 HTTP 读上，属于纯 I/O 等待，
-     * 因此可以远大于 {@code org.quartz.threadPool.threadCount}，两者相互独立。
+     * 触发线程池大小，默认 64。
+     * 触发是对执行器的短 HTTP 调用（读超时见 trigger-timeout-seconds，与任务耗时无关），
+     * 线程只在触发往返期间被占用，因此可以远大于 {@code org.quartz.threadPool.threadCount}，
+     * 两者相互独立。
      */
     private int dispatchThreads = 64;
 
@@ -100,14 +101,26 @@ public class AdminProperties {
 
     /**
      * 同一任务串行执行开关，默认 true。
-     * 开启时，上一轮派发尚未结束的任务在本次 Cron 到点会被跳过：只累加计数、不写日志，
+     * 开启时，上一轮**执行**尚未结束的任务在本次 Cron 到点会被跳过：只累加计数、不写日志，
      * 避免高频 Cron 配慢 Handler 时刷爆日志表；计数经 /orbit/admin/overview 的
      * dispatchSkipped 暴露。
+     *
+     * 判定口径是「上一轮的执行结果是否已回传」：派发时占用守卫，
+     * 收到执行器回传或孤儿回收把日志收敛到终态时释放。
      *
      * 该守卫是进程内的，只保证单副本内不重叠；
      * 跨副本不重叠依赖 Quartz 集群的行锁（同一 trigger 只被一个副本触发）。
      */
     private boolean dispatchSerialPerJob = true;
+
+    /**
+     * 触发请求的 HTTP 读超时（秒），默认 10。
+     *
+     * 触发是异步契约：执行器入队后立即回执，因此该超时只需覆盖「网络往返 + 入队」，
+     * 与任务真实耗时无关，不必也不应该跟着 max-timeout-seconds 放大。
+     * 任务真实耗时的上限由 max-timeout-seconds（传给执行器做超时强制）约束。
+     */
+    private int triggerTimeoutSeconds = 10;
 
     public String getAccessToken() {
         return accessToken;
@@ -211,5 +224,13 @@ public class AdminProperties {
 
     public void setDispatchSerialPerJob(boolean dispatchSerialPerJob) {
         this.dispatchSerialPerJob = dispatchSerialPerJob;
+    }
+
+    public int getTriggerTimeoutSeconds() {
+        return triggerTimeoutSeconds;
+    }
+
+    public void setTriggerTimeoutSeconds(int triggerTimeoutSeconds) {
+        this.triggerTimeoutSeconds = triggerTimeoutSeconds;
     }
 }

@@ -2,6 +2,7 @@ package com.orbit.admin.service;
 
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.dispatch.ExecutorClient;
+import com.orbit.admin.dispatch.OutstandingDispatches;
 import com.orbit.admin.quartz.OrbitQuartzJob;
 import com.orbit.admin.registry.ExecutorRegistry;
 import com.orbit.admin.store.ColumnLimits;
@@ -64,13 +65,18 @@ public class JobService {
     private final ExecutorClient executorClient;
     private final AdminProperties properties;
 
+    /** 在途执行登记簿：串行守卫的占用与释放，见 {@link OutstandingDispatches} */
+    private final OutstandingDispatches outstanding;
+
     public JobService(Scheduler scheduler, JobStore jobStore, ExecutorRegistry registry,
-                      ExecutorClient executorClient, AdminProperties properties) {
+                      ExecutorClient executorClient, AdminProperties properties,
+                      OutstandingDispatches outstanding) {
         this.scheduler = scheduler;
         this.jobStore = jobStore;
         this.registry = registry;
         this.executorClient = executorClient;
         this.properties = properties;
+        this.outstanding = outstanding;
     }
 
     /**
@@ -360,6 +366,40 @@ public class JobService {
      * @param job    任务定义
      * @param reason 未派发的原因
      */
+    /**
+     * 处理执行器回传的执行结果，把对应的 RUNNING 日志收敛到终态。
+     *
+     * 幂等性由存储层保证：只有 status = RUNNING 的日志才会被更新，
+     * 因此执行器重试、重复回传、以及与孤儿回收的竞态都不会覆盖已经写入的真实结果。
+     * 无论本次是否真的发生状态转换，都会释放该 logId 占用的串行守卫 ——
+     * 释放本身是幂等的，而漏放会让任务永久无法再被触发。
+     *
+     * @param result 执行器回传的最终结果
+     * @return 是否真的完成了 RUNNING -> 终态的转换（false 表示日志已不是 RUNNING，本次回传被忽略）
+     */
+    public boolean handleCallback(TriggerResult result) {
+        if (result == null || result.getLogId() == null || result.getLogId().trim().isEmpty()) {
+            log.warn("[orbit-admin] callback without logId ignored");
+            return false;
+        }
+        String logId = result.getLogId().trim();
+        boolean applied;
+        try {
+            applied = jobStore.finishLogFromRunning(logId, result.isSuccess(), result.getWorkerNode(),
+                    result.getCostMs(), result.getMessage());
+        } finally {
+            outstanding.release(logId);
+        }
+        if (applied) {
+            log.info("[orbit-admin] callback logId={} job={} success={} {}ms",
+                    logId, result.getJobId(), result.isSuccess(), result.getCostMs());
+        } else {
+            log.info("[orbit-admin] callback for logId={} ignored: log is no longer RUNNING "
+                    + "(duplicate callback or already reaped)", logId);
+        }
+        return applied;
+    }
+
     public void recordRejectedDispatch(JobInfo job, String reason) {
         Date now = new Date();
         JobLog rejected = new JobLog();
@@ -459,12 +499,23 @@ public class JobService {
                 break;
             }
 
-            long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
-            String status = result.isSuccess() ? JobLogStatus.SUCCESS : JobLogStatus.FAILED;
             String address = node == null ? null : node.getAddress();
-            jobStore.finishLog(logId, status, address, cost, result.getMessage());
-            log.info("[orbit-admin] job={} -> {} @ {} status={} {}ms",
-                    job.getJobName(), job.getHandler(), address, status, cost);
+
+            // 受理回执：执行器已入队、任务开始异步执行。日志必须保持 RUNNING，
+            // 等执行器回传 /orbit/admin/callback 时再由 handleCallback 收敛到终态。
+            // 此处若误判为终态，长任务会在真正跑完前就被记成 SUCCESS/FAILED。
+            if (result.isAccepted()) {
+                log.info("[orbit-admin] job={} -> {} @ {} accepted, awaiting callback (logId={})",
+                        job.getJobName(), job.getHandler(), address, logId);
+                return result;
+            }
+
+            // 触发同步失败（执行器不可达、执行器饱和、路由失败等）：日志立刻收敛到 FAILED，
+            // 不会有回传到达，因此不能留在 RUNNING 等孤儿回收。
+            long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
+            jobStore.finishLog(logId, JobLogStatus.FAILED, address, cost, result.getMessage());
+            log.warn("[orbit-admin] job={} -> {} @ {} trigger rejected: {}",
+                    job.getJobName(), job.getHandler(), address, result.getMessage());
             return result;
         } catch (RuntimeException e) {
             String address = node == null ? null : node.getAddress();
