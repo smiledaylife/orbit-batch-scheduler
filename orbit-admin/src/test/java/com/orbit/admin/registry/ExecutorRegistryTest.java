@@ -20,6 +20,8 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 执行器共享库注册表测试。
@@ -30,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @Sql(scripts = "/schema.sql", executionPhase = Sql.ExecutionPhase.BEFORE_TEST_METHOD)
 class ExecutorRegistryTest {
 
+    /** 为被测注册表提供 AdminProperties 的最小测试配置 */
     @TestConfiguration
     static class Cfg {
         @Bean
@@ -54,7 +57,7 @@ class ExecutorRegistryTest {
 
         Set<String> hit = new HashSet<String>();
         for (int i = 0; i < 4; i++) {
-            ExecutorNode n = registry.route("demo", "ROUND");
+            ExecutorNode n = registry.route(registry.listByApp("demo"), "demo", "ROUND");
             assertNotNull(n);
             hit.add(n.getAddress());
         }
@@ -63,7 +66,7 @@ class ExecutorRegistryTest {
 
     @Test
     void routeEmptyReturnsNull() {
-        assertNull(registry.route("missing", "ROUND"));
+        assertNull(registry.route(registry.listByApp("missing"), "missing", "ROUND"));
     }
 
     @Test
@@ -71,6 +74,31 @@ class ExecutorRegistryTest {
         registry.register(req("demo", "http://10.0.0.8:1"));
         registry.remove("demo", "http://10.0.0.8:1");
         assertEquals(0, registry.listByApp("demo").size());
+    }
+
+    /**
+     * 上报字段超出列宽时必须给出可读的错误（字段名 + 上限），
+     * 而不是每轮心跳都以一句被截断的 SQL 驱动报错失败。
+     */
+    @Test
+    void rejectsOversizedFields() {
+        StringBuilder app = new StringBuilder();
+        for (int i = 0; i < 65; i++) {
+            app.append('a');   // app_name VARCHAR(64)
+        }
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> registry.register(req(app.toString(), "http://10.0.0.9:1")));
+        assertTrue(ex.getMessage().contains("appName too long"), ex.getMessage());
+
+        StringBuilder node = new StringBuilder();
+        for (int i = 0; i < 129; i++) {
+            node.append('n');   // node_id VARCHAR(128)
+        }
+        RegistryRequest longNode = req("demo", "http://10.0.0.9:1");
+        longNode.setNodeId(node.toString());
+        IllegalArgumentException nodeEx = assertThrows(IllegalArgumentException.class,
+                () -> registry.register(longNode));
+        assertTrue(nodeEx.getMessage().contains("nodeId too long"), nodeEx.getMessage());
     }
 
     private static RegistryRequest req(String app, String addr) {

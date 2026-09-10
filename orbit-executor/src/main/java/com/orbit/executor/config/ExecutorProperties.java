@@ -64,25 +64,23 @@ public class ExecutorProperties {
 
     /**
      * 任务执行工作线程数（默认 8）。
-     * <p>
-     * 引入有界工作线程池后的收益：
-     * <ul>
-     *   <li>限制单节点并发的任务执行数，防止瞬时触发风暴打爆业务应用；</li>
-     *   <li>超出线程数的触发进入队列排队，队列满则立即返回「executor saturated」失败
-     *       （调度中心可据此观测并扩容副本）；</li>
-     *   <li>任务在独立线程执行后，可按任务 {@code timeoutSeconds} 进行<b>超时强制中断</b>，
-     *       解决「调度中心 HTTP 读超时放弃后，执行器任务永久僵尸运行」的问题；</li>
-     *   <li>任务线程独立命名（orbit-job-worker-N），便于线程 dump 定位。</li>
-     * </ul>
-     * 设为 0 表示退回旧版行为：任务直接在 Web 容器请求线程内执行，无超时强制。
+     *
+     * 有界工作线程池提供：
+     *   - 限制单节点并发的任务执行数，防止瞬时触发风暴打爆业务应用；
+     *   - 超出线程数的触发进入队列排队，队列满则立即返回「executor saturated」失败
+     *       （调度中心可据此观测并扩容副本）；
+     *   - 任务在独立线程执行后，可按任务 {@code timeoutSeconds} 进行超时强制中断，
+     *       解决「调度中心 HTTP 读超时放弃后，执行器任务永久僵尸运行」的问题；
+     *   - 任务线程独立命名（orbit-job-worker-N），便于线程 dump 定位。
+     * 设为 0 表示内联模式：任务直接在 Web 容器请求线程内执行，无超时强制。
      */
     private int workerThreads = 8;
 
     /**
      * 任务排队队列容量（默认 256）。仅当 {@code worker-threads > 0} 时生效。
      * 队列满后新触发立即失败返回，不会再占用请求线程等待。
-     * <p>
-     * 设为 0（或负数，按 0 处理）表示<b>不排队</b>：任务直接交付给工作线程，
+     *
+     * 设为 0（或负数，按 0 处理）表示不排队：任务直接交付给工作线程，
      * 并发数超过 {@code worker-threads} 时立即返回「executor saturated」，
      * 适用于「宁可失败也不要积压」的强实时场景。
      */
@@ -93,6 +91,22 @@ public class ExecutorProperties {
      * 正常情况下调度中心总会下发正的超时值，此项仅为防御性兜底。
      */
     private int maxJobWaitSeconds = 86400;
+
+    /**
+     * 结果回传失败后的重试次数（不含首次发送）。
+     * 回传失败会让调度中心那条日志一直停在 RUNNING 直到孤儿回收，因此默认重试 3 次。
+     */
+    private int callbackRetryTimes = 3;
+
+    /**
+     * 结果回传重试间隔（毫秒），退避等待时间。
+     */
+    private long callbackRetryIntervalMs = 2000;
+
+    /**
+     * 待回传结果的内存队列容量。队列满时丢弃最旧的一条并打 ERROR 日志。
+     */
+    private int callbackQueueCapacity = 1000;
 
     public boolean isEnabled() {
         return enabled;
@@ -180,5 +194,29 @@ public class ExecutorProperties {
 
     public void setMaxJobWaitSeconds(int maxJobWaitSeconds) {
         this.maxJobWaitSeconds = maxJobWaitSeconds;
+    }
+
+    public int getCallbackRetryTimes() {
+        return callbackRetryTimes;
+    }
+
+    public void setCallbackRetryTimes(int callbackRetryTimes) {
+        this.callbackRetryTimes = callbackRetryTimes;
+    }
+
+    public long getCallbackRetryIntervalMs() {
+        return callbackRetryIntervalMs;
+    }
+
+    public void setCallbackRetryIntervalMs(long callbackRetryIntervalMs) {
+        this.callbackRetryIntervalMs = callbackRetryIntervalMs;
+    }
+
+    public int getCallbackQueueCapacity() {
+        return callbackQueueCapacity;
+    }
+
+    public void setCallbackQueueCapacity(int callbackQueueCapacity) {
+        this.callbackQueueCapacity = callbackQueueCapacity;
     }
 }

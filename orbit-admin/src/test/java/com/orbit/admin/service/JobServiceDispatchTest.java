@@ -2,6 +2,7 @@ package com.orbit.admin.service;
 
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.dispatch.ExecutorClient;
+import com.orbit.admin.dispatch.OutstandingDispatches;
 import com.orbit.admin.registry.ExecutorRegistry;
 import com.orbit.admin.store.JobStore;
 import com.orbit.core.model.ExecutorNode;
@@ -10,11 +11,14 @@ import com.orbit.core.model.TriggerResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.quartz.JobKey;
 import org.quartz.Scheduler;
+import org.quartz.JobPersistenceException;
 
 import java.util.Collections;
 import java.util.List;
@@ -36,14 +40,15 @@ import static org.mockito.Mockito.when;
 
 /**
  * {@link JobService} 派发与校验逻辑单元测试（Mock 依赖）。
- * 重点覆盖本轮优化：
- * <ul>
- *   <li>dispatch 单次查询：一次派发只允许调用一次 registry.listByApp（原先为两次）；</li>
- *   <li>failover：首选节点连接拒绝时立即摘除并切换下一个节点；</li>
- *   <li>routeStrategy 合法性校验与规范化；</li>
- *   <li>create 的唯一键竞态兜底（DataIntegrityViolationException → 友好 400 语义）；</li>
- *   <li>timezone 非法值启动失败（fail-fast）。</li>
- * </ul>
+ * 重点覆盖：
+ *   - dispatch 单次查询：一次派发只允许调用一次 registry.listByApp；
+ *   - 异步派发契约：受理回执下日志保持 RUNNING，终态只能由回传收敛；
+ *   - failover：首选节点连接拒绝时立即摘除并切换下一个节点；
+ *   - routeStrategy 合法性校验与规范化；
+ *   - create 的唯一键竞态兜底（DataIntegrityViolationException → 友好 400 语义）；
+ *   - Quartz 编排失败时 create / update 的数据库回滚（不留幽灵任务、不留新旧不一致）；
+ *   - 超出数据库列宽的字段在入参校验阶段被拒绝（400 而非无信息的 500）；
+ *   - timezone 非法值启动失败（fail-fast）。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -59,6 +64,7 @@ class JobServiceDispatchTest {
     private ExecutorClient executorClient;
 
     private AdminProperties properties;
+    private OutstandingDispatches outstanding;
     private JobService jobService;
 
     @BeforeEach
@@ -66,7 +72,8 @@ class JobServiceDispatchTest {
         properties = new AdminProperties();
         properties.setTimezone("Asia/Shanghai");
         properties.setGroup("ORBIT");
-        jobService = new JobService(scheduler, jobStore, registry, executorClient, properties);
+        outstanding = new OutstandingDispatches();
+        jobService = new JobService(scheduler, jobStore, registry, executorClient, properties, outstanding);
     }
 
     private static JobInfo newJob(String name, String appName) {
@@ -96,16 +103,16 @@ class JobServiceDispatchTest {
         when(registry.listByApp("app")).thenReturn(candidates);
         when(registry.route(anyList(), eq("app"), anyString())).thenReturn(candidates.get(0));
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
-                TriggerResult.ok("log-1", 1L, "http://10.0.0.1:8081", 12L, "ok"));
+                TriggerResult.accepted("log-1", 1L, "http://10.0.0.1:8081", "accepted"));
 
         TriggerResult result = jobService.dispatch(job, null);
 
         assertTrue(result.isSuccess());
-        // 核心断言：单次派发只查一次候选列表（优化前 route(appName,...) 内部会再查一次）
+        assertTrue(result.isAccepted());
+        // 核心断言：单次派发只查一次候选列表
         verify(registry, times(1)).listByApp("app");
-        // logId 由 dispatch 内部生成（UUID），用 anyString 匹配；其余参数精确匹配
-        verify(jobStore, times(1)).finishLog(anyString(), eq("SUCCESS"),
-                eq("http://10.0.0.1:8081"), eq(12L), eq("ok"));
+        // 受理回执不代表任务跑完：日志必须保持 RUNNING，一次 finishLog 都不能有
+        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
     }
 
     @Test
@@ -118,16 +125,82 @@ class JobServiceDispatchTest {
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
                 TriggerResult.fail("log-2", 1L, "http://10.0.0.1:8081", 0, "Connection refused"));
         when(executorClient.trigger(eq("http://10.0.0.2:8081"), any())).thenReturn(
-                TriggerResult.ok("log-2", 1L, "http://10.0.0.2:8081", 5L, "ok"));
+                TriggerResult.accepted("log-2", 1L, "http://10.0.0.2:8081", "accepted"));
 
         TriggerResult result = jobService.dispatch(job, null);
 
         assertTrue(result.isSuccess());
+        assertTrue(result.isAccepted());
         // 不可达节点被立即摘除（不等心跳超时）
         verify(registry, times(1)).remove("app", "http://10.0.0.1:8081");
-        // logId 由 dispatch 内部生成（UUID），用 anyString 匹配
-        verify(jobStore, times(1)).finishLog(anyString(), eq("SUCCESS"),
-                eq("http://10.0.0.2:8081"), anyLong(), anyString());
+        // 第二个节点受理成功，日志同样保持 RUNNING 等回传
+        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
+    }
+
+    @Test
+    void dispatchMarksFailedWhenExecutorRejectsTrigger() {
+        JobInfo job = newJob("jobRejected", "app");
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
+        when(registry.route(anyList(), eq("app"), anyString())).thenReturn(null);
+        // 执行器同步失败（饱和、handler 不存在等）：accepted=false
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
+                TriggerResult.fail("log-r", 1L, "http://10.0.0.1:8081", 3L, "executor saturated"));
+
+        TriggerResult result = jobService.dispatch(job, null);
+
+        assertEquals(false, result.isSuccess());
+        assertEquals(false, result.isAccepted());
+        // 不会有回传到达，必须立刻收敛到 FAILED，不能留在 RUNNING 等孤儿回收
+        verify(jobStore, times(1)).finishLog(anyString(), eq("FAILED"),
+                eq("http://10.0.0.1:8081"), anyLong(), eq("executor saturated"));
+    }
+
+    @Test
+    void handleCallbackConvergesRunningLog() {
+        TriggerResult cb = TriggerResult.ok("log-cb", 1L, "http://10.0.0.9:8081", 4321L, "done");
+        when(jobStore.finishLogFromRunning("log-cb", true, "http://10.0.0.9:8081", 4321L, "done"))
+                .thenReturn(true);
+
+        assertTrue(jobService.handleCallback(cb));
+        verify(jobStore, times(1)).finishLogFromRunning("log-cb", true, "http://10.0.0.9:8081", 4321L, "done");
+    }
+
+    @Test
+    void handleCallbackIsIdempotentOnDuplicate() {
+        // 存储层匹配不到 RUNNING 行 -> 返回 false；重复回传不能被当成错误
+        when(jobStore.finishLogFromRunning(anyString(), org.mockito.ArgumentMatchers.anyBoolean(),
+                any(), anyLong(), any())).thenReturn(false);
+        TriggerResult cb = TriggerResult.ok("log-dup", 1L, "n", 1L, "done");
+
+        assertEquals(false, jobService.handleCallback(cb));
+        assertEquals(false, jobService.handleCallback(cb));
+        verify(jobStore, times(2)).finishLogFromRunning(anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(), any(), anyLong(), any());
+    }
+
+    @Test
+    void handleCallbacksProcessesWholeBatchAndCountsApplied() {
+        // 批量里一条有效、一条重复（已被忽略），不能因为其中一条而整批失败
+        when(jobStore.finishLogFromRunning(eq("log-b1"), org.mockito.ArgumentMatchers.anyBoolean(),
+                any(), anyLong(), any())).thenReturn(true);
+        when(jobStore.finishLogFromRunning(eq("log-b2"), org.mockito.ArgumentMatchers.anyBoolean(),
+                any(), anyLong(), any())).thenReturn(false);
+
+        int applied = jobService.handleCallbacks(java.util.Arrays.asList(
+                TriggerResult.ok("log-b1", 1L, "n", 1L, "ok"),
+                TriggerResult.ok("log-b2", 1L, "n", 1L, "ok")));
+
+        assertEquals(1, applied);
+        assertEquals(0, jobService.handleCallbacks(null));
+        assertEquals(0, jobService.handleCallbacks(java.util.Collections.<TriggerResult>emptyList()));
+    }
+
+    @Test
+    void handleCallbackWithoutLogIdIsIgnored() {
+        assertEquals(false, jobService.handleCallback(null));
+        assertEquals(false, jobService.handleCallback(TriggerResult.ok(null, 1L, "n", 0, "x")));
+        verify(jobStore, never()).finishLogFromRunning(anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(), any(), anyLong(), any());
     }
 
     @Test
@@ -194,5 +267,77 @@ class JobServiceDispatchTest {
         when(jobStore.findAllJobs()).thenReturn(Collections.<JobInfo>emptyList());
         jobService.init();
         verify(jobStore, times(1)).findAllJobs();
+    }
+
+    /**
+     * Quartz 编排失败时必须回滚已落库的新任务行：
+     * 否则会留下一条「任务列表里看得见、却永远不会触发」的幽灵任务，
+     * 且每次重启 init() 都会重新装载它并再报一次同样的错。
+     */
+    @Test
+    void createRollsBackWhenQuartzSchedulingFails() throws Exception {
+        JobInfo job = newJob("jobG", "app");
+        when(jobStore.findJobByName("jobG")).thenReturn(Optional.<JobInfo>empty());
+        when(jobStore.saveJob(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(scheduler.checkExists(any(JobKey.class))).thenThrow(new JobPersistenceException("quartz down"));
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class, () -> jobService.create(job));
+
+        assertTrue(ex.getMessage().contains("schedule failed"), ex.getMessage());
+        verify(jobStore, times(1)).deleteJob("jobG");
+    }
+
+    /**
+     * 更新场景的对称保证：Quartz 没换上新计划时，数据库也不能留着新定义，
+     * 否则会出现「接口说已保存、Quartz 仍按旧 cron 跑」的永久不一致。
+     * 同时验证回滚写入的版本号已对齐库里的当前值（否则会被乐观锁判定为冲突）。
+     */
+    @Test
+    void updateRollsBackWhenQuartzSchedulingFails() throws Exception {
+        JobInfo existing = newJob("jobH", "app");
+        existing.setDescription("original");
+        when(jobStore.findJobByName("jobH")).thenReturn(Optional.of(existing));
+        when(jobStore.saveJob(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(scheduler.checkExists(any(JobKey.class))).thenThrow(new JobPersistenceException("quartz down"));
+
+        JobInfo input = newJob("jobH", "app");
+        input.setDescription("updated");
+
+        assertThrows(IllegalStateException.class, () -> jobService.update("jobH", input));
+
+        ArgumentCaptor<JobInfo> captor = ArgumentCaptor.forClass(JobInfo.class);
+        verify(jobStore, times(2)).saveJob(captor.capture());
+        JobInfo rolledBack = captor.getAllValues().get(1);
+        // 第二次写入的必须是「更新前」的定义
+        assertEquals("original", rolledBack.getDescription());
+        // 快照版本号 0 -> 回滚时对齐到库里的当前值 1，避免乐观锁空更新
+        assertEquals(1, rolledBack.getVersion());
+    }
+
+    /**
+     * 超长字段必须在入参校验阶段被拒绝（明确的 400），
+     * 而不是等入库时抛 DataIntegrityViolationException、被压成无信息的 500。
+     */
+    @Test
+    void createRejectsOversizedAppNameAndHandler() {
+        JobInfo longApp = newJob("jobI", "app");
+        longApp.setAppName(repeat('a', 65));   // app_name VARCHAR(64)
+        IllegalArgumentException appEx = assertThrows(IllegalArgumentException.class,
+                () -> jobService.create(longApp));
+        assertTrue(appEx.getMessage().contains("appName too long"), appEx.getMessage());
+
+        JobInfo longHandler = newJob("jobJ", "app");
+        longHandler.setHandler(repeat('h', 129));   // handler VARCHAR(128)
+        IllegalArgumentException handlerEx = assertThrows(IllegalArgumentException.class,
+                () -> jobService.create(longHandler));
+        assertTrue(handlerEx.getMessage().contains("handler too long"), handlerEx.getMessage());
+    }
+
+    private static String repeat(char c, int times) {
+        StringBuilder sb = new StringBuilder(times);
+        for (int i = 0; i < times; i++) {
+            sb.append(c);
+        }
+        return sb.toString();
     }
 }

@@ -28,6 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 // 不替换为默认嵌入式库，沿用 test/resources/application.yml 中 PostgreSQL 兼容模式的 H2（schema.sql 使用 BIGSERIAL）
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({MybatisPlusConfig.class, JobStore.class})
+/**
+ * {@link JobStore} 存储层测试：直接跑在 H2 上并加载真实 schema.sql，
+ * 覆盖任务 CRUD、乐观锁版本冲突、调度日志写入与分页、以及过期日志清理。
+ */
 @Sql(scripts = "/schema.sql", executionPhase = Sql.ExecutionPhase.BEFORE_TEST_METHOD)
 class JobStoreTest {
 
@@ -147,9 +151,9 @@ class JobStoreTest {
 
     @Test
     void rejectUnserializableParams() {
-        // 回归测试：旧实现在序列化失败时返回 null，等于把任务参数静默清空入库 ——
-        // 接口返回 200、任务照常调度，但执行器拿到的是空参数，属于不可观测的故障。
-        // 现要求快速失败并给出明确原因。
+        // 序列化失败必须快速失败并给出明确原因：若吞掉异常返回 null，
+        // 任务参数会被静默清空入库 —— 接口返回 200、任务照常调度，
+        // 但执行器拿到的是空参数，属于不可观测的故障。
         JobInfo job = newJob("badParams");
         java.util.Map<String, Object> params = new java.util.HashMap<String, Object>();
         // Jackson 默认 FAIL_ON_EMPTY_BEANS=true：没有任何可序列化属性的对象会抛异常
@@ -163,8 +167,8 @@ class JobStoreTest {
 
     @Test
     void oversizedMessageIsTruncatedWithinColumnWidth() {
-        // 回归测试：旧实现截断后拼接 "..." 会产生 2003 字符，超出 message VARCHAR(2000)，
-        // 执行器返回长异常堆栈时 finishLog 直接报「value too long」入库失败。
+        // 截断后的总长度（含省略号）必须不超过 message VARCHAR(2000)，
+        // 否则执行器返回长异常堆栈时 finishLog 会报「value too long」入库失败。
         JobInfo job = jobStore.saveJob(newJob("bigMsg"));
         JobLog running = new JobLog();
         running.setLogId("log-big");
@@ -190,14 +194,85 @@ class JobStoreTest {
         insertRunningLog("log-old", new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L));
         insertRunningLog("log-new", new java.util.Date());
 
-        int reaped = jobStore.reapOrphanedRunning(3600 * 1000L, "orphaned running log");
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(3600 * 1000L, 600 * 1000L,
+                java.util.Collections.<String>emptySet(), "hard cap", "executor offline");
 
-        assertEquals(1, reaped);
+        // 返回被回收的 logId：调用方要据此释放这些任务的串行守卫
+        assertEquals(1, reaped.size());
+        assertEquals("log-old", reaped.get(0));
         JobLog old = findByLogId("log-old");
         JobLog fresh = findByLogId("log-new");
         assertEquals("FAILED", old.getStatus());
         assertEquals("RUNNING", fresh.getStatus());
         assertNotNull(old.getEndTime());
+    }
+
+    @Test
+    void reapKeepsRunningJobWhoseExecutorIsStillAlive() {
+        // 执行器还在线、只是任务跑得久：不能判失败（对齐 XXL-JOB findLostJobIds 的 t2.id IS NULL 条件）
+        java.util.Date old = new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L);
+        insertRunningLog("log-alive", old, "http://10.0.0.1:8081");
+
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+                6 * 3600 * 1000L, 600 * 1000L,
+                java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
+
+        assertEquals(0, reaped.size());
+        assertEquals("RUNNING", findByLogId("log-alive").getStatus());
+        // 运行中的日志也应能看到承接节点
+        assertEquals("http://10.0.0.1:8081", findByLogId("log-alive").getExecutorAddress());
+    }
+
+    @Test
+    void reapFailsRunningJobWhoseExecutorWentOffline() {
+        java.util.Date old = new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L);
+        insertRunningLog("log-dead", old, "http://10.0.0.9:8081");
+
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+                6 * 3600 * 1000L, 600 * 1000L,
+                java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
+
+        assertEquals(1, reaped.size());
+        JobLog gone = findByLogId("log-dead");
+        assertEquals("FAILED", gone.getStatus());
+        assertTrue(gone.getMessage().contains("offline"), "got: " + gone.getMessage());
+    }
+
+    @Test
+    void reapHardCapAppliesEvenWhenExecutorIsAlive() {
+        // 硬上界兜底：执行器活着但结果永远回不来时，不能留下永久 RUNNING 的日志
+        java.util.Date old = new java.util.Date(System.currentTimeMillis() - 5 * 3600 * 1000L);
+        insertRunningLog("log-stuck", old, "http://10.0.0.1:8081");
+
+        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+                3600 * 1000L, 600 * 1000L,
+                java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
+
+        assertEquals(1, reaped.size());
+        JobLog stuck = findByLogId("log-stuck");
+        assertEquals("FAILED", stuck.getStatus());
+        assertTrue(stuck.getMessage().contains("hard cap"), "got: " + stuck.getMessage());
+    }
+
+    @Test
+    void finishLogFromRunningOnlyConvergesRunningLogs() {
+        insertRunningLog("log-cb", new java.util.Date());
+
+        // 首次回传：RUNNING -> SUCCESS
+        assertTrue(jobStore.finishLogFromRunning("log-cb", true, "http://10.0.0.1:8081", 123L, "done"));
+        assertEquals("SUCCESS", findByLogId("log-cb").getStatus());
+        assertEquals(123L, findByLogId("log-cb").getCostMs());
+
+        // 重复回传（执行器重试）：已经不是 RUNNING，必须被忽略，不能覆盖真实结果
+        assertEquals(false, jobStore.finishLogFromRunning("log-cb", false, "http://10.0.0.2:8081", 999L, "late fail"));
+        JobLog after = findByLogId("log-cb");
+        assertEquals("SUCCESS", after.getStatus());
+        assertEquals(123L, after.getCostMs());
+    }
+
+    @Test
+    void finishLogFromRunningIgnoresUnknownLogId() {
+        assertEquals(false, jobStore.finishLogFromRunning("log-absent", true, "n", 1L, "x"));
     }
 
     @Test
@@ -218,6 +293,10 @@ class JobStoreTest {
     }
 
     private void insertRunningLog(String logId, java.util.Date startTime) {
+        insertRunningLog(logId, startTime, null);
+    }
+
+    private void insertRunningLog(String logId, java.util.Date startTime, String executorAddress) {
         JobLog running = new JobLog();
         running.setLogId(logId);
         running.setJobName("jobLog");
@@ -226,6 +305,10 @@ class JobStoreTest {
         running.setStatus("RUNNING");
         running.setStartTime(startTime);
         jobStore.insertLog(running);
+        if (executorAddress != null) {
+            // 模拟 dispatch 受理时写入的承接节点
+            jobStore.markDispatched(logId, executorAddress);
+        }
     }
 
     private void insertFinishedLog(String logId, java.util.Date startTime) {

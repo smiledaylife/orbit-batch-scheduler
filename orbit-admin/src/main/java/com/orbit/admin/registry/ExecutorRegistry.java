@@ -5,11 +5,13 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.orbit.admin.config.AdminProperties;
+import com.orbit.admin.store.ColumnLimits;
 import com.orbit.admin.store.mapper.OrbitExecutorRegistryMapper;
 import com.orbit.admin.store.po.OrbitExecutorRegistryPO;
 import com.orbit.core.model.ExecutorNode;
 import com.orbit.core.model.RegistryRequest;
 import com.orbit.core.model.RouteStrategy;
+import com.orbit.core.protocol.OrbitProtocol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -26,15 +28,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 调度中心执行器在线注册表（共享库，对齐 XXL-JOB {@code xxl_job_registry}）。
- * <p>
+ *
  * 心跳 upsert 写入 {@code orbit_executor_registry}，任意 admin 副本读到同一份在线节点。
  * 因此调度中心可用无状态 Deployment + 普通 Service：执行器只需把心跳打到
  * {@code http://orbit-admin:8080}，不必 StatefulSet / Headless DNS 逐副本上报。
  * 轮询游标仍为本进程内存（负载略偏也可接受，各副本独立 ROUND）。
- * <p>
- * 性能设计：读路径（调度派发 / API 查询 / 在线计数）经<b>短 TTL 本地缓存</b>提供，
+ *
+ * 性能设计：读路径（调度派发 / API 查询 / 在线计数）经短 TTL 本地缓存提供，
  * 由 {@code orbit.admin.registry-cache-ttl-ms} 控制（默认 3 秒，0 = 关闭）。
- * 写操作（注册 / 摘除 / 超时剔除）在变更数据库的同时<b>立即失效本进程缓存</b>；
+ * 写操作（注册 / 摘除 / 超时剔除）在变更数据库的同时立即失效本进程缓存；
  * 多副本间的一致性由 TTL 上界保证，命中已下线节点的派发由 failover 兜底。
  */
 @Component
@@ -42,14 +44,17 @@ public class ExecutorRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutorRegistry.class);
 
+    /** handlers 列的 JSON 反序列化目标类型 */
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<List<String>>() {
     };
 
-    /** handlers 列宽（与 schema.sql 的 VARCHAR(2000) 一致），超出时收缩列表防溢出 */
-    private static final int HANDLERS_JSON_MAX_LEN = 2000;
-
+    /** 调度中心配置：提供心跳超时与缓存 TTL */
     private final AdminProperties properties;
+
+    /** 注册表 Mapper */
     private final OrbitExecutorRegistryMapper mapper;
+
+    /** handlers 列的 JSON 编解码器（线程安全，单实例复用） */
     private final ObjectMapper json = new ObjectMapper();
 
     /**
@@ -74,20 +79,31 @@ public class ExecutorRegistry {
      * 注册表本地缓存（不可变快照）。volatile 单引用替换，读无锁。
      */
     private static final class RegistrySnapshot {
+        /** 快照失效时刻（epoch 毫秒），到点后下一次读会重建 */
         final long expiresAtMs;
+        /** 快照内容：按地址升序、已过滤失联节点的不可变列表 */
         final List<ExecutorNode> nodes;
 
+        /**
+         * @param expiresAtMs 失效时刻（epoch 毫秒）
+         * @param nodes       节点列表，调用方保证不可变
+         */
         RegistrySnapshot(long expiresAtMs, List<ExecutorNode> nodes) {
             this.expiresAtMs = expiresAtMs;
             this.nodes = nodes;
         }
     }
 
+    /** 当前生效的缓存快照；null 表示需要重建 */
     private volatile RegistrySnapshot cache;
 
     /** 缓存重建锁：防止过期瞬间的并发重建风暴 */
     private final Object cacheLock = new Object();
 
+    /**
+     * @param properties 调度中心配置，提供心跳超时与缓存 TTL
+     * @param mapper     注册表 Mapper
+     */
     public ExecutorRegistry(AdminProperties properties, OrbitExecutorRegistryMapper mapper) {
         this.properties = properties;
         this.mapper = mapper;
@@ -108,6 +124,11 @@ public class ExecutorRegistry {
         String app = req.getAppName().trim();
         String addr = ExecutorAddressValidator.validateAndNormalize(
                 req.getAddress(), properties.getExecutorAddressAllowPattern());
+        // 列宽前置校验：这三个值都来自执行器上报，超长会让每一轮心跳都以 SQL 异常失败，
+        // 且日志里只有一句被截断的驱动报错。这里直接给出字段名与上限，便于定位到具体配置项。
+        ColumnLimits.requireMaxLength("appName", app, ColumnLimits.REG_APP_NAME);
+        ColumnLimits.requireMaxLength("address", addr, ColumnLimits.REG_ADDRESS);
+        ColumnLimits.requireMaxLength("nodeId", req.getNodeId(), ColumnLimits.REG_NODE_ID);
         Date now = new Date();
         String handlersJson = toHandlersJson(req.getHandlers());
 
@@ -148,7 +169,7 @@ public class ExecutorRegistry {
         if (appName == null || address == null) {
             return;
         }
-        String addr = trimSlash(address.trim());
+        String addr = OrbitProtocol.trimTrailingSlash(address.trim());
         int deleted = mapper.delete(new LambdaQueryWrapper<OrbitExecutorRegistryPO>()
                 .eq(OrbitExecutorRegistryPO::getAppName, appName.trim())
                 .eq(OrbitExecutorRegistryPO::getAddress, addr));
@@ -161,7 +182,7 @@ public class ExecutorRegistry {
      * 物理删除心跳超时的失联节点。
      */
     public int evictExpired() {
-        Date cutoff = new Date(System.currentTimeMillis() - properties.getHeartbeatTimeoutSeconds() * 1000L);
+        Date cutoff = new Date(System.currentTimeMillis() - heartbeatTimeoutMs());
         int deleted = mapper.delete(new LambdaQueryWrapper<OrbitExecutorRegistryPO>()
                 .lt(OrbitExecutorRegistryPO::getLastHeartbeat, cutoff));
         if (deleted > 0) {
@@ -196,17 +217,9 @@ public class ExecutorRegistry {
         return matched;
     }
 
-    /**
-     * 便捷路由入口：自行查询候选列表并按策略选点（保留旧 API）。
-     * 热路径（任务派发）请改用 {@link #route(List, String, String)} 复用已查出的候选列表，
-     * 避免一次派发查两遍库。
-     */
-    public ExecutorNode route(String appName, String strategy) {
-        return route(listByApp(appName), appName, strategy);
-    }
 
     /**
-     * 在<b>已查出的候选列表</b>上按路由策略选点。
+     * 在已查出的候选列表上按路由策略选点。
      * 新增该方法使 {@code dispatch} 能以一次数据库（或缓存）查询完成「取候选 + 选起点」。
      *
      * @param candidates 候选节点列表（非空时生效）
@@ -229,7 +242,7 @@ public class ExecutorRegistry {
             return candidates.get(0);
         }
 
-        // ROUND（含未知策略的历史数据，与旧行为一致：按轮询处理）
+        // ROUND（未知策略同样按轮询处理，兼容库里已有的历史数据）
         AtomicInteger cursor = roundRobin.computeIfAbsent(appName, k -> new AtomicInteger(0));
         int idx = Math.floorMod(cursor.getAndIncrement(), candidates.size());
         return candidates.get(idx);
@@ -270,15 +283,17 @@ public class ExecutorRegistry {
     }
 
     /**
-     * 从数据库加载快照（按地址升序，与既有排序语义一致）。
+     * 从数据库加载快照，并在内存里按地址升序排列。
+     *
+     * 排序只在内存做一次：BY_ADDRESS 对 null 地址有确定语义，而各数据库 ASC 的 NULL 位置并不一致，
+     * 交给 SQL 排反而要额外约束；在线节点数量级为几十到几百，内存排序成本可忽略。
      *
      * @param ttl 缓存有效期（毫秒）；&lt;=0 表示不做缓存复用
      */
     private RegistrySnapshot loadSnapshot(long ttl) {
         List<OrbitExecutorRegistryPO> rows = mapper.selectList(
                 new LambdaQueryWrapper<OrbitExecutorRegistryPO>()
-                        .ge(OrbitExecutorRegistryPO::getLastHeartbeat, aliveSince())
-                        .orderByAsc(OrbitExecutorRegistryPO::getAddress));
+                        .ge(OrbitExecutorRegistryPO::getLastHeartbeat, aliveSince()));
         List<ExecutorNode> nodes = new ArrayList<ExecutorNode>(rows.size());
         for (OrbitExecutorRegistryPO po : rows) {
             nodes.add(toNode(po));
@@ -295,12 +310,35 @@ public class ExecutorRegistry {
         cache = null;
     }
 
+    /**
+     * 存活判定的心跳下界：早于该时刻的心跳一律视为失联。
+     *
+     * @return now − heartbeatTimeoutMs()
+     */
     private Date aliveSince() {
-        return new Date(System.currentTimeMillis() - properties.getHeartbeatTimeoutSeconds() * 1000L);
+        return new Date(System.currentTimeMillis() - heartbeatTimeoutMs());
+    }
+
+    /**
+     * 心跳超时时长（毫秒），下限 5 秒。
+     *
+     * 该项直接来自配置且没有下限保护：配成 0 或负数时 cutoff 会落到当前时刻甚至未来，
+     * evictExpired 会在每一轮扫描里删掉整张注册表，aliveSince 则让所有节点都查不出来 ——
+     * 表现为「执行器明明在心跳，调度中心却说没有在线执行器」，且没有任何报错。
+     */
+    private long heartbeatTimeoutMs() {
+        int seconds = properties.getHeartbeatTimeoutSeconds();
+        return (seconds < 5 ? 5 : seconds) * 1000L;
     }
 
     // ============================ 转换与工具 ============================
 
+    /**
+     * 把注册表 PO 转成对外的节点模型，顺带把 handlers 列的 JSON 解成列表。
+     *
+     * @param po 数据库行
+     * @return 节点模型
+     */
     private ExecutorNode toNode(OrbitExecutorRegistryPO po) {
         ExecutorNode node = new ExecutorNode();
         node.setAppName(po.getAppName());
@@ -315,22 +353,22 @@ public class ExecutorRegistry {
     /**
      * 序列化 handler 列表为 JSON，并确保不超过 {@code handlers} 列宽（2000）。
      * 超出时自尾部收缩列表直至可完整入库——否则海量 handler 的执行器心跳会因
-     * DataIntegrityViolationException 而<b>永久注册失败</b>（每轮心跳都撞列宽）。
+     * DataIntegrityViolationException 而永久注册失败（每轮心跳都撞列宽）。
      */
     private String toHandlersJson(List<String> handlers) {
         List<String> src = handlers == null ? Collections.<String>emptyList() : handlers;
         try {
             String s = json.writeValueAsString(src);
-            if (s.length() <= HANDLERS_JSON_MAX_LEN) {
+            if (s.length() <= ColumnLimits.REG_HANDLERS_JSON) {
                 return s;
             }
             List<String> shrink = new ArrayList<String>(src);
             while (!shrink.isEmpty()) {
                 shrink.remove(shrink.size() - 1);
                 s = json.writeValueAsString(shrink);
-                if (s.length() <= HANDLERS_JSON_MAX_LEN) {
+                if (s.length() <= ColumnLimits.REG_HANDLERS_JSON) {
                     log.warn("[orbit-admin] handlers json exceeds column width {}, truncated to {} entries",
-                            HANDLERS_JSON_MAX_LEN, shrink.size());
+                            ColumnLimits.REG_HANDLERS_JSON, shrink.size());
                     return s;
                 }
             }
@@ -340,6 +378,15 @@ public class ExecutorRegistry {
         }
     }
 
+    /**
+     * 解析 handlers 列的 JSON 数组。
+     *
+     * 空值、空串与非法 JSON 都返回空列表而不是抛异常：注册表里可能有历史脏数据，
+     * 一个坏节点不应该让整次路由查询失败。
+     *
+     * @param raw handlers 列原始字符串
+     * @return handler 名称列表，解析不出时为空列表
+     */
     private List<String> parseHandlers(String raw) {
         if (raw == null || raw.trim().isEmpty()) {
             return Collections.emptyList();
@@ -352,7 +399,5 @@ public class ExecutorRegistry {
         }
     }
 
-    private static String trimSlash(String s) {
-        return s.endsWith("/") && s.length() > 1 ? s.substring(0, s.length() - 1) : s;
-    }
+
 }

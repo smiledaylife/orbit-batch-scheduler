@@ -102,7 +102,7 @@
           Quartz 2.5.x 的连接池依赖（c3p0 / HikariCP）在其自身 POM 中为 provided 作用域。
           默认使用内存 JobStore（spring.quartz.job-store-type=memory），无需连接池。
 
-          【修正】切换为 JDBC JobStore（集群模式）时，也不需要引入 c3p0 / HikariCP：
+          切换为 JDBC JobStore（集群模式）时同样不需要 c3p0 / HikariCP：
           Spring Boot 2.7.18 的 QuartzAutoConfiguration.JdbcStoreTypeConfiguration 会调用
           schedulerFactoryBean.setDataSource(dataSource)，让 Quartz 直接复用 Spring 管理的
           DataSource（本项目即 druid-spring-boot-starter 提供的 Druid 连接池），
@@ -188,7 +188,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>${maven-surefire-plugin.version}</version>
             </plugin>
-            <!-- 不再继承 spring-boot-starter-parent，需显式声明版本与 repackage 执行，才能产出可执行 jar -->
+            <!-- 本模块不继承 spring-boot-starter-parent，因此需显式声明版本与 repackage 执行，才能产出可执行 jar -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

@@ -2,8 +2,10 @@ package com.orbit.admin.service;
 
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.dispatch.ExecutorClient;
+import com.orbit.admin.dispatch.OutstandingDispatches;
 import com.orbit.admin.quartz.OrbitQuartzJob;
 import com.orbit.admin.registry.ExecutorRegistry;
+import com.orbit.admin.store.ColumnLimits;
 import com.orbit.admin.store.JobStore;
 import com.orbit.core.model.ExecutorNode;
 import com.orbit.core.model.JobInfo;
@@ -46,11 +48,11 @@ import java.util.UUID;
 /**
  * 调度中心核心业务服务。
  * 核心职责：
- * 
+ *
  *   - 任务元数据生命周期管理（CRUD、校验、状态控制）；
  *   - Quartz 定时任务的动态编排、启动加载、Cron 动态刷新、暂停与恢复；
  *   - 任务统一派发（分发）：生成日志追踪链路 ID、按路由策略寻址、向执行器派发 HTTP 触发请求、记录执行日志与耗时。
- * 
+ *
  */
 @Service
 public class JobService {
@@ -63,13 +65,26 @@ public class JobService {
     private final ExecutorClient executorClient;
     private final AdminProperties properties;
 
+    /** 在途执行登记簿：串行守卫的占用与释放，见 {@link OutstandingDispatches} */
+    private final OutstandingDispatches outstanding;
+
+    /**
+     * @param scheduler      Quartz 调度器，任务的注册/暂停/恢复都作用在它上面
+     * @param jobStore       任务与日志存储
+     * @param registry       执行器注册表，派发时按策略选点
+     * @param executorClient 执行器 HTTP 客户端
+     * @param properties     调度中心配置，提供分组名与超时上限
+     * @param outstanding    在途执行登记簿，同名任务串行守卫的依据
+     */
     public JobService(Scheduler scheduler, JobStore jobStore, ExecutorRegistry registry,
-                      ExecutorClient executorClient, AdminProperties properties) {
+                      ExecutorClient executorClient, AdminProperties properties,
+                      OutstandingDispatches outstanding) {
         this.scheduler = scheduler;
         this.jobStore = jobStore;
         this.registry = registry;
         this.executorClient = executorClient;
         this.properties = properties;
+        this.outstanding = outstanding;
     }
 
     /**
@@ -91,8 +106,8 @@ public class JobService {
         try {
             jobs = jobStore.findAllJobs();
         } catch (Exception e) {
-            // 读库失败意味着依赖不可用。原先这里把异常整体吞掉，会让调度中心
-            // 以「零调度但一切正常」的姿态启动，属于静默故障 —— 改为让启动失败。
+            // 读库失败意味着依赖不可用：让启动直接失败，
+            // 避免调度中心以「零调度但一切正常」的姿态静默启动。
             throw new IllegalStateException("[orbit-admin] failed to load jobs on startup", e);
         }
 
@@ -130,16 +145,44 @@ public class JobService {
             throw new IllegalArgumentException("job already exists: " + input.getJobName());
         }
 
+        JobInfo saved;
         try {
             // 保存至数据库
-            JobInfo saved = jobStore.saveJob(input);
-            // 同步应用到 Quartz 调度器
-            applySchedule(saved);
-            return saved;
+            saved = jobStore.saveJob(input);
         } catch (DataIntegrityViolationException dup) {
             // check-then-act 竞态兜底：并发创建同名任务时，唯一约束保证只有一个胜出者，
             // 败者在此转换为与串行路径一致的友好错误（否则会以裸 500 暴露给调用方）。
             throw new IllegalArgumentException("job already exists: " + input.getJobName());
+        }
+
+        try {
+            // 同步应用到 Quartz 调度器
+            applySchedule(saved);
+        } catch (RuntimeException scheduleFailed) {
+            // DB 与 Quartz 必须同生共死：编排失败就回滚刚写入的行，
+            // 否则会留下一条「任务列表里看得见、却永远不会触发」的幽灵任务，
+            // 且每次重启 init() 都会重新装载它、再报一次同样的错。
+            // 回滚之后，接口失败 == 什么都没发生。
+            rollbackCreatedJob(saved);
+            throw scheduleFailed;
+        }
+        return saved;
+    }
+
+    /**
+     * 回滚「已落库但 Quartz 编排失败」的新建任务。
+     * 回滚自身失败只记录不外抛，避免覆盖掉原始的调度失败原因。
+     *
+     * @param saved 已写入数据库的任务
+     */
+    private void rollbackCreatedJob(JobInfo saved) {
+        try {
+            jobStore.deleteJob(saved.getJobName());
+            log.warn("[orbit-admin] job {} rolled back from db because quartz scheduling failed",
+                    saved.getJobName());
+        } catch (Exception rollbackFailed) {
+            log.error("[orbit-admin] failed to roll back job {} after schedule failure",
+                    saved.getJobName(), rollbackFailed);
         }
     }
 
@@ -155,6 +198,10 @@ public class JobService {
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + jobName));
         validate(input, false);
 
+        // 更新前的快照：Quartz 编排失败时据此把库里的定义恢复原状。
+        // 必须在覆盖字段之前取，否则快照拿到的就是新值。
+        JobInfo snapshot = snapshotOf(existing);
+
         existing.setDescription(input.getDescription());
         existing.setAppName(input.getAppName());
         existing.setHandler(input.getHandler());
@@ -165,8 +212,63 @@ public class JobService {
         existing.setEnabled(input.isEnabled());
 
         JobInfo saved = jobStore.saveJob(existing);
-        applySchedule(saved);
+        try {
+            applySchedule(saved);
+        } catch (RuntimeException scheduleFailed) {
+            // 与 create 对称：Quartz 没换上新计划时，数据库也不能留着一份
+            // 「接口说已保存、Quartz 却仍按旧 cron 跑」的新定义，否则两边永久不一致。
+            rollbackUpdatedJob(snapshot);
+            throw scheduleFailed;
+        }
         return saved;
+    }
+
+    /**
+     * 生成任务定义的快照（params 做防御性拷贝），用于 Quartz 编排失败时回滚。
+     *
+     * @param source 源任务
+     * @return 与源任务字段一致、但相互独立的副本
+     */
+    private static JobInfo snapshotOf(JobInfo source) {
+        JobInfo copy = new JobInfo();
+        copy.setId(source.getId());
+        copy.setJobName(source.getJobName());
+        copy.setDescription(source.getDescription());
+        copy.setAppName(source.getAppName());
+        copy.setHandler(source.getHandler());
+        copy.setCron(source.getCron());
+        copy.setParams(source.getParams() == null ? null : new HashMap<String, Object>(source.getParams()));
+        copy.setTimeoutSeconds(source.getTimeoutSeconds());
+        copy.setRouteStrategy(source.getRouteStrategy());
+        copy.setEnabled(source.isEnabled());
+        copy.setVersion(source.getVersion());
+        copy.setCreatedAt(source.getCreatedAt());
+        copy.setUpdatedAt(source.getUpdatedAt());
+        return copy;
+    }
+
+    /**
+     * 回滚一次失败的更新：把数据库行与 Quartz 计划一起恢复到更新前的状态。
+     *
+     * 版本号处理：第一次 {@code saveJob} 已经把库里的 version 从 N 抬到 N+1，
+     * 而快照里仍是 N，直接回写会被乐观锁判定为并发冲突（影响 0 行 → 抛异常）。
+     * 因此回滚前先把快照版本号对齐到库里当前的值。
+     *
+     * 回滚自身失败只记录不外抛，避免覆盖掉原始的调度失败原因。
+     *
+     * @param snapshot 更新前的任务定义
+     */
+    private void rollbackUpdatedJob(JobInfo snapshot) {
+        try {
+            snapshot.setVersion(snapshot.getVersion() + 1);
+            jobStore.saveJob(snapshot);
+            applySchedule(snapshot);
+            log.warn("[orbit-admin] job {} rolled back to its previous definition "
+                    + "because quartz scheduling failed", snapshot.getJobName());
+        } catch (Exception rollbackFailed) {
+            log.error("[orbit-admin] failed to roll back job {} after schedule failure",
+                    snapshot.getJobName(), rollbackFailed);
+        }
     }
 
     /**
@@ -178,9 +280,9 @@ public class JobService {
         jobStore.findJobByName(jobName)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + jobName));
         // 以数据库为唯一事实来源：先删库，再清理 Quartz。
-        // 原先 Quartz 清理失败会抛异常，但此时 DB 行已删除 —— 接口报错却已生效，
+        // Quartz 清理失败仅记日志：DB 行已删除，此时抛异常等于「接口报错但改动已生效」，
         // 调用方重试只会得到 "job not found"，两边状态对不上。
-        // 改为 Quartz 失败仅记日志：DB 已无该任务，重启后 init() 也不会再装载它。
+        // DB 已无该任务，重启后 init() 也不会再装载它。
         jobStore.deleteJob(jobName);
         try {
             scheduler.deleteJob(jobKey(jobName));
@@ -264,14 +366,117 @@ public class JobService {
     }
 
     /**
+     * 记录一次「未能派发」的触发。
+     * 调度侧派发通道饱和时由 {@link com.orbit.admin.dispatch.DispatchExecutor} 调用：
+     * 直接落一条 FAILED 终态日志，让 /logs 里每次 Cron 到点都有记录，
+     * 否则「派发被拒绝」与「任务根本没被触发」在观测上无法区分。
+     *
+     * @param job    任务定义
+     * @param reason 未派发的原因
+     */
+    /**
+     * 处理执行器回传的执行结果，把对应的 RUNNING 日志收敛到终态。
+     *
+     * 幂等性由存储层保证：只有 status = RUNNING 的日志才会被更新，
+     * 因此执行器重试、重复回传、以及与孤儿回收的竞态都不会覆盖已经写入的真实结果。
+     * 无论本次是否真的发生状态转换，都会释放该 logId 占用的串行守卫 ——
+     * 释放本身是幂等的，而漏放会让任务永久无法再被触发。
+     *
+     * @param result 执行器回传的最终结果
+     * @return 是否真的完成了 RUNNING -> 终态的转换（false 表示日志已不是 RUNNING，本次回传被忽略）
+     */
+    /**
+     * 处理执行器批量回传的一批执行结果。
+     *
+     * 执行器会把积压的结果打包成一个请求发送，因此这里是逐条处理、逐条幂等，
+     * 单条被忽略（重复回传或已被回收）不影响同批其余结果。
+     *
+     * @param results 执行器回传的一批最终结果
+     * @return 其中真正完成 RUNNING -> 终态 转换的条数
+     */
+    public int handleCallbacks(List<TriggerResult> results) {
+        if (results == null || results.isEmpty()) {
+            return 0;
+        }
+        int applied = 0;
+        for (TriggerResult result : results) {
+            if (handleCallback(result)) {
+                applied++;
+            }
+        }
+        if (results.size() > 1) {
+            log.info("[orbit-admin] callback batch of {} item(s), {} applied", results.size(), applied);
+        }
+        return applied;
+    }
+
+    /**
+     * 处理单条执行结果回传：把 RUNNING 日志收敛为终态，并释放在途登记簿。
+     *
+     * 收敛是条件更新（{@code WHERE log_id=? AND status='RUNNING'}），所以重复回传、
+     * 回传与孤儿回收的竞态都不会覆盖已写入的结果，只是返回 false 表示本次未生效。
+     * 无论是否生效都会释放在途登记 —— 日志已不在 RUNNING，串行守卫没有理由继续占用。
+     *
+     * @param result 执行结果，为 null 或缺 logId 时忽略
+     * @return 是否真正把日志从 RUNNING 收敛为终态
+     */
+    public boolean handleCallback(TriggerResult result) {
+        if (result == null || result.getLogId() == null || result.getLogId().trim().isEmpty()) {
+            log.warn("[orbit-admin] callback without logId ignored");
+            return false;
+        }
+        String logId = result.getLogId().trim();
+        boolean applied;
+        try {
+            applied = jobStore.finishLogFromRunning(logId, result.isSuccess(), result.getWorkerNode(),
+                    result.getCostMs(), result.getMessage());
+        } finally {
+            outstanding.release(logId);
+        }
+        if (applied) {
+            log.info("[orbit-admin] callback logId={} job={} success={} {}ms",
+                    logId, result.getJobId(), result.isSuccess(), result.getCostMs());
+        } else {
+            log.info("[orbit-admin] callback for logId={} ignored: log is no longer RUNNING "
+                    + "(duplicate callback or already reaped)", logId);
+        }
+        return applied;
+    }
+
+    /**
+     * 为被拒绝的派发补一条终态日志。
+     *
+     * 触发线程池饱和时任务根本没进队列，不会有执行器回传；不补这条日志，
+     * 这次调度在日志里就完全没有痕迹，只能从 {@code /overview} 的 dispatchRejected 计数间接看到。
+     *
+     * @param job    被拒绝的任务
+     * @param reason 拒绝原因，写入日志 message
+     */
+    public void recordRejectedDispatch(JobInfo job, String reason) {
+        Date now = new Date();
+        JobLog rejected = new JobLog();
+        rejected.setLogId(UUID.randomUUID().toString().replace("-", ""));
+        rejected.setJobId(job.getId());
+        rejected.setJobName(job.getJobName());
+        rejected.setAppName(job.getAppName());
+        rejected.setHandler(job.getHandler());
+        rejected.setStatus(JobLogStatus.FAILED);
+        rejected.setMessage(reason);
+        rejected.setCostMs(0);
+        rejected.setStartTime(now);
+        rejected.setEndTime(now);
+        jobStore.insertLog(rejected);
+    }
+
+    /**
      * 调度中心统一派发执行逻辑（无论是 Quartz 定时触发还是手动触发，均走本方法）。
-     * 
+     *
      *   - 生成全链路唯一追踪日志 ID，初始化 RUNNING 状态日志入库；
      *   - 从注册表中根据任务路由策略选取一个在线执行器节点；
      *   - 若无可用节点，更新日志为 FAILED 并终止；
      *   - 合并静态参数与动态参数，通过 HTTP 调用执行器端 /run 接口；
      *   - 计算本次调用耗时，根据执行结果更新日志状态为 SUCCESS 或 FAILED。
-     * 
+     *
      * @param job         任务元数据
      * @param extraParams 单次触发传入的覆盖参数（可为空）
      * @return 任务执行结果
@@ -308,8 +513,7 @@ public class JobService {
             // 先按路由策略选起点，再对剩余节点做故障转移：
             // Pod 重建后 IP/Pod 名都会变，旧地址在心跳超时前仍在表里；
             // 连不上就立刻摘除并换下一个（对齐 XXL-JOB FAILOVER）。
-            // 优化：直接在已查出的 candidates 上选点（原先 route(appName,...) 内部
-            // 会再执行一次 listByApp，每次派发实际查两遍库/缓存）。
+            // 直接在已查出的 candidates 上选点，避免一次派发查两遍库/缓存。
             ExecutorNode preferred = registry.route(candidates, job.getAppName(), job.getRouteStrategy());
             if (preferred != null) {
                 candidates = rotateToFront(candidates, preferred.getAddress());
@@ -347,12 +551,25 @@ public class JobService {
                 break;
             }
 
-            long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
-            String status = result.isSuccess() ? JobLogStatus.SUCCESS : JobLogStatus.FAILED;
             String address = node == null ? null : node.getAddress();
-            jobStore.finishLog(logId, status, address, cost, result.getMessage());
-            log.info("[orbit-admin] job={} -> {} @ {} status={} {}ms",
-                    job.getJobName(), job.getHandler(), address, status, cost);
+
+            // 受理回执：执行器已入队、任务开始异步执行。日志必须保持 RUNNING，
+            // 等执行器回传 /orbit/admin/callback 时再由 handleCallback 收敛到终态。
+            // 此处若误判为终态，长任务会在真正跑完前就被记成 SUCCESS/FAILED。
+            if (result.isAccepted()) {
+                // 立刻记录承接节点：孤儿回收靠它判断执行器是否还活着
+                jobStore.markDispatched(logId, address);
+                log.info("[orbit-admin] job={} -> {} @ {} accepted, awaiting callback (logId={})",
+                        job.getJobName(), job.getHandler(), address, logId);
+                return result;
+            }
+
+            // 触发同步失败（执行器不可达、执行器饱和、路由失败等）：日志立刻收敛到 FAILED，
+            // 不会有回传到达，因此不能留在 RUNNING 等孤儿回收。
+            long cost = result.getCostMs() > 0 ? result.getCostMs() : (System.currentTimeMillis() - start.getTime());
+            jobStore.finishLog(logId, JobLogStatus.FAILED, address, cost, result.getMessage());
+            log.warn("[orbit-admin] job={} -> {} @ {} trigger rejected: {}",
+                    job.getJobName(), job.getHandler(), address, result.getMessage());
             return result;
         } catch (RuntimeException e) {
             String address = node == null ? null : node.getAddress();
@@ -552,6 +769,12 @@ public class JobService {
                 || m.contains("connection reset");
     }
 
+    /**
+     * 按名取任务，不存在时抛 {@link IllegalArgumentException}（由 Controller 的异常处理器转成 404/400）。
+     *
+     * @param name 任务名
+     * @return 任务元数据
+     */
     private JobInfo require(String name) {
         return jobStore.findJobByName(name)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + name));
@@ -575,12 +798,16 @@ public class JobService {
         if (job.getHandler() == null || job.getHandler().trim().isEmpty()) {
             throw new IllegalArgumentException("handler required");
         }
+        // 列宽前置校验：超长值在此以 400 拒绝，而不是等入库失败后只剩一句 internal error
+        ColumnLimits.requireMaxLength("appName", job.getAppName(), ColumnLimits.JOB_APP_NAME);
+        ColumnLimits.requireMaxLength("handler", job.getHandler(), ColumnLimits.JOB_HANDLER);
         if (job.getCron() != null && !job.getCron().trim().isEmpty()
                 && !CronExpression.isValidExpression(job.getCron())) {
             throw new IllegalArgumentException("invalid cron: " + job.getCron());
         }
-        // 路由策略：空值回填 ROUND；非空时必须属于合法集合（原先任意字符串都被
-        // 静默当作 ROUND 处理，排拼错误只能在事后翻日志发现），统一规范化为大写存储。
+        ColumnLimits.requireMaxLength("cron", job.getCron(), ColumnLimits.JOB_CRON_EXPR);
+        // 路由策略：空值回填 ROUND；非空时必须属于合法集合（拼错的策略在此直接拒绝，
+        // 而不是静默按 ROUND 处理、只能事后翻日志才发现），统一规范化为大写存储。
         if (job.getRouteStrategy() == null || job.getRouteStrategy().trim().isEmpty()) {
             job.setRouteStrategy(RouteStrategy.ROUND);
         } else {
@@ -596,7 +823,8 @@ public class JobService {
         if (job.getTimeoutSeconds() <= 0) {
             job.setTimeoutSeconds(300);
         }
-        // 按全局上限封顶：派发是同步阻塞的，无上限的 timeoutSeconds 会让单次调用
+        // 按全局上限封顶：该值随触发下发给执行器做超时强制，也是孤儿回收硬上界的基准，
+        // 无上限会让单个任务的超时口径脱离调度中心的回收阈值。
         // 长时间占住 Tomcat 线程（手动触发）或 Quartz 工作线程（定时触发）。
         int maxTimeout = properties.getMaxTimeoutSeconds();
         if (maxTimeout > 0 && job.getTimeoutSeconds() > maxTimeout) {
@@ -606,10 +834,22 @@ public class JobService {
         }
     }
 
+    /**
+     * 构造 Quartz 的 JobKey：任务名 + 配置的分组名。
+     *
+     * @param name 任务名
+     * @return JobKey
+     */
     private JobKey jobKey(String name) {
         return JobKey.jobKey(name, properties.getGroup());
     }
 
+    /**
+     * 构造 Quartz 的 TriggerKey：与 JobKey 同名同组，一个任务对应一个触发器。
+     *
+     * @param name 任务名
+     * @return TriggerKey
+     */
     private TriggerKey triggerKey(String name) {
         return TriggerKey.triggerKey(name, properties.getGroup());
     }

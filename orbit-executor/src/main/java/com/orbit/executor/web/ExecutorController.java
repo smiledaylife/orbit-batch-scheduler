@@ -1,6 +1,7 @@
 package com.orbit.executor.web;
 
 import com.orbit.core.model.ApiResult;
+import com.orbit.core.protocol.OrbitProtocol;
 import com.orbit.core.model.TriggerRequest;
 import com.orbit.core.model.TriggerResult;
 import com.orbit.executor.bootstrap.ExecutorBootstrap;
@@ -19,8 +20,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -30,7 +29,8 @@ import java.util.Map;
  *
  *   - 接收调度中心派发的任务触发请求（{@code POST /orbit/executor/run}）；
  *   - 校验安全访问令牌（{@code X-Orbit-Token}）；
- *   - 委托 {@link JobExecutionService} 在有界工作线程池中执行任务（含超时强制与饱和保护）；
+ *   - 委托 {@link JobExecutionService} 受理触发：入队后立即返回受理回执，
+ *       业务方法在工作线程池中异步执行，结果由回传客户端推回调度中心；
  *   - 提供当前节点在线信息与支持的 Handler 查询端点（{@code GET /orbit/executor/handlers}，同样受令牌保护）。
  *
  */
@@ -39,11 +39,6 @@ import java.util.Map;
 public class ExecutorController {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutorController.class);
-
-    /**
-     * 安全鉴权请求头名称
-     */
-    public static final String TOKEN_HEADER = "X-Orbit-Token";
 
     private final JobHandlerRegistry registry;
     private final ExecutorProperties properties;
@@ -67,17 +62,21 @@ public class ExecutorController {
     }
 
     /**
-     * 接收调度中心的任务触发执行请求。
+     * 接收调度中心的任务触发请求。
+     *
+     * 本接口是异步契约：返回值只表示「是否受理」，accepted=true 表示任务已入队、尚未执行完毕，
+     * 任务的真实成败由执行器通过 {@code POST /orbit/admin/callback} 异步回传。
+     * 因此这里的响应时间与任务耗时无关，调度中心不必为长任务长时间占住连接。
      *
      * @param request 任务触发参数实体
      * @param token   HTTP Header 中的鉴权令牌
-     * @return 任务执行结果
+     * @return 受理回执；线程池饱和时返回同步失败结果
      */
     @PostMapping("/run")
     public TriggerResult run(@RequestBody TriggerRequest request,
-                             @RequestHeader(value = TOKEN_HEADER, required = false) String token) {
+                             @RequestHeader(value = OrbitProtocol.TOKEN_HEADER, required = false) String token) {
         // 1. 安全访问令牌校验
-        checkToken(token, request.getAccessToken());
+        checkToken(token);
 
         String handler = request.getHandler();
         String node = bootstrap.getResolvedNodeId() == null ? "executor" : bootstrap.getResolvedNodeId();
@@ -93,8 +92,8 @@ public class ExecutorController {
                     "handler not found on this executor: " + handler);
         }
 
-        // 4. 委托执行服务：有界线程池 + 超时强制 + 饱和保护
-        return executionService.execute(request, registry, node);
+        // 4. 委托执行服务受理：入队即返回，结果异步回传
+        return executionService.submit(request, registry, node);
     }
 
     /**
@@ -105,8 +104,9 @@ public class ExecutorController {
      * @return 执行器概况与 Handler 列表数据
      */
     @GetMapping("/handlers")
-    public Map<String, Object> handlers(@RequestHeader(value = TOKEN_HEADER, required = false) String token) {
-        checkToken(token, null);
+    public Map<String, Object> handlers(
+            @RequestHeader(value = OrbitProtocol.TOKEN_HEADER, required = false) String token) {
+        checkToken(token);
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("appName", properties.getAppName());
         m.put("address", bootstrap.getResolvedAddress());
@@ -124,36 +124,24 @@ public class ExecutorController {
     @ExceptionHandler(IllegalArgumentException.class)
     @ResponseStatus(HttpStatus.FORBIDDEN)
     public ApiResult<Void> forbidden(IllegalArgumentException e) {
+        // 令牌校验是这里唯一会抛 IllegalArgumentException 的地方：参数校验走 TriggerResult.fail 返回
+        log.warn("[orbit-executor] rejected unauthorized request: {}", e.getMessage());
         return ApiResult.fail(403, e.getMessage());
     }
 
     /**
-     * 双向安全令牌校验逻辑。
-     * 若本地未配置 accessToken，则跳过校验；若配置了 accessToken，优先比对 Header 中的 Token，其次比对 Body 中的 Token。
-     * 比对使用常量时间算法（{@link MessageDigest#isEqual}），抵御时序侧信道逐字节猜测令牌。
+     * 校验安全令牌：未配置 accessToken 时跳过校验。
+     * 比对使用常量时间算法，抵御时序侧信道逐字节猜测令牌。
      *
      * @param header Header 携带的令牌
-     * @param body   Body 携带的令牌
      */
-    private void checkToken(String header, String body) {
+    private void checkToken(String header) {
         String expect = properties.getAccessToken();
         if (expect == null || expect.isEmpty()) {
             return;
         }
-        String actual = header != null && !header.isEmpty() ? header : body;
-        if (!constantTimeEquals(expect, actual)) {
+        if (!OrbitProtocol.constantTimeEquals(expect, header)) {
             throw new IllegalArgumentException("invalid access token");
         }
-    }
-
-    /**
-     * 常量时间字符串比对：除不等长立即返回 false 之外，逐字节比较耗时与内容无关。
-     */
-    static boolean constantTimeEquals(String a, String b) {
-        if (a == null || b == null) {
-            return false;
-        }
-        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8),
-                b.getBytes(StandardCharsets.UTF_8));
     }
 }

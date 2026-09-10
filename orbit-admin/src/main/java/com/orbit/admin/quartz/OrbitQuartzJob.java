@@ -1,9 +1,8 @@
 package com.orbit.admin.quartz;
 
-import com.orbit.admin.service.JobService;
+import com.orbit.admin.dispatch.DispatchExecutor;
 import com.orbit.admin.store.JobStore;
 import com.orbit.core.model.JobInfo;
-import org.quartz.DisallowConcurrentExecution;
 import org.quartz.Job;
 import org.quartz.JobExecutionContext;
 import org.quartz.JobExecutionException;
@@ -13,17 +12,15 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 /**
  * Quartz 统一调度触发任务类。
- * 所有注册到 Quartz 的定时任务均统一关联此 Job 实现类。
- * 当 Cron 触发时，本类根据任务名称从数据库拉取最新任务状态，并委托给 {@link JobService#dispatch}
- * 进行路由选择和远程 HTTP 派发。
- * <p>
- * 标注 {@link DisallowConcurrentExecution} 的原因：{@code dispatch} 是同步阻塞调用，
- * 最长会占住工作线程 {@code timeoutSeconds} 秒（上限见 {@code orbit.admin.max-timeout-seconds}）。
- * Quartz 默认允许同一 JobDetail 并发执行，因此一个「cron 间隔短于单次执行耗时」的任务
- * 会不断堆叠自身的执行实例，最终耗尽线程池。加上该注解后，
- * 上一次未结束时本次触发会被阻塞（CronTrigger 配合 misfire doNothing 直接跳过），不再堆叠。
+ * 所有注册到 Quartz 的定时任务都关联此 Job 实现类。
+ * Cron 到点时，本类根据任务名称从数据库读取最新任务状态，然后交给
+ * {@link DispatchExecutor} 异步派发，自身在微秒级内返回。
+ *
+ * 不在 Quartz 工作线程上直接派发，是因为派发是对执行器的同步阻塞 HTTP 调用：
+ * 占满 Quartz 线程池会让其它任务的 Cron 到点也发不出去。
+ * 「同一任务不并发执行」的保证同样由 {@link DispatchExecutor} 承担
+ * （orbit.admin.dispatch-serial-per-job），因此这里不需要 @DisallowConcurrentExecution。
  */
-@DisallowConcurrentExecution
 public class OrbitQuartzJob implements Job {
 
     /**
@@ -33,9 +30,11 @@ public class OrbitQuartzJob implements Job {
 
     private static final Logger log = LoggerFactory.getLogger(OrbitQuartzJob.class);
 
+    /** 触发线程池：Quartz 工作线程只做「读元数据 + 投递」，不等派发完成 */
     @Autowired
-    private JobService jobService;
+    private DispatchExecutor dispatchExecutor;
 
+    /** 任务与日志存储，用于按名读取任务元数据 */
     @Autowired
     private JobStore jobStore;
 
@@ -61,8 +60,8 @@ public class OrbitQuartzJob implements Job {
                 return;
             }
 
-            // 3. 调度派发执行
-            jobService.dispatch(job, null);
+            // 3. 交给派发通道异步执行，立即释放 Quartz 工作线程
+            dispatchExecutor.submit(job);
         } catch (Exception e) {
             // 捕获所有异常，避免异常抛出导致 Quartz 将任务标记为损坏或反复 misfire 重试
             log.error("[orbit-admin] quartz fire failed for {}", jobName, e);

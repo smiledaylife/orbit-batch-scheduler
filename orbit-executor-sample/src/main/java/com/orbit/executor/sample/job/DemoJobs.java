@@ -15,11 +15,11 @@ import java.util.concurrent.ThreadLocalRandom;
  * 由调度中心通过 Cron 表达式或手动触发执行。
  *
  * 支持的方法入参类型包括：
- * 
+ *
  *   - {@link JobContext}：推荐方式，包含任务 ID、任务名、日志 ID 及业务参数
  *   - {@link Map}：直接获取入参键值对
  *   - 无参：适用于不需要参数的简单批处理或清理任务
- * 
+ *
  */
 @Component
 public class DemoJobs {

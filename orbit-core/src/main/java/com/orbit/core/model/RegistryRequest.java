@@ -33,11 +33,6 @@ public class RegistryRequest implements Serializable {
      */
     private List<String> handlers = new ArrayList<String>();
 
-    /**
-     * 安全访问令牌（与调度中心 orbit.admin.access-token 配置一致时方可通过鉴权）
-     */
-    private String accessToken;
-
     public String getAppName() {
         return appName;
     }
@@ -70,11 +65,4 @@ public class RegistryRequest implements Serializable {
         this.handlers = handlers;
     }
 
-    public String getAccessToken() {
-        return accessToken;
-    }
-
-    public void setAccessToken(String accessToken) {
-        this.accessToken = accessToken;
-    }
 }

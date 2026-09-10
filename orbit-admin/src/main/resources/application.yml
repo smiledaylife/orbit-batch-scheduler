@@ -39,8 +39,8 @@ spring:
       mode: always
       schema-locations: classpath:schema.sql
   # 注意：quartz / lifecycle 必须挂在 spring 下。
-  # 曾经误缩进到 mybatis-plus 之下，导致这些键被绑定成 mybatis-plus.quartz.*，
-  # Spring Boot 对未知属性静默忽略 —— 配置不报错也不生效。
+  # 缩进错位会让这些键变成 mybatis-plus.quartz.*，
+  # 而 Spring Boot 对未知属性静默忽略 —— 配置既不报错也不生效。
   #
   # 默认是内存 JobStore（单副本）。要多副本集群请启用 cluster profile：
   #   --spring.profiles.active=cluster
@@ -69,13 +69,15 @@ orbit:
     access-token: ""
     heartbeat-timeout-seconds: 90
     connect-timeout-ms: 3000
-    read-timeout-ms: 300000
     group: ORBIT
     timezone: Asia/Shanghai
     evict-interval-ms: 30000
-    # 单个任务允许的最大执行超时（秒）。用于给派发调用设上限，
-    # 避免手动触发/定时派发长时间占住 Tomcat 线程或 Quartz 工作线程。
+    # 单个任务允许的最大执行超时（秒）。随触发请求下发给执行器做超时强制，
+    # 同时也是僵尸 RUNNING 日志的回收阈值基准。
     max-timeout-seconds: 3600
+    # 触发请求的 HTTP 读超时（秒）。触发是「受理即返回」的，只需覆盖网络往返与入队，
+    # 与任务真实耗时无关，因此不随 max-timeout-seconds 放大。
+    trigger-timeout-seconds: 10
     # 执行器注册地址白名单（Java 正则，匹配整个 address）。
     # 留空表示不启用白名单，仅做协议/链路本地地址等基础校验。
     # 生产环境建议收紧，例如：^https?://orbit-executor[a-z0-9-]*\.svc\.cluster\.local(:\d+)?$
@@ -85,6 +87,14 @@ orbit:
     registry-cache-ttl-ms: 3000
     # 调度执行日志保留天数：后台任务分批删除更早日志，防止日志表无限增长。0 = 关闭清理。
     log-retention-days: 30
+    # ---- 定时触发通道（Cron 到点后异步触发，不占用 Quartz 工作线程）----
+    # 触发线程数：线程只在一次触发往返期间被占用，可远大于 org.quartz.threadPool.threadCount，两者独立
+    dispatch-threads: 64
+    # 排队上限：满则新触发快速失败并写一条 FAILED 日志（scheduler saturated）；0 = 不排队
+    dispatch-queue-capacity: 256
+    # 同名任务串行：上一轮执行的结果尚未回传时，本次到点跳过（只计数，见 /overview 的 dispatchSkipped）。
+    # 该守卫是进程内的，跨副本不重叠依赖 Quartz 集群行锁。
+    dispatch-serial-per-job: true
     # 僵尸 RUNNING 日志回收/日志清理的后台任务频率（毫秒），一般无需调整
     log-reap-interval-ms: 60000
     log-cleanup-interval-ms: 3600000

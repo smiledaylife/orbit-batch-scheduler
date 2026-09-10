@@ -37,7 +37,7 @@
 
     <!--
       无第三方依赖：本模块只有纯 POJO 协议模型，序列化由使用方（admin/executor 的 Spring MVC + Jackson）完成。
-      原先声明的 jackson-annotations 在代码中并未使用（无任何 com.fasterxml 引用），已移除，
+      不声明 jackson-annotations：本模块没有任何 com.fasterxml 引用，
       避免把 Jackson 作为传递依赖强加给业务方。
     -->
 

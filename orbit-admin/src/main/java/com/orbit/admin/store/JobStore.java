@@ -28,26 +28,20 @@ import java.util.Optional;
  * 任务与日志持久化存储层（MyBatis-Plus 实现）。
  * 技术栈：Druid 连接池 + MyBatis-Plus（{@link com.baomidou.mybatisplus.core.mapper.BaseMapper}）。
  * 设计说明：
- * 
+ *
  *   - 对外暴露/返回的是 {@code orbit-core} 的协议模型（{@link JobInfo}/{@link JobLog}），
  *       持久层内部使用 {@code po} 包下的实体（{@link OrbitJobPO}/{@link OrbitJobLogPO}），
  *       二者在此处相互转换，保证共享协议模块不依赖任何 ORM 框架；
  *   - {@code orbit_job} 通过 {@code @Version} + 乐观锁插件实现并发更新控制；
  *   - {@code params} 以 JSON 字符串落库；日志 {@code message} 超长截断；
  *   - 分页依赖 {@link com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor}。
- * 
+ *
  */
 @Repository
 public class JobStore {
 
     private static final Logger log = LoggerFactory.getLogger(JobStore.class);
 
-    /** params 列宽（与 schema.sql 一致） */
-    private static final int PARAMS_MAX_LEN = 2000;
-    /** description 列宽（与 schema.sql 一致） */
-    private static final int DESC_MAX_LEN = 256;
-    /** message 列宽（与 schema.sql 一致） */
-    private static final int MESSAGE_MAX_LEN = 2000;
     /** 默认超时（秒） */
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
     /** 每页最大记录数 */
@@ -57,8 +51,13 @@ public class JobStore {
 
     private final OrbitJobMapper jobMapper;
     private final OrbitJobLogMapper logMapper;
+    /** params 列的 JSON 编解码器（线程安全，单实例复用） */
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /**
+     * @param jobMapper 任务表 Mapper
+     * @param logMapper 调度日志表 Mapper
+     */
     public JobStore(OrbitJobMapper jobMapper, OrbitJobLogMapper logMapper) {
         this.jobMapper = jobMapper;
         this.logMapper = logMapper;
@@ -130,16 +129,10 @@ public class JobStore {
     public JobInfo saveJob(JobInfo job) {
         Date now = new Date();
 
-        // 入库前对可能超出列宽的字段做前置校验，避免触发 SQLException（列宽与 schema.sql 保持一致）
+        // 入库前校验列宽，超长直接以 400 返回，而不是等 INSERT/UPDATE 抛 SQLException
         String paramsJson = toJson(job.getParams());
-        if (paramsJson != null && paramsJson.length() > PARAMS_MAX_LEN) {
-            throw new IllegalArgumentException("params too long: serialized json length "
-                    + paramsJson.length() + " exceeds limit " + PARAMS_MAX_LEN);
-        }
-        if (job.getDescription() != null && job.getDescription().length() > DESC_MAX_LEN) {
-            throw new IllegalArgumentException("description too long: length "
-                    + job.getDescription().length() + " exceeds limit " + DESC_MAX_LEN);
-        }
+        ColumnLimits.requireMaxLength("params", paramsJson, ColumnLimits.JOB_PARAMS_JSON);
+        ColumnLimits.requireMaxLength("description", job.getDescription(), ColumnLimits.JOB_DESCRIPTION);
 
         // 1. 新增
         if (job.getId() == null) {
@@ -235,7 +228,7 @@ public class JobStore {
         po.setHandler(log.getHandler());
         po.setExecutorAddress(log.getExecutorAddress());
         po.setStatus(log.getStatus());
-        po.setMessage(abbreviate(log.getMessage()));
+        po.setMessage(ColumnLimits.abbreviate(log.getMessage(), ColumnLimits.LOG_MESSAGE));
         po.setCostMs(log.getCostMs());
         po.setStartTime(log.getStartTime());
         po.setEndTime(log.getEndTime());
@@ -260,39 +253,133 @@ public class JobStore {
                 .set(OrbitJobLogPO::getStatus, status)
                 .set(OrbitJobLogPO::getExecutorAddress, address)
                 .set(OrbitJobLogPO::getCostMs, costMs)
-                .set(OrbitJobLogPO::getMessage, abbreviate(message))
+                .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
                 .set(OrbitJobLogPO::getEndTime, new Date());
         logMapper.update(null, uw);
     }
 
     /**
+     * 记录本次触发被哪个执行器受理，日志仍保持 RUNNING。
+     *
+     * 必须在受理时就写：孤儿回收要靠 executor_address 判断「承接任务的那个节点还活着吗」，
+     * 若只在收尾时写，RUNNING 期间该字段恒为 NULL，就无法把「执行器崩了」和
+     * 「任务还在正常跑」区分开。顺带让运行中的日志在查询接口里就能看到落在哪个节点。
+     *
+     * @param logId   日志 ID
+     * @param address 受理该触发的执行器地址
+     */
+    public void markDispatched(String logId, String address) {
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .eq(OrbitJobLogPO::getLogId, logId)
+                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
+                .set(OrbitJobLogPO::getExecutorAddress, address);
+        logMapper.update(null, uw);
+    }
+
+    /**
+     * 由执行器回传驱动，把一条 RUNNING 日志收敛到终态。
+     *
+     * 与 {@link #finishLog} 的关键差别是 WHERE 里多了 {@code status = 'RUNNING'}：
+     * 回传可能重复到达（执行器重试）、也可能与孤儿回收竞态，
+     * 只允许从 RUNNING 出发的一次转换可以让这些情况天然幂等 ——
+     * 第二次更新匹配不到行，返回 false，日志保持第一次写入的真实结果。
+     *
+     * @param logId   日志 ID
+     * @param success 执行是否成功
+     * @param address 执行节点地址
+     * @param costMs  耗时（毫秒）
+     * @param message 结果或失败原因
+     * @return 是否真的发生了状态转换（false 表示该日志已不是 RUNNING，本次回传被忽略）
+     */
+    public boolean finishLogFromRunning(String logId, boolean success, String address, long costMs, String message) {
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .eq(OrbitJobLogPO::getLogId, logId)
+                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
+                .set(OrbitJobLogPO::getStatus, success ? JobLogStatus.SUCCESS : JobLogStatus.FAILED)
+                .set(OrbitJobLogPO::getExecutorAddress, address)
+                .set(OrbitJobLogPO::getCostMs, costMs)
+                .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
+                .set(OrbitJobLogPO::getEndTime, new Date());
+        return logMapper.update(null, uw) > 0;
+    }
+
+    /**
      * 回收僵尸 RUNNING 日志：将早于 cutoff 的 RUNNING 记录收敛为 FAILED 终态。
-     * <p>
-     * 场景：调度中心在派发中途崩溃/重启，插入的 RUNNING 日志无人收敛（此前会永久悬挂，
-     * 既误导 /logs 页面观测，也让分页统计失真）。后台任务周期调用本方法完成兑底。
+     *
+     * 场景：调度中心在派发中途崩溃/重启，插入的 RUNNING 日志无人收敛，
+     * 会永久悬挂并误导 /logs 页面观测、让分页统计失真。后台任务周期调用本方法完成兑底。
      *
      * @param cutoffMs 回收阈值：start_time 早于（now - cutoffMs）的 RUNNING 记录将被收敛
      * @param message  写入 message 字段的收敛原因说明
      * @return 本次收敛的记录数
      */
-    public int reapOrphanedRunning(long cutoffMs, String message) {
-        Date cutoff = new Date(System.currentTimeMillis() - Math.max(0L, cutoffMs));
-        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+    public List<String> reapOrphanedRunning(long hardCapMs, long offlineMs,
+                                            java.util.Set<String> liveAddresses, String hardMessage,
+                                            String offlineMessage) {
+        long now = System.currentTimeMillis();
+        Date hardCap = new Date(now - Math.max(0L, hardCapMs));
+        // 两个阈值共用同一个下界：未超过 offlineMs 的日志一律不碰，
+        // 避免刚触发出去、执行器还没来得及回传就被误判。
+        Date scanBefore = new Date(now - Math.max(0L, Math.min(offlineMs, hardCapMs)));
+
+        LambdaQueryWrapper<OrbitJobLogPO> qw = new LambdaQueryWrapper<OrbitJobLogPO>()
+                .select(OrbitJobLogPO::getLogId, OrbitJobLogPO::getExecutorAddress,
+                        OrbitJobLogPO::getStartTime)
                 .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
-                .lt(OrbitJobLogPO::getStartTime, cutoff)
+                .lt(OrbitJobLogPO::getStartTime, scanBefore);
+        List<OrbitJobLogPO> rows = logMapper.selectList(qw);
+        if (rows == null || rows.isEmpty()) {
+            return new ArrayList<String>();
+        }
+
+        // 候选量极小（正常运行时为空），存活判定放在内存里做，
+        // 比在 SQL 里对在线节点列表做 NOT IN 更直观，也避免超长 IN 列表。
+        List<String> hardExpired = new ArrayList<String>();
+        List<String> executorGone = new ArrayList<String>();
+        for (OrbitJobLogPO row : rows) {
+            String address = row.getExecutorAddress();
+            boolean alive = address != null && !address.trim().isEmpty() && liveAddresses.contains(address);
+            if (row.getStartTime() != null && row.getStartTime().before(hardCap)) {
+                hardExpired.add(row.getLogId());
+            } else if (!alive) {
+                executorGone.add(row.getLogId());
+            }
+        }
+
+        List<String> reaped = new ArrayList<String>(hardExpired.size() + executorGone.size());
+        reaped.addAll(markFailed(hardExpired, hardMessage));
+        reaped.addAll(markFailed(executorGone, offlineMessage));
+        return reaped;
+    }
+
+    /**
+     * 把给定日志从 RUNNING 收敛为 FAILED。更新条件再带一次 status = RUNNING：
+     * 查询与更新之间可能有回传到达并已收敛，该条件保证不会把已经拿到真实结果的日志改写掉。
+     *
+     * @param logIds  待回收的日志 ID
+     * @param message 写入日志的原因
+     * @return 实际被回收的日志 ID（与入参一致；未匹配到行的不会被计入调用方语义之外的状态）
+     */
+    private List<String> markFailed(List<String> logIds, String message) {
+        if (logIds.isEmpty()) {
+            return logIds;
+        }
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .in(OrbitJobLogPO::getLogId, logIds)
+                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
                 .set(OrbitJobLogPO::getStatus, JobLogStatus.FAILED)
-                .set(OrbitJobLogPO::getMessage, abbreviate(message))
+                .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
                 .set(OrbitJobLogPO::getEndTime, new Date());
         int updated = logMapper.update(null, uw);
         if (updated > 0) {
-            log.warn("[orbit-admin] reaped {} orphaned RUNNING log(s) older than {}s", updated, cutoffMs / 1000);
+            log.warn("[orbit-admin] reaped {} orphaned RUNNING log(s): {}", updated, message);
         }
-        return updated;
+        return logIds;
     }
 
     /**
      * 删除早于 cutoff 的历史日志（分批删除，避免大事务长锁）。
-     * <p>
+     *
      * 实现说明：不用 {@code DELETE ... LIMIT}——PostgreSQL 不支持该语法（仅 H2/GaussDB 支持），
      * 故采用「先按 id 分页选出，再按主键批删」的通用写法，三种库全部兼容。
      *
@@ -351,6 +438,12 @@ public class JobStore {
 
     // ============================ PO <-> 模型 转换 ============================
 
+    /**
+     * 批量把任务 PO 转成领域模型。
+     *
+     * @param pos 数据库行列表
+     * @return 任务模型列表
+     */
     private List<JobInfo> toJobs(List<OrbitJobPO> pos) {
         List<JobInfo> list = new ArrayList<JobInfo>();
         for (OrbitJobPO po : pos) {
@@ -359,6 +452,16 @@ public class JobStore {
         return list;
     }
 
+    /**
+     * 把任务 PO 转成领域模型。
+     *
+     * 可空列一律落到安全默认值：timeoutSeconds 取 {@code DEFAULT_TIMEOUT_SECONDS}、
+     * routeStrategy 取 ROUND、enabled 为 null 视为停用、version 为 null 视为 0。
+     * params 列的 JSON 解析失败时得到空 Map，不向上抛。
+     *
+     * @param po 数据库行
+     * @return 任务模型
+     */
     private JobInfo toJob(OrbitJobPO po) {
         JobInfo j = new JobInfo();
         j.setId(po.getId());
@@ -377,6 +480,13 @@ public class JobStore {
         return j;
     }
 
+    /**
+     * 把日志 PO 转成领域模型，可空列一律落到安全默认值（jobId/costMs 为 0），
+     * 免得调用方到处判空。
+     *
+     * @param po 数据库行
+     * @return 日志模型
+     */
     private JobLog toLog(OrbitJobLogPO po) {
         JobLog l = new JobLog();
         l.setId(po.getId());
@@ -415,10 +525,10 @@ public class JobStore {
 
     /**
      * 将 Map 序列化为 JSON 字符串。
-     * <p>
-     * 【修复】旧实现捕获异常后返回 null，等于把任务参数<b>静默清空</b>入库：
-     * 接口返回 200、任务照常调度，但执行器拿到的是空参数 —— 属于最难排查的一类故障。
-     * 现改为快速失败：调用方（创建/更新接口）会得到明确的 400 与原因。
+     *
+     * 序列化失败时快速失败：调用方（创建/更新接口）得到明确的 400 与原因。
+     * 这里不能吞掉异常返回 null —— 那等于把任务参数静默清空入库：
+     * 接口返回 200、任务照常调度，但执行器拿到的是空参数，属于最难排查的一类故障。
      */
     private String toJson(Map<String, Object> map) {
         if (map == null || map.isEmpty()) {
@@ -439,20 +549,4 @@ public class JobStore {
         return s == null || s.trim().isEmpty() ? null : s.trim();
     }
 
-    /**
-     * 截断超长字符串（防止数据库字段超长溢出）。
-     * <p>
-     * 修复：旧实现 {@code substring(0, 2000) + "..."} 会产生 2003 字符，
-     * 超过 message 列宽 VARCHAR(2000)，执行器返回长消息时入库直接报
-     * 「value too long」异常。现保证结果总长度（含省略号）不超过列宽。
-     */
-    private static String abbreviate(String s) {
-        if (s == null) {
-            return null;
-        }
-        if (s.length() <= MESSAGE_MAX_LEN) {
-            return s;
-        }
-        return s.substring(0, MESSAGE_MAX_LEN - 3) + "...";
-    }
 }

@@ -23,12 +23,12 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 任务处理函数（JobHandler）注册表与反射调用分发器。
  * 核心机制：
- * 
+ *
  *   - 实现 {@link SmartInitializingSingleton} 接口，在 Spring 容器单例 Bean 实例化完成后，扫描所有带有 {@link OrbitJob} 注解的方法；
  *   - 校验方法参数合法性（仅允许无参、{@link JobContext} 或 {@link Map}）；
  *   - 解决 Spring CGLIB/JDK 动态代理问题，提取真实可调用的底层 Method；
  *   - 维护本地 Handler 注册缓存，响应调度中心触发请求时通过反射快速调用业务逻辑。
- * 
+ *
  */
 public class JobHandlerRegistry implements SmartInitializingSingleton, ApplicationContextAware {
 
@@ -183,6 +183,11 @@ public class JobHandlerRegistry implements SmartInitializingSingleton, Applicati
          */
         private final String name;
 
+        /**
+         * @param bean   持有该方法的 Spring Bean
+         * @param method 标注了 {@code @OrbitJob} 的方法
+         * @param name   注册名称（注解值，缺省取方法名）
+         */
         Handler(Object bean, Method method, String name) {
             this.bean = bean;
             this.method = method;

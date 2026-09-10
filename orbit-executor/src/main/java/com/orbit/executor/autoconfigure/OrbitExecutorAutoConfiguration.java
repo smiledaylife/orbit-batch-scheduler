@@ -2,6 +2,7 @@ package com.orbit.executor.autoconfigure;
 
 import com.orbit.executor.bootstrap.ExecutorBootstrap;
 import com.orbit.executor.client.AdminClient;
+import com.orbit.executor.client.CallbackClient;
 import com.orbit.executor.config.ExecutorProperties;
 import com.orbit.executor.handler.JobExecutionService;
 import com.orbit.executor.handler.JobHandlerRegistry;
@@ -39,13 +40,15 @@ public class OrbitExecutorAutoConfiguration {
      * 注册任务执行服务 Bean（有界工作线程池 + 超时强制中断 + 饱和保护 + 优雅停机）。
      * DisposableBean 生命周期由 Spring 容器自动回调。
      *
-     * @param properties 执行器配置属性
+     * @param properties     执行器配置属性
+     * @param callbackClient 执行结果回传客户端
      * @return JobExecutionService 实例
      */
     @Bean(destroyMethod = "destroy")
     @ConditionalOnMissingBean
-    public JobExecutionService orbitJobExecutionService(ExecutorProperties properties) {
-        return new JobExecutionService(properties);
+    public JobExecutionService orbitJobExecutionService(ExecutorProperties properties,
+                                                        CallbackClient callbackClient) {
+        return new JobExecutionService(properties, callbackClient);
     }
 
     /**
@@ -58,6 +61,20 @@ public class OrbitExecutorAutoConfiguration {
     @ConditionalOnMissingBean
     public AdminClient orbitAdminClient(ExecutorProperties properties) {
         return new AdminClient(properties);
+    }
+
+    /**
+     * 注册执行结果回传客户端 Bean（有界队列 + 批量发送 + 退避重试）。
+     * 复用 AdminClient 作为访问调度中心的唯一 HTTP 出口。
+     *
+     * @param properties  执行器配置属性
+     * @param adminClient 调度中心 HTTP 客户端
+     * @return CallbackClient 实例
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public CallbackClient orbitCallbackClient(ExecutorProperties properties, AdminClient adminClient) {
+        return new CallbackClient(properties, adminClient);
     }
 
     /**

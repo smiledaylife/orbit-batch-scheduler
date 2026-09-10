@@ -2,6 +2,7 @@ package com.orbit.executor.client;
 
 import com.orbit.core.model.ApiResult;
 import com.orbit.core.model.RegistryRequest;
+import com.orbit.core.protocol.OrbitProtocol;
 import com.orbit.executor.config.ExecutorProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,20 +22,17 @@ import java.util.List;
  *
  *   - 负责将执行器的节点信息与心跳定期上报至调度中心集群（支持多地址容灾）；
  *   - 在执行器服务关闭时，负责向调度中心发送下线请求；
+ *   - 作为执行器访问调度中心的唯一 HTTP 出口，供 {@link CallbackClient} 等复用地址解析、
+ *       鉴权请求头与 RestTemplate，避免每个客户端各写一份；
  *   - 在 HTTP 请求头中携带双向约定的安全访问令牌（{@code X-Orbit-Token}）。
  *
- * 性能设计：admin 地址列表（逗号分隔）与鉴权请求头在构造时<b>一次性预解析 / 预构建</b>。
- * 心跳默认 20 秒一次、多地址场景下原先每轮都要重复 split、trim、去尾斜杠与 Header 对象分配，
- * 配置在运行期不可变，预构建可完全消除该重复开销。
+ * 性能设计：admin 地址列表（逗号分隔）与鉴权请求头在构造时一次性预解析 / 预构建。
+ * 心跳默认 20 秒一次且配置在运行期不可变，预构建消除了每轮心跳重复
+ * split、trim、去尾斜杠与分配 Header 对象的开销。
  */
 public class AdminClient {
 
     private static final Logger log = LoggerFactory.getLogger(AdminClient.class);
-
-    /**
-     * 安全令牌约定的 HTTP Header 名称
-     */
-    public static final String TOKEN_HEADER = "X-Orbit-Token";
 
     /**
      * 执行器配置属性
@@ -87,21 +85,7 @@ public class AdminClient {
             return false;
         }
 
-        // 若配置了访问令牌，同步设置到请求体中（兼容仅从 Body 读令牌的旧版调度中心）
-        applyBodyToken(req);
-
-        boolean anyOk = false;
-        HttpEntity<RegistryRequest> entity = new HttpEntity<RegistryRequest>(req, jsonHeaders);
-        for (String base : adminBases) {
-            String url = base + "/orbit/admin/registry";
-            try {
-                restTemplate.postForObject(url, entity, ApiResult.class);
-                anyOk = true;
-            } catch (Exception e) {
-                log.warn("[orbit-executor] registry to {} failed: {}", url, e.getMessage());
-            }
-        }
-        return anyOk;
+        return post("/orbit/admin/registry", req);
     }
 
     /**
@@ -115,27 +99,44 @@ public class AdminClient {
             return;
         }
 
-        // 附带访问令牌
-        applyBodyToken(req);
-
-        HttpEntity<RegistryRequest> entity = new HttpEntity<RegistryRequest>(req, jsonHeaders);
-        for (String base : adminBases) {
-            try {
-                restTemplate.postForObject(base + "/orbit/admin/registry/remove", entity, ApiResult.class);
-            } catch (Exception e) {
-                log.warn("[orbit-executor] remove registry failed: {}", e.getMessage());
-            }
-        }
+        post("/orbit/admin/registry/remove", req);
     }
 
     /**
-     * 将 accessToken 写入请求体（若配置）。提取为私有方法，避免 registry/remove 两处重复判空。
+     * 向调度中心的指定端点发送一次 POST。
+     *
+     * 多个调度中心地址逐个尝试，任一成功即算成功（多中心容灾）。
+     * 令牌走请求头 {@code X-Orbit-Token}。
+     *
+     * @param path 端点路径（以 / 开头）
+     * @param body 请求体
+     * @return 是否至少有一个调度中心节点接收成功
      */
-    private void applyBodyToken(RegistryRequest req) {
-        String token = properties.getAccessToken();
-        if (token != null && !token.isEmpty()) {
-            req.setAccessToken(token);
+    public boolean post(String path, Object body) {
+        if (adminBases.isEmpty()) {
+            log.warn("[orbit-executor] admin-addresses empty, skip POST {}", path);
+            return false;
         }
+        HttpEntity<Object> entity = new HttpEntity<Object>(body, jsonHeaders);
+        for (String base : adminBases) {
+            String url = base + path;
+            try {
+                restTemplate.postForObject(url, entity, ApiResult.class);
+                return true;
+            } catch (Exception e) {
+                log.warn("[orbit-executor] POST {} failed: {}", url, e.getMessage());
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 是否配置了至少一个调度中心地址。
+     *
+     * @return true 表示可发送
+     */
+    public boolean hasAdminAddress() {
+        return !adminBases.isEmpty();
     }
 
     /**
@@ -151,10 +152,7 @@ public class AdminClient {
             if (base.isEmpty()) {
                 continue;
             }
-            if (base.endsWith("/")) {
-                base = base.substring(0, base.length() - 1);
-            }
-            bases.add(base);
+            bases.add(OrbitProtocol.trimTrailingSlash(base));
         }
         return Collections.unmodifiableList(bases);
     }
@@ -166,7 +164,7 @@ public class AdminClient {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         if (accessToken != null && !accessToken.isEmpty()) {
-            headers.set(TOKEN_HEADER, accessToken);
+            headers.set(OrbitProtocol.TOKEN_HEADER, accessToken);
         }
         return headers;
     }

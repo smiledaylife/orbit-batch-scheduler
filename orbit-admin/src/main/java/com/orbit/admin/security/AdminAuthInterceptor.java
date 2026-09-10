@@ -1,7 +1,7 @@
 package com.orbit.admin.security;
 
 import com.orbit.admin.config.AdminProperties;
-import com.orbit.admin.dispatch.ExecutorClient;
+import com.orbit.core.protocol.OrbitProtocol;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -11,27 +11,20 @@ import org.springframework.web.servlet.HandlerInterceptor;
 import javax.annotation.PostConstruct;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 
 /**
  * 调度中心管理接口统一鉴权拦截器。
- * <p>
- * 背景：此前只有 {@code /registry} 与 {@code /registry/remove} 两个端点调用了
- * {@code checkToken}，其余 11 个端点（含 {@code POST /jobs}、{@code DELETE /jobs/{name}}、
- * {@code POST /jobs/{name}/trigger}）即使在配置了 accessToken 的情况下也完全不校验 ——
- * 任何能访问到调度中心端口的人都可以建任务、删任务、立即触发任意 handler。
- * <p>
- * 本拦截器覆盖 {@code /orbit/admin/**} 全部端点，令牌从请求头读取：
- * <ul>
- *   <li>{@code X-Orbit-Token: <token>}（执行器与本拦截器共用同一约定）；</li>
- *   <li>或 {@code Authorization: Bearer <token>}（便于 curl / 浏览器 / 网关接入）。</li>
- * </ul>
- * 说明：{@code /registry} 额外支持从请求体读取 token（见 {@code AdminApiController.checkToken}），
- * 那是为了兼容执行器的历史行为；拦截器不读请求体，因为 preHandle 阶段消费 body
- * 会影响后续 {@code @RequestBody} 反序列化。执行器两端都会带请求头，因此不受影响。
- * <p>
- * <b>未配置 accessToken 时的行为</b>：放行，但启动时打印醒目告警。
+ *
+ * {@code /orbit/admin/**} 下的全部端点都必须受令牌保护，包括 {@code POST /jobs}、
+ * {@code DELETE /jobs/{name}}、{@code POST /jobs/{name}/trigger} ——
+ * 否则任何能访问到调度中心端口的人都可以建任务、删任务、立即触发任意 handler。
+ *
+ * 本拦截器覆盖 {@code /orbit/admin/**} 全部端点，令牌只从请求头读取：
+ *   - {@code X-Orbit-Token: <token>}（与执行器共用 {@link OrbitProtocol#TOKEN_HEADER} 约定）；
+ *   - 或 {@code Authorization: Bearer <token>}（便于 curl / 浏览器 / 网关接入）。
+ * 不读请求体：preHandle 阶段消费 body 会影响后续 {@code @RequestBody} 反序列化。
+ *
+ * 未配置 accessToken 时的行为：放行，但启动时打印醒目告警。
  * 这样保留了开箱即用的开发体验；生产环境必须配置
  * {@code orbit.admin.access-token}。
  */
@@ -43,10 +36,14 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
     private static final String UNAUTHORIZED_BODY =
             "{\"code\":401,\"success\":false,\"msg\":\"invalid access token\",\"data\":null}";
 
+    /** {@code Authorization} 头的 Bearer 前缀（含末尾空格） */
     private static final String BEARER_PREFIX = "Bearer ";
 
     private final AdminProperties properties;
 
+    /**
+     * @param properties 调度中心配置，提供期望的 access-token；为空表示不启用鉴权
+     */
     public AdminAuthInterceptor(AdminProperties properties) {
         this.properties = properties;
     }
@@ -68,6 +65,18 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
         }
     }
 
+    /**
+     * 鉴权闸门：比对请求头令牌与配置的 access-token。
+     *
+     * 未配置 access-token 时放行（开发态开箱即用，启动时另有醒目告警）；
+     * 比对失败写 401 与固定 JSON 体后返回 false，请求不再进入 Controller。
+     *
+     * @param request  当前请求
+     * @param response 当前响应
+     * @param handler  目标处理器
+     * @return 是否放行
+     * @throws Exception 写响应体失败时抛出
+     */
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler)
             throws Exception {
@@ -76,8 +85,8 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
             return true;
         }
         String actual = extractToken(request);
-        // 常量时间比对（MessageDigest.isEqual）：抵御时序侧信道逐字节猜测令牌
-        if (constantTimeEquals(expected.trim(), actual)) {
+        // 常量时间比对：抵御时序侧信道逐字节猜测令牌
+        if (OrbitProtocol.constantTimeEquals(expected.trim(), actual)) {
             return true;
         }
 
@@ -91,23 +100,13 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
     }
 
     /**
-     * 常量时间字符串比对：除不等长立即返回 false 之外，逐字节比较耗时与内容无关。
-     */
-    private static boolean constantTimeEquals(String a, String b) {
-        if (a == null || b == null) {
-            return false;
-        }
-        return MessageDigest.isEqual(a.getBytes(StandardCharsets.UTF_8), b.getBytes(StandardCharsets.UTF_8));
-    }
-
-    /**
      * 从请求头提取令牌，优先 {@code X-Orbit-Token}，其次 {@code Authorization: Bearer}。
      *
      * @param request 当前请求
      * @return 令牌，取不到时返回 null
      */
     private static String extractToken(HttpServletRequest request) {
-        String header = request.getHeader(ExecutorClient.TOKEN_HEADER);
+        String header = request.getHeader(OrbitProtocol.TOKEN_HEADER);
         if (header != null && !header.trim().isEmpty()) {
             return header.trim();
         }

@@ -8,10 +8,10 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
  * 调度中心 Web 层配置。
- * <p>
+ *
  * 目前唯一职责：把 {@link AdminAuthInterceptor} 挂到 {@code /orbit/admin/**} 上，
- * 使任务 CRUD、暂停/恢复、手动触发、日志与执行器查询等<b>全部</b>管理端点统一受令牌保护。
- * <p>
+ * 使任务 CRUD、暂停/恢复、手动触发、日志与执行器查询等全部管理端点统一受令牌保护。
+ *
  * 说明：Actuator 端点（{@code /actuator/health} 等）不在 {@code /orbit/admin/**} 之下，
  * 因此不受影响，K8s 探针可继续免鉴权访问。
  */
@@ -23,13 +23,16 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
     private final AdminProperties properties;
 
+    /**
+     * @param properties 调度中心配置，向拦截器传递 access-token
+     */
     public WebMvcConfig(AdminProperties properties) {
         this.properties = properties;
     }
 
     /**
      * 声明鉴权拦截器 Bean。
-     * <p>
+     *
      * 之所以用 {@code @Bean} 而不是在 {@code AdminAuthInterceptor} 上打 {@code @Component}：
      * 该类属于 security 包，与配置解耦，便于单元测试直接 new。
      *
@@ -40,6 +43,11 @@ public class WebMvcConfig implements WebMvcConfigurer {
         return new AdminAuthInterceptor(properties);
     }
 
+    /**
+     * 把鉴权拦截器挂到 {@code /orbit/admin/**}。
+     *
+     * @param registry Spring MVC 拦截器注册表
+     */
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         // 直接调用上面的 @Bean 方法：@Configuration 类默认被 CGLIB 代理，
