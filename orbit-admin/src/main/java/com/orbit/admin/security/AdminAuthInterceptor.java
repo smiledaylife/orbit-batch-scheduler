@@ -19,12 +19,10 @@ import javax.servlet.http.HttpServletResponse;
  * {@code DELETE /jobs/{name}}、{@code POST /jobs/{name}/trigger} ——
  * 否则任何能访问到调度中心端口的人都可以建任务、删任务、立即触发任意 handler。
  *
- * 本拦截器覆盖 {@code /orbit/admin/**} 全部端点，令牌从请求头读取：
- *   - {@code X-Orbit-Token: <token>}（执行器与本拦截器共用同一约定）；
+ * 本拦截器覆盖 {@code /orbit/admin/**} 全部端点，令牌只从请求头读取：
+ *   - {@code X-Orbit-Token: <token>}（与执行器共用 {@link OrbitProtocol#TOKEN_HEADER} 约定）；
  *   - 或 {@code Authorization: Bearer <token>}（便于 curl / 浏览器 / 网关接入）。
- * 说明：{@code /registry} 额外支持从请求体读取 token（见 {@code AdminApiController.checkToken}），
- * 那是为了兼容执行器的历史行为；拦截器不读请求体，因为 preHandle 阶段消费 body
- * 会影响后续 {@code @RequestBody} 反序列化。执行器两端都会带请求头，因此不受影响。
+ * 不读请求体：preHandle 阶段消费 body 会影响后续 {@code @RequestBody} 反序列化。
  *
  * 未配置 accessToken 时的行为：放行，但启动时打印醒目告警。
  * 这样保留了开箱即用的开发体验；生产环境必须配置
@@ -38,10 +36,14 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
     private static final String UNAUTHORIZED_BODY =
             "{\"code\":401,\"success\":false,\"msg\":\"invalid access token\",\"data\":null}";
 
+    /** {@code Authorization} 头的 Bearer 前缀（含末尾空格） */
     private static final String BEARER_PREFIX = "Bearer ";
 
     private final AdminProperties properties;
 
+    /**
+     * @param properties 调度中心配置，提供期望的 access-token；为空表示不启用鉴权
+     */
     public AdminAuthInterceptor(AdminProperties properties) {
         this.properties = properties;
     }
@@ -63,6 +65,18 @@ public class AdminAuthInterceptor implements HandlerInterceptor {
         }
     }
 
+    /**
+     * 鉴权闸门：比对请求头令牌与配置的 access-token。
+     *
+     * 未配置 access-token 时放行（开发态开箱即用，启动时另有醒目告警）；
+     * 比对失败写 401 与固定 JSON 体后返回 false，请求不再进入 Controller。
+     *
+     * @param request  当前请求
+     * @param response 当前响应
+     * @param handler  目标处理器
+     * @return 是否放行
+     * @throws Exception 写响应体失败时抛出
+     */
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler)
             throws Exception {

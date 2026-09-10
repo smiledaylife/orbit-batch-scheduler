@@ -64,6 +64,14 @@ public class DispatchExecutor implements DisposableBean {
     /** 队列满被拒绝的累计次数 */
     private final AtomicLong rejectedCount = new AtomicLong();
 
+    /**
+     * 构造触发线程池。线程数与排队容量都取下限保护：误配 0 或负数会分别退化为单线程和不排队，
+     * 而不是让 Bean 创建失败或产生无界队列。
+     *
+     * @param jobService  任务服务，实际执行派发
+     * @param properties  调度中心配置，提供 dispatch-threads 与 dispatch-queue-capacity
+     * @param outstanding 在途执行登记簿，用于同名任务串行守卫
+     */
     public DispatchExecutor(JobService jobService, AdminProperties properties,
                             OutstandingDispatches outstanding) {
         this.jobService = jobService;

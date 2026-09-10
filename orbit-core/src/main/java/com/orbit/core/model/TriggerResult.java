@@ -107,6 +107,19 @@ public class TriggerResult implements Serializable {
         return r;
     }
 
+    /**
+     * 构造失败结果（{@code success=false}、{@code accepted=false}）。
+     *
+     * 两个方向都用它：执行器受理失败（线程池饱和、handler 不存在、令牌不符）时作为触发回执同步返回；
+     * 任务真正执行失败时作为回传体异步推回。调度中心靠 {@code accepted} 区分二者。
+     *
+     * @param logId      调度日志 ID，回传时用于定位日志行
+     * @param jobId      任务 ID
+     * @param workerNode 承接执行的节点标识
+     * @param costMs     执行耗时（毫秒）
+     * @param message    失败原因
+     * @return 失败结果
+     */
     public static TriggerResult fail(String logId, long jobId, String workerNode, long costMs, String message) {
         TriggerResult r = new TriggerResult();
         r.logId = logId;

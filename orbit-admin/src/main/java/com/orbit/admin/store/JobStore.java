@@ -51,8 +51,13 @@ public class JobStore {
 
     private final OrbitJobMapper jobMapper;
     private final OrbitJobLogMapper logMapper;
+    /** params 列的 JSON 编解码器（线程安全，单实例复用） */
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /**
+     * @param jobMapper 任务表 Mapper
+     * @param logMapper 调度日志表 Mapper
+     */
     public JobStore(OrbitJobMapper jobMapper, OrbitJobLogMapper logMapper) {
         this.jobMapper = jobMapper;
         this.logMapper = logMapper;
@@ -433,6 +438,12 @@ public class JobStore {
 
     // ============================ PO <-> 模型 转换 ============================
 
+    /**
+     * 批量把任务 PO 转成领域模型。
+     *
+     * @param pos 数据库行列表
+     * @return 任务模型列表
+     */
     private List<JobInfo> toJobs(List<OrbitJobPO> pos) {
         List<JobInfo> list = new ArrayList<JobInfo>();
         for (OrbitJobPO po : pos) {
@@ -441,6 +452,16 @@ public class JobStore {
         return list;
     }
 
+    /**
+     * 把任务 PO 转成领域模型。
+     *
+     * 可空列一律落到安全默认值：timeoutSeconds 取 {@code DEFAULT_TIMEOUT_SECONDS}、
+     * routeStrategy 取 ROUND、enabled 为 null 视为停用、version 为 null 视为 0。
+     * params 列的 JSON 解析失败时得到空 Map，不向上抛。
+     *
+     * @param po 数据库行
+     * @return 任务模型
+     */
     private JobInfo toJob(OrbitJobPO po) {
         JobInfo j = new JobInfo();
         j.setId(po.getId());
@@ -459,6 +480,13 @@ public class JobStore {
         return j;
     }
 
+    /**
+     * 把日志 PO 转成领域模型，可空列一律落到安全默认值（jobId/costMs 为 0），
+     * 免得调用方到处判空。
+     *
+     * @param po 数据库行
+     * @return 日志模型
+     */
     private JobLog toLog(OrbitJobLogPO po) {
         JobLog l = new JobLog();
         l.setId(po.getId());

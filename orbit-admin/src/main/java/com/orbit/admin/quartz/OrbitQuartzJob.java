@@ -30,9 +30,11 @@ public class OrbitQuartzJob implements Job {
 
     private static final Logger log = LoggerFactory.getLogger(OrbitQuartzJob.class);
 
+    /** 触发线程池：Quartz 工作线程只做「读元数据 + 投递」，不等派发完成 */
     @Autowired
     private DispatchExecutor dispatchExecutor;
 
+    /** 任务与日志存储，用于按名读取任务元数据 */
     @Autowired
     private JobStore jobStore;
 

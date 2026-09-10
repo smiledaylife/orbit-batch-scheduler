@@ -124,6 +124,8 @@ public class ExecutorController {
     @ExceptionHandler(IllegalArgumentException.class)
     @ResponseStatus(HttpStatus.FORBIDDEN)
     public ApiResult<Void> forbidden(IllegalArgumentException e) {
+        // 令牌校验是这里唯一会抛 IllegalArgumentException 的地方：参数校验走 TriggerResult.fail 返回
+        log.warn("[orbit-executor] rejected unauthorized request: {}", e.getMessage());
         return ApiResult.fail(403, e.getMessage());
     }
 

@@ -41,7 +41,10 @@ public class CallbackClient {
     /** 单个回传请求最多携带的结果条数 */
     private static final int BATCH_LIMIT = 200;
 
+    /** 执行器配置：队列容量与重试策略 */
     private final ExecutorProperties properties;
+
+    /** 调度中心 HTTP 出口，回传请求全部经它发出 */
     private final AdminClient adminClient;
 
     /** 待回传队列，有界；容量见 orbit.executor.callback-queue-capacity */
@@ -50,6 +53,7 @@ public class CallbackClient {
     /** 发送线程 */
     private final Thread sender;
 
+    /** 发送线程运行标志；置 false 后循环仍会把队列里剩余的结果发完 */
     private volatile boolean running = true;
 
     /** 累计发送成功条数 */
@@ -58,6 +62,15 @@ public class CallbackClient {
     /** 累计丢弃条数（仅在队列满时发生） */
     private final AtomicLong droppedCount = new AtomicLong();
 
+    /**
+     * 构造回传客户端并立即启动发送线程。
+     *
+     * 队列容量取 {@code callback-queue-capacity} 的下限保护值（至少 1）：
+     * {@link LinkedBlockingQueue} 要求容量为正，误配 0 或负数会在 Bean 创建阶段就抛异常。
+     *
+     * @param properties  执行器配置，提供队列容量与重试策略
+     * @param adminClient 调度中心 HTTP 出口，寻址与鉴权头都由它负责
+     */
     public CallbackClient(ExecutorProperties properties, AdminClient adminClient) {
         this.properties = properties;
         this.adminClient = adminClient;
@@ -97,7 +110,12 @@ public class CallbackClient {
                                 + "raise orbit.executor.callback-queue-capacity or check admin availability",
                         properties.getCallbackQueueCapacity(), evicted.getLogId());
             }
-            pending.offer(result);
+            // 腾位与塞入之间存在竞态：仍塞不进去就说明队列又被填满，这条只能丢弃并记账
+            if (!pending.offer(result)) {
+                droppedCount.incrementAndGet();
+                log.error("[orbit-executor] callback queue still full after eviction, dropped incoming logId={}",
+                        result.getLogId());
+            }
         }
     }
 
@@ -158,6 +176,13 @@ public class CallbackClient {
         }
     }
 
+    /**
+     * 可中断的休眠：被中断时恢复中断标志并返回 false，让调用方立即退出重试循环，
+     * 保证停机时发送线程不会被退避等待拖住。
+     *
+     * @param ms 休眠毫秒数
+     * @return 正常睡醒返回 true，被中断返回 false
+     */
     private boolean sleep(long ms) {
         try {
             Thread.sleep(ms);

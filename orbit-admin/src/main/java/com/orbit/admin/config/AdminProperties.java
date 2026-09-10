@@ -66,7 +66,7 @@ public class AdminProperties {
      *       （XXL-JOB 调度中心为纯内存注册表 + 30 秒 DB 拉取，本实现 3 秒 TTL 远比其新鲜）；
      *   - 本进程内的 register / remove / evict 写操作会立即失效缓存；
      *   - 多副本部署时其他副本的写入经 TTL 自然传播，最大延迟即 TTL；
-     *   - 命中过期节点的派发由既有的 failover（不可达即摘除换节点）兜底。
+     *   - 命中过期节点的派发由 failover（不可达即摘除换节点）兜底。
      * 设为 0 表示关闭缓存，恢复每次直查数据库。
      */
     private long registryCacheTtlMs = 3000;

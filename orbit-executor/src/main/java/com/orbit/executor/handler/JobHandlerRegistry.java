@@ -183,6 +183,11 @@ public class JobHandlerRegistry implements SmartInitializingSingleton, Applicati
          */
         private final String name;
 
+        /**
+         * @param bean   持有该方法的 Spring Bean
+         * @param method 标注了 {@code @OrbitJob} 的方法
+         * @param name   注册名称（注解值，缺省取方法名）
+         */
         Handler(Object bean, Method method, String name) {
             this.bean = bean;
             this.method = method;

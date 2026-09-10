@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Sql(scripts = "/schema.sql", executionPhase = Sql.ExecutionPhase.BEFORE_TEST_METHOD)
 class ExecutorRegistryTest {
 
+    /** 为被测注册表提供 AdminProperties 的最小测试配置 */
     @TestConfiguration
     static class Cfg {
         @Bean

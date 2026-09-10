@@ -68,6 +68,14 @@ public class JobService {
     /** 在途执行登记簿：串行守卫的占用与释放，见 {@link OutstandingDispatches} */
     private final OutstandingDispatches outstanding;
 
+    /**
+     * @param scheduler      Quartz 调度器，任务的注册/暂停/恢复都作用在它上面
+     * @param jobStore       任务与日志存储
+     * @param registry       执行器注册表，派发时按策略选点
+     * @param executorClient 执行器 HTTP 客户端
+     * @param properties     调度中心配置，提供分组名与超时上限
+     * @param outstanding    在途执行登记簿，同名任务串行守卫的依据
+     */
     public JobService(Scheduler scheduler, JobStore jobStore, ExecutorRegistry registry,
                       ExecutorClient executorClient, AdminProperties properties,
                       OutstandingDispatches outstanding) {
@@ -402,6 +410,16 @@ public class JobService {
         return applied;
     }
 
+    /**
+     * 处理单条执行结果回传：把 RUNNING 日志收敛为终态，并释放在途登记簿。
+     *
+     * 收敛是条件更新（{@code WHERE log_id=? AND status='RUNNING'}），所以重复回传、
+     * 回传与孤儿回收的竞态都不会覆盖已写入的结果，只是返回 false 表示本次未生效。
+     * 无论是否生效都会释放在途登记 —— 日志已不在 RUNNING，串行守卫没有理由继续占用。
+     *
+     * @param result 执行结果，为 null 或缺 logId 时忽略
+     * @return 是否真正把日志从 RUNNING 收敛为终态
+     */
     public boolean handleCallback(TriggerResult result) {
         if (result == null || result.getLogId() == null || result.getLogId().trim().isEmpty()) {
             log.warn("[orbit-admin] callback without logId ignored");
@@ -425,6 +443,15 @@ public class JobService {
         return applied;
     }
 
+    /**
+     * 为被拒绝的派发补一条终态日志。
+     *
+     * 触发线程池饱和时任务根本没进队列，不会有执行器回传；不补这条日志，
+     * 这次调度在日志里就完全没有痕迹，只能从 {@code /overview} 的 dispatchRejected 计数间接看到。
+     *
+     * @param job    被拒绝的任务
+     * @param reason 拒绝原因，写入日志 message
+     */
     public void recordRejectedDispatch(JobInfo job, String reason) {
         Date now = new Date();
         JobLog rejected = new JobLog();
@@ -742,6 +769,12 @@ public class JobService {
                 || m.contains("connection reset");
     }
 
+    /**
+     * 按名取任务，不存在时抛 {@link IllegalArgumentException}（由 Controller 的异常处理器转成 404/400）。
+     *
+     * @param name 任务名
+     * @return 任务元数据
+     */
     private JobInfo require(String name) {
         return jobStore.findJobByName(name)
                 .orElseThrow(() -> new IllegalArgumentException("job not found: " + name));
@@ -801,10 +834,22 @@ public class JobService {
         }
     }
 
+    /**
+     * 构造 Quartz 的 JobKey：任务名 + 配置的分组名。
+     *
+     * @param name 任务名
+     * @return JobKey
+     */
     private JobKey jobKey(String name) {
         return JobKey.jobKey(name, properties.getGroup());
     }
 
+    /**
+     * 构造 Quartz 的 TriggerKey：与 JobKey 同名同组，一个任务对应一个触发器。
+     *
+     * @param name 任务名
+     * @return TriggerKey
+     */
     private TriggerKey triggerKey(String name) {
         return TriggerKey.triggerKey(name, properties.getGroup());
     }

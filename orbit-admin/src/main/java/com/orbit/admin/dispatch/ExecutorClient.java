@@ -43,6 +43,12 @@ public class ExecutorClient {
      */
     private final RestTemplate restTemplate;
 
+    /**
+     * 预构建鉴权 Header 与 RestTemplate：accessToken 和读超时在运行期都不变，
+     * 构造时一次性算好，派发热路径上无需重复构建。
+     *
+     * @param properties 调度中心配置，提供 access-token、连接超时与触发读超时
+     */
     public ExecutorClient(AdminProperties properties) {
         this.jsonHeaders = buildJsonHeaders(properties.getAccessToken());
         this.restTemplate = buildRest(properties.getConnectTimeoutMs(), triggerReadTimeoutMs(properties));

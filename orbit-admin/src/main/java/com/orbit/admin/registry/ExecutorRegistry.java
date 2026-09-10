@@ -44,11 +44,17 @@ public class ExecutorRegistry {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutorRegistry.class);
 
+    /** handlers 列的 JSON 反序列化目标类型 */
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<List<String>>() {
     };
 
+    /** 调度中心配置：提供心跳超时与缓存 TTL */
     private final AdminProperties properties;
+
+    /** 注册表 Mapper */
     private final OrbitExecutorRegistryMapper mapper;
+
+    /** handlers 列的 JSON 编解码器（线程安全，单实例复用） */
     private final ObjectMapper json = new ObjectMapper();
 
     /**
@@ -73,20 +79,31 @@ public class ExecutorRegistry {
      * 注册表本地缓存（不可变快照）。volatile 单引用替换，读无锁。
      */
     private static final class RegistrySnapshot {
+        /** 快照失效时刻（epoch 毫秒），到点后下一次读会重建 */
         final long expiresAtMs;
+        /** 快照内容：按地址升序、已过滤失联节点的不可变列表 */
         final List<ExecutorNode> nodes;
 
+        /**
+         * @param expiresAtMs 失效时刻（epoch 毫秒）
+         * @param nodes       节点列表，调用方保证不可变
+         */
         RegistrySnapshot(long expiresAtMs, List<ExecutorNode> nodes) {
             this.expiresAtMs = expiresAtMs;
             this.nodes = nodes;
         }
     }
 
+    /** 当前生效的缓存快照；null 表示需要重建 */
     private volatile RegistrySnapshot cache;
 
     /** 缓存重建锁：防止过期瞬间的并发重建风暴 */
     private final Object cacheLock = new Object();
 
+    /**
+     * @param properties 调度中心配置，提供心跳超时与缓存 TTL
+     * @param mapper     注册表 Mapper
+     */
     public ExecutorRegistry(AdminProperties properties, OrbitExecutorRegistryMapper mapper) {
         this.properties = properties;
         this.mapper = mapper;
@@ -293,6 +310,11 @@ public class ExecutorRegistry {
         cache = null;
     }
 
+    /**
+     * 存活判定的心跳下界：早于该时刻的心跳一律视为失联。
+     *
+     * @return now − heartbeatTimeoutMs()
+     */
     private Date aliveSince() {
         return new Date(System.currentTimeMillis() - heartbeatTimeoutMs());
     }
@@ -311,6 +333,12 @@ public class ExecutorRegistry {
 
     // ============================ 转换与工具 ============================
 
+    /**
+     * 把注册表 PO 转成对外的节点模型，顺带把 handlers 列的 JSON 解成列表。
+     *
+     * @param po 数据库行
+     * @return 节点模型
+     */
     private ExecutorNode toNode(OrbitExecutorRegistryPO po) {
         ExecutorNode node = new ExecutorNode();
         node.setAppName(po.getAppName());
@@ -350,6 +378,15 @@ public class ExecutorRegistry {
         }
     }
 
+    /**
+     * 解析 handlers 列的 JSON 数组。
+     *
+     * 空值、空串与非法 JSON 都返回空列表而不是抛异常：注册表里可能有历史脏数据，
+     * 一个坏节点不应该让整次路由查询失败。
+     *
+     * @param raw handlers 列原始字符串
+     * @return handler 名称列表，解析不出时为空列表
+     */
     private List<String> parseHandlers(String raw) {
         if (raw == null || raw.trim().isEmpty()) {
             return Collections.emptyList();

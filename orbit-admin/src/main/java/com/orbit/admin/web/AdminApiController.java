@@ -58,6 +58,12 @@ public class AdminApiController {
     private final AdminProperties properties;
     private final DispatchExecutor dispatchExecutor;
 
+    /**
+     * @param jobService       任务与日志服务
+     * @param registry         执行器注册表，供 /executors 查询
+     * @param properties       调度中心配置，供 /overview 暴露水位
+     * @param dispatchExecutor 触发线程池，供 /overview 暴露水位
+     */
     public AdminApiController(JobService jobService, ExecutorRegistry registry, AdminProperties properties,
                               DispatchExecutor dispatchExecutor) {
         this.jobService = jobService;

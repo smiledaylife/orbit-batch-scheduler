@@ -23,6 +23,9 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
     private final AdminProperties properties;
 
+    /**
+     * @param properties 调度中心配置，向拦截器传递 access-token
+     */
     public WebMvcConfig(AdminProperties properties) {
         this.properties = properties;
     }
@@ -40,6 +43,11 @@ public class WebMvcConfig implements WebMvcConfigurer {
         return new AdminAuthInterceptor(properties);
     }
 
+    /**
+     * 把鉴权拦截器挂到 {@code /orbit/admin/**}。
+     *
+     * @param registry Spring MVC 拦截器注册表
+     */
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         // 直接调用上面的 @Bean 方法：@Configuration 类默认被 CGLIB 代理，

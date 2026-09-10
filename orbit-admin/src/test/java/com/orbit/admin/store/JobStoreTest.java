@@ -28,6 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 // 不替换为默认嵌入式库，沿用 test/resources/application.yml 中 PostgreSQL 兼容模式的 H2（schema.sql 使用 BIGSERIAL）
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Import({MybatisPlusConfig.class, JobStore.class})
+/**
+ * {@link JobStore} 存储层测试：直接跑在 H2 上并加载真实 schema.sql，
+ * 覆盖任务 CRUD、乐观锁版本冲突、调度日志写入与分页、以及过期日志清理。
+ */
 @Sql(scripts = "/schema.sql", executionPhase = Sql.ExecutionPhase.BEFORE_TEST_METHOD)
 class JobStoreTest {
 

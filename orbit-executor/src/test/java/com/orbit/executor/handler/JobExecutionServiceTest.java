@@ -253,6 +253,7 @@ class JobExecutionServiceTest {
             return new Jobs();
         }
 
+        /** 测试用的 @OrbitJob 宿主 Bean：提供成功、失败、超时、带参等多种 handler */
         static class Jobs {
             @OrbitJob("quick")
             public String quick() {

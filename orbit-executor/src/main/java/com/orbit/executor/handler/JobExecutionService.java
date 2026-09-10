@@ -77,6 +77,15 @@ public class JobExecutionService implements DisposableBean {
     /** 生效的工作线程数（下限 1） */
     private final int workerThreads;
 
+    /**
+     * 构造执行线程池与超时看门狗。
+     *
+     * 线程数下限 1、队列容量下限 0（0 表示不排队，改用 {@code SynchronousQueue} 直接交付）：
+     * 二者误配成 0 或负数时退化为保守行为，而不是让业务应用启动失败。
+     *
+     * @param properties     执行器配置，提供线程数与队列容量
+     * @param callbackClient 结果回传客户端，任务终态经它推回调度中心
+     */
     public JobExecutionService(ExecutorProperties properties, CallbackClient callbackClient) {
         this.properties = properties;
         this.callbackClient = callbackClient;

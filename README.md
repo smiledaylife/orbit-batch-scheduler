@@ -347,7 +347,7 @@ spring:
 | 项 | 默认 | 说明 |
 |----|------|------|
 | `access-token` | 空 | 非空时开启鉴权，与执行器双向校验；令牌取自 `X-Orbit-Token` 或 `Authorization: Bearer`，比对采用常量时间算法防时序侧信道 |
-| `heartbeat-timeout-seconds` | 90 | 超时摘除执行器 |
+| `heartbeat-timeout-seconds` | 90 | 超时摘除执行器（下限 5 秒：误配 0 或负数会让每轮扫描清空整张注册表） |
 | `evict-interval-ms` | 30000 | 后台扫描摘除失联节点的频率 |
 | `timezone` | Asia/Shanghai | Cron 时区（非法值启动即失败） |
 | `group` | ORBIT | Quartz Job/Trigger 分组名 |
@@ -361,10 +361,11 @@ spring:
 | `dispatch-threads` | 64 | 定时触发线程数。线程只在一次触发往返期间被占用，可远大于 `org.quartz.threadPool.threadCount`，两者独立 |
 | `dispatch-queue-capacity` | 256 | 触发排队上限：满则新触发快速失败并写一条 FAILED 日志（`scheduler saturated`）；`0` = 不排队 |
 | `dispatch-serial-per-job` | true | 同名任务串行：上一轮**执行结果未回传**时本次到点跳过（只计数，见 `/overview` 的 `dispatchSkipped`） |
+| `executor-address-allow-pattern` | 空 | 执行器注册地址白名单（Java 正则，需整串匹配）。空 = 不启用，仅做基础校验（http/https、必须有 host、禁链路本地地址）。生产建议显式配置，见第 8 节 SSRF 说明 |
 
 > **注册表缓存说明**：TTL（默认 3s）远小于心跳超时（90s），多副本间写传播延迟上界即
-> TTL；本进程写操作（注册/摘除/剔除）立即失效缓存；派发命中已下线节点由既有
-> failover（不可达即摘除换节点）兑底。XXL-JOB 调度中心为纯内存注册表 + 30s DB
+> TTL；本进程写操作（注册/摘除/剔除）立即失效缓存；派发命中已下线节点由
+> failover（不可达即摘除换节点）兜底。XXL-JOB 调度中心为纯内存注册表 + 30s DB
 > 拉取，本实现 3s TTL 远比其新鲜。
 
 **执行器 `orbit.executor.*`**
