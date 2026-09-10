@@ -75,7 +75,13 @@ class AdminAuthInterceptorTest {
         MockHttpServletResponse response = new MockHttpServletResponse();
         assertFalse(interceptorWith(TOKEN).preHandle(request, response, new Object()));
         assertEquals(401, response.getStatus());
-        assertEquals("application/json", response.getContentType());
+        // 拦截器先 setContentType 再 setCharacterEncoding，容器会把 charset 并进 Content-Type，
+        // 因此这里分别钉住媒体类型与字符集，而不是比对一个完整字面量
+        String contentType = response.getContentType();
+        assertTrue(contentType != null && contentType.startsWith("application/json"),
+                "拒绝时应声明 JSON 媒体类型，实际为 " + contentType);
+        assertTrue(contentType.contains("charset=UTF-8"),
+                "响应体含中文提示，必须显式声明 UTF-8，实际为 " + contentType);
         assertTrue(response.getContentAsString().contains("\"code\":401"),
                 "拒绝时返回与 ApiResult 同构的 JSON，避免调用方解析出两种结构");
     }
