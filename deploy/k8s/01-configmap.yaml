@@ -9,43 +9,77 @@ data:
       port: 8080
     spring:
       datasource:
-        url: jdbc:h2:file:/app/data/orbit-admin;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
-        driver-class-name: org.h2.Driver
-        username: sa
-        password:
-      sql:
-        init:
-          mode: always
-          schema-locations: classpath:schema.sql
+        type: com.alibaba.druid.pool.DruidDataSource
+        url: ${ORBIT_DB_URL}
+        driver-class-name: ${ORBIT_DB_DRIVER:org.postgresql.Driver}
+        username: ${ORBIT_DB_USER}
+        password: ${ORBIT_DB_PASSWORD}
+        druid:
+          initial-size: 5
+          min-idle: 5
+          max-active: 20
+          max-wait: 60000
+          validation-query: SELECT 1
+          test-while-idle: true
+          time-between-eviction-runs-millis: 60000
+          min-evictable-idle-time-millis: 300000
+      redis:
+        host: ${ORBIT_REDIS_HOST}
+        port: ${ORBIT_REDIS_PORT:6379}
+        password: ${ORBIT_REDIS_PASSWORD:}
+        database: ${ORBIT_REDIS_DATABASE:0}
+        timeout: ${ORBIT_REDIS_TIMEOUT:2s}
+        connect-timeout: ${ORBIT_REDIS_CONNECT_TIMEOUT:2s}
+        lettuce:
+          pool:
+            max-active: 16
+            max-idle: 8
+            min-idle: 2
+            max-wait: 2s
       quartz:
-        job-store-type: memory
-        # ---- 多副本集群：取消下面注释，并把上面的 datasource 换成 PostgreSQL / GaussDB ----
-        # 另需给容器加环境变量 SPRING_PROFILES_ACTIVE=cluster，
-        # 并先执行 deploy/sql/quartz-postgresql.sql（或 quartz-gaussdb.sql）建 11 张 QRTZ_* 表。
-        # 完整配置见 orbit-admin/src/main/resources/application-cluster.yml。
-        # jdbc:
-        #   initialize-schema: never
-        # properties:
-        #   org.quartz.scheduler.instanceId: AUTO
-        #   org.quartz.jobStore.driverDelegateClass: org.quartz.impl.jdbcjobstore.PostgreSQLDelegate
-        #   org.quartz.jobStore.tablePrefix: QRTZ_
-        #   org.quartz.jobStore.isClustered: true
-        #   org.quartz.jobStore.clusterCheckinInterval: 15000
+        job-store-type: jdbc
+        jdbc:
+          initialize-schema: never
+        properties:
+          org.quartz.scheduler.instanceName: orbit-admin
+          org.quartz.scheduler.instanceId: AUTO
+          org.quartz.threadPool.threadCount: 10
+          org.quartz.jobStore.driverDelegateClass: ${ORBIT_QUARTZ_DELEGATE:org.quartz.impl.jdbcjobstore.PostgreSQLDelegate}
+          org.quartz.jobStore.tablePrefix: QRTZ_
+          org.quartz.jobStore.isClustered: true
+          org.quartz.jobStore.clusterCheckinInterval: 15000
+          org.quartz.jobStore.misfireThreshold: 60000
     orbit:
       admin:
-        access-token: ""
+        access-token: ${ORBIT_ADMIN_ACCESS_TOKEN}
         heartbeat-timeout-seconds: 90
         timezone: Asia/Shanghai
+        execution-lease-enabled: true
+        execution-lease-ttl-ms: 120000
+        execution-lease-renew-interval-ms: 30000
+        durable-callback-enabled: true
+        callback-stream-key: orbit:callback:stream
+        callback-stream-group: orbit-admin
+        quartz-reconcile-interval-ms: 60000
+        quartz-reconcile-initial-delay-ms: 15000
   executor.yml: |
     server:
       port: 8081
+    spring:
+      redis:
+        host: ${SPRING_REDIS_HOST}
+        port: ${SPRING_REDIS_PORT:6379}
+        password: ${SPRING_REDIS_PASSWORD:}
     orbit:
       executor:
         enabled: true
         app-name: demo-executor
         admin-addresses: http://orbit-admin:8080
-        # 端口默认自动感知 server.port，无需额外显式配置
-        # K8s 下 address 留空，框架将自动读取 POD_IP 并拼接端口完成注册
+        access-token: ${ORBIT_EXECUTOR_ACCESS_TOKEN}
+        durable-callback-enabled: true
+        callback-stream-key: orbit:callback:stream
+        execution-idempotency-enabled: true
+        execution-idempotency-ttl-seconds: 86400
         address: ""
         heartbeat-interval-ms: 20000
         node-id: ${POD_NAME:}
