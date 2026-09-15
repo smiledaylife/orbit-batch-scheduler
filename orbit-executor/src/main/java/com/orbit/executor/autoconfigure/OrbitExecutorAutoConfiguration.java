@@ -3,6 +3,7 @@ package com.orbit.executor.autoconfigure;
 import com.orbit.executor.bootstrap.ExecutorBootstrap;
 import com.orbit.executor.client.AdminClient;
 import com.orbit.executor.client.CallbackClient;
+import com.orbit.executor.client.ExecutionIdempotency;
 import com.orbit.executor.config.ExecutorProperties;
 import com.orbit.executor.handler.JobExecutionService;
 import com.orbit.executor.handler.JobHandlerRegistry;
@@ -14,36 +15,25 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/**
- * Orbit 执行器 Spring Boot 自动装配配置类。
- * 业务应用只需通过 Maven 引入 {@code orbit-executor} 依赖，在配置中开启
- * （默认开启 {@code orbit.executor.enabled: true}），即可自动装配任务注册表、心跳通信客户端、
- * 有界任务执行线程池（超时强制 + 饱和保护）和 HTTP 触发入口。
- */
+/** Orbit 执行器 Spring Boot 自动装配。 */
 @Configuration
 @EnableConfigurationProperties(ExecutorProperties.class)
 @ConditionalOnProperty(prefix = "orbit.executor", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class OrbitExecutorAutoConfiguration {
 
-    /**
-     * 注册 @OrbitJob 扫描与方法缓存注册表 Bean
-     *
-     * @return JobHandlerRegistry 实例
-     */
     @Bean
     @ConditionalOnMissingBean
     public JobHandlerRegistry orbitJobHandlerRegistry() {
         return new JobHandlerRegistry();
     }
 
-    /**
-     * 注册任务执行服务 Bean（有界工作线程池 + 超时强制中断 + 饱和保护 + 优雅停机）。
-     * DisposableBean 生命周期由 Spring 容器自动回调。
-     *
-     * @param properties     执行器配置属性
-     * @param callbackClient 执行结果回传客户端
-     * @return JobExecutionService 实例
-     */
+    @Bean
+    @ConditionalOnMissingBean
+    public ExecutionIdempotency orbitExecutionIdempotency(org.springframework.data.redis.core.StringRedisTemplate redis,
+                                                          ExecutorProperties properties) {
+        return new ExecutionIdempotency(redis, properties);
+    }
+
     @Bean(destroyMethod = "destroy")
     @ConditionalOnMissingBean
     public JobExecutionService orbitJobExecutionService(ExecutorProperties properties,
@@ -51,40 +41,18 @@ public class OrbitExecutorAutoConfiguration {
         return new JobExecutionService(properties, callbackClient);
     }
 
-    /**
-     * 注册与调度中心 HTTP 交互的心跳客户端 Bean
-     *
-     * @param properties 执行器配置属性
-     * @return AdminClient 实例
-     */
     @Bean
     @ConditionalOnMissingBean
     public AdminClient orbitAdminClient(ExecutorProperties properties) {
         return new AdminClient(properties);
     }
 
-    /**
-     * 注册执行结果回传客户端 Bean（有界队列 + 批量发送 + 退避重试）。
-     * 复用 AdminClient 作为访问调度中心的唯一 HTTP 出口。
-     *
-     * @param properties  执行器配置属性
-     * @param adminClient 调度中心 HTTP 客户端
-     * @return CallbackClient 实例
-     */
     @Bean
     @ConditionalOnMissingBean
     public CallbackClient orbitCallbackClient(ExecutorProperties properties, AdminClient adminClient) {
         return new CallbackClient(properties, adminClient);
     }
 
-    /**
-     * 注册执行器生命周期与心跳自注册启动器 Bean
-     *
-     * @param properties  执行器配置属性
-     * @param registry    JobHandler 注册表
-     * @param adminClient 调度中心客户端
-     * @return ExecutorBootstrap 实例
-     */
     @Bean
     @ConditionalOnMissingBean
     public ExecutorBootstrap orbitExecutorBootstrap(ExecutorProperties properties,
@@ -93,29 +61,17 @@ public class OrbitExecutorAutoConfiguration {
         return new ExecutorBootstrap(properties, registry, adminClient);
     }
 
-    /**
-     * 仅在 Servlet Web 环境下装配执行器 HTTP 对外触发 Controller
-     */
     @Configuration
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     static class WebConfig {
-
-        /**
-         * 注册接收调度中心 /orbit/executor/run 和 /handlers 调用的控制器
-         *
-         * @param registry        JobHandler 注册表
-         * @param properties      执行器配置属性
-         * @param bootstrap       执行器启动引导器
-         * @param executionService 任务执行服务
-         * @return ExecutorController 实例
-         */
         @Bean
         @ConditionalOnMissingBean
         public ExecutorController orbitExecutorController(JobHandlerRegistry registry,
                                                           ExecutorProperties properties,
                                                           ExecutorBootstrap bootstrap,
-                                                          JobExecutionService executionService) {
-            return new ExecutorController(registry, properties, bootstrap, executionService);
+                                                          JobExecutionService executionService,
+                                                          ExecutionIdempotency idempotency) {
+            return new ExecutorController(registry, properties, bootstrap, executionService, idempotency);
         }
     }
 }
