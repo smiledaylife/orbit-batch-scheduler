@@ -12,7 +12,7 @@ spec:
       targetPort: 8080
 ---
 # 调度中心：无状态 Deployment。
-# 生产多副本必须使用 cluster profile + 外部 PostgreSQL/GaussDB + Quartz JDBC JobStore。
+# 生产多副本必须使用 cluster profile + 外部 PostgreSQL/GaussDB + Quartz JDBC JobStore + Redis。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -61,6 +61,36 @@ spec:
                 secretKeyRef:
                   name: orbit-admin-secret
                   key: access-token
+            - name: ORBIT_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: db-url
+            - name: ORBIT_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: db-user
+            - name: ORBIT_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: db-password
+            - name: ORBIT_REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: redis-host
+            - name: ORBIT_REDIS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: redis-port
+            - name: ORBIT_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: redis-password
           volumeMounts:
             - name: conf
               mountPath: /app/config
