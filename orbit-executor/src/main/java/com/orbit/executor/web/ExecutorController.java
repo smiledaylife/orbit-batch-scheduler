@@ -1,10 +1,11 @@
 package com.orbit.executor.web;
 
 import com.orbit.core.model.ApiResult;
-import com.orbit.core.protocol.OrbitProtocol;
 import com.orbit.core.model.TriggerRequest;
 import com.orbit.core.model.TriggerResult;
+import com.orbit.core.protocol.OrbitProtocol;
 import com.orbit.executor.bootstrap.ExecutorBootstrap;
+import com.orbit.executor.client.ExecutionIdempotency;
 import com.orbit.executor.config.ExecutorProperties;
 import com.orbit.executor.handler.JobExecutionService;
 import com.orbit.executor.handler.JobHandlerRegistry;
@@ -23,86 +24,62 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/**
- * 执行器对外暴露的 HTTP RESTful API 控制器。
- * 核心职责：
- *
- *   - 接收调度中心派发的任务触发请求（{@code POST /orbit/executor/run}）；
- *   - 校验安全访问令牌（{@code X-Orbit-Token}）；
- *   - 委托 {@link JobExecutionService} 受理触发：入队后立即返回受理回执，
- *       业务方法在工作线程池中异步执行，结果由回传客户端推回调度中心；
- *   - 提供当前节点在线信息与支持的 Handler 查询端点（{@code GET /orbit/executor/handlers}，同样受令牌保护）。
- *
- */
+/** 执行器对外 HTTP API。 */
 @RestController
 @RequestMapping("/orbit/executor")
 public class ExecutorController {
-
     private static final Logger log = LoggerFactory.getLogger(ExecutorController.class);
-
     private final JobHandlerRegistry registry;
     private final ExecutorProperties properties;
     private final ExecutorBootstrap bootstrap;
     private final JobExecutionService executionService;
+    private final ExecutionIdempotency idempotency;
 
-    /**
-     * 构造控制器，注入核心依赖组件
-     *
-     * @param registry        JobHandler 注册表
-     * @param properties      执行器配置属性
-     * @param bootstrap       执行器引导器
-     * @param executionService 任务执行服务（线程池 + 超时强制）
-     */
     public ExecutorController(JobHandlerRegistry registry, ExecutorProperties properties,
-                              ExecutorBootstrap bootstrap, JobExecutionService executionService) {
+                              ExecutorBootstrap bootstrap, JobExecutionService executionService,
+                              ExecutionIdempotency idempotency) {
         this.registry = registry;
         this.properties = properties;
         this.bootstrap = bootstrap;
         this.executionService = executionService;
+        this.idempotency = idempotency;
     }
 
-    /**
-     * 接收调度中心的任务触发请求。
-     *
-     * 本接口是异步契约：返回值只表示「是否受理」，accepted=true 表示任务已入队、尚未执行完毕，
-     * 任务的真实成败由执行器通过 {@code POST /orbit/admin/callback} 异步回传。
-     * 因此这里的响应时间与任务耗时无关，调度中心不必为长任务长时间占住连接。
-     *
-     * @param request 任务触发参数实体
-     * @param token   HTTP Header 中的鉴权令牌
-     * @return 受理回执；线程池饱和时返回同步失败结果
-     */
     @PostMapping("/run")
     public TriggerResult run(@RequestBody TriggerRequest request,
                              @RequestHeader(value = OrbitProtocol.TOKEN_HEADER, required = false) String token) {
-        // 1. 安全访问令牌校验
         checkToken(token);
-
         String handler = request.getHandler();
         String node = bootstrap.getResolvedNodeId() == null ? "executor" : bootstrap.getResolvedNodeId();
-
-        // 2. 基础参数校验：Handler 名称必填
         if (handler == null || handler.trim().isEmpty()) {
             return TriggerResult.fail(request.getLogId(), request.getJobId(), node, 0, "handler required");
         }
-
-        // 3. 检查当前执行器是否已注册该 Handler
         if (!registry.has(handler)) {
             return TriggerResult.fail(request.getLogId(), request.getJobId(), node, 0,
                     "handler not found on this executor: " + handler);
         }
 
-        // 4. 委托执行服务受理：入队即返回，结果异步回传
-        return executionService.submit(request, registry, node);
+        // logId 是一次调度执行的幂等主键：HTTP 超时后重试不会再次进入线程池。
+        boolean first = idempotency.tryReserve(request.getLogId());
+        if (!first) {
+            return TriggerResult.accepted(request.getLogId(), request.getJobId(), node,
+                    "duplicate request ignored: logId already accepted");
+        }
+
+        TriggerResult result;
+        try {
+            result = executionService.submit(request, registry, node);
+        } catch (RuntimeException e) {
+            idempotency.release(request.getLogId());
+            throw e;
+        }
+        // 线程池饱和等同步拒绝意味着任务没有执行，必须释放幂等占位，允许后续重试。
+        if (!result.isAccepted()) {
+            idempotency.release(request.getLogId());
+        }
+        return result;
     }
 
-    /**
-     * 查询当前执行器节点的信息以及已注册的所有 JobHandler 列表。
-     * 配置了 accessToken 时同样要求鉴权，避免向未授权方暴露节点信息。
-     *
-     * @param token HTTP Header 中的鉴权令牌
-     * @return 执行器概况与 Handler 列表数据
-     */
     @GetMapping("/handlers")
     public Map<String, Object> handlers(
             @RequestHeader(value = OrbitProtocol.TOKEN_HEADER, required = false) String token) {
@@ -115,26 +92,13 @@ public class ExecutorController {
         return m;
     }
 
-    /**
-     * 鉴权失败（令牌不匹配）返回 403，避免落入 Spring 默认 500 白页。
-     *
-     * @param e 非法参数异常
-     * @return 标准失败响应
-     */
     @ExceptionHandler(IllegalArgumentException.class)
     @ResponseStatus(HttpStatus.FORBIDDEN)
     public ApiResult<Void> forbidden(IllegalArgumentException e) {
-        // 令牌校验是这里唯一会抛 IllegalArgumentException 的地方：参数校验走 TriggerResult.fail 返回
         log.warn("[orbit-executor] rejected unauthorized request: {}", e.getMessage());
         return ApiResult.fail(403, e.getMessage());
     }
 
-    /**
-     * 校验安全令牌：未配置 accessToken 时跳过校验。
-     * 比对使用常量时间算法，抵御时序侧信道逐字节猜测令牌。
-     *
-     * @param header Header 携带的令牌
-     */
     private void checkToken(String header) {
         String expect = properties.getAccessToken();
         if (expect == null || expect.isEmpty()) {
