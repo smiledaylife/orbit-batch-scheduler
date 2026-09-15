@@ -1,9 +1,10 @@
 # 集群模式：生产多副本必须使用外部 PostgreSQL / GaussDB、Quartz JDBC JobStore 与 Redis。
-# 数据库与 Redis 地址、账号、密码通过环境变量或外部配置注入，禁止使用内置生产凭据。
+# 数据库与 Redis 地址、账号、密码通过环境变量或外部配置注入，禁止把生产凭据写入配置文件。
 
 spring:
   datasource:
     type: com.alibaba.druid.pool.DruidDataSource
+    # 数据库是任务定义、执行日志以及 Quartz 集群状态的持久化事实来源。
     url: ${ORBIT_DB_URL}
     driver-class-name: ${ORBIT_DB_DRIVER:org.postgresql.Driver}
     username: ${ORBIT_DB_USER}
@@ -19,6 +20,7 @@ spring:
       min-evictable-idle-time-millis: 300000
 
   redis:
+    # Redis 用于集群执行 Lease、callback Stream 和 Quartz 对账分布式锁。
     host: ${ORBIT_REDIS_HOST}
     port: ${ORBIT_REDIS_PORT:6379}
     password: ${ORBIT_REDIS_PASSWORD:}
@@ -33,6 +35,7 @@ spring:
         max-wait: 2s
 
   quartz:
+    # JDBC JobStore + isClustered=true 保证多个 Admin Pod 共享 Quartz 调度状态。
     job-store-type: jdbc
     jdbc:
       initialize-schema: never
@@ -48,12 +51,15 @@ spring:
 
 orbit:
   admin:
+    # Redis Lease：同一 Job 在集群范围内同时只能存在一个有效派发占用。
     execution-lease-enabled: true
     execution-lease-ttl-ms: 120000
     execution-lease-renew-interval-ms: 30000
+    # Durable callback：Executor 先写 Stream，Admin 消费并落库，避免单纯 HTTP callback 丢结果。
     durable-callback-enabled: true
     callback-stream-key: orbit:callback:stream
     callback-stream-group: orbit-admin
+    # DB/Quartz 定期对账，修复创建/更新/删除双写过程中可能出现的最终一致性偏差。
     quartz-reconcile-interval-ms: 60000
     quartz-reconcile-initial-delay-ms: 15000
 
@@ -61,9 +67,11 @@ management:
   endpoints:
     web:
       exposure:
+        # 生产仅暴露健康检查和基础信息，避免 actuator 暴露敏感运行数据。
         include: health,info
   endpoint:
     health:
       show-details: never
+      # Kubernetes readiness/liveness 使用 Spring Boot health groups。
       probes:
         enabled: true
