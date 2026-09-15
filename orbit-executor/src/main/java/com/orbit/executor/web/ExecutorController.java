@@ -24,7 +24,12 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** 执行器对外 HTTP API。 */
+/**
+ * 执行器对外 HTTP API。
+ *
+ * <p>负责接收 Admin 的任务触发请求、查询已注册 Handler，并在入口处完成访问令牌校验和
+ * logId 幂等保护。真正的任务执行由 {@link JobExecutionService} 异步完成。</p>
+ */
 @RestController
 @RequestMapping("/orbit/executor")
 public class ExecutorController {
@@ -45,6 +50,13 @@ public class ExecutorController {
         this.idempotency = idempotency;
     }
 
+    /**
+     * 接收一次任务执行请求。
+     *
+     * <p>该接口采用“受理即返回”语义：HTTP 返回 accepted=true 只表示任务已进入执行器，
+     * 最终 SUCCESS/FAILED 必须通过 callback 回传 Admin。logId 是一次调度执行的全局幂等主键，
+     * Admin 因 HTTP 超时而重试时不会再次进入执行线程池。</p>
+     */
     @PostMapping("/run")
     public TriggerResult run(@RequestBody TriggerRequest request,
                              @RequestHeader(value = OrbitProtocol.TOKEN_HEADER, required = false) String token) {
@@ -70,6 +82,7 @@ public class ExecutorController {
         try {
             result = executionService.submit(request, registry, node);
         } catch (RuntimeException e) {
+            // submit 在同步阶段失败时没有真正执行任务，因此释放幂等占位允许后续重试。
             idempotency.release(request.getLogId());
             throw e;
         }
@@ -80,6 +93,10 @@ public class ExecutorController {
         return result;
     }
 
+    /**
+     * 查询当前 Executor 注册的 Handler 和节点信息。
+     * Admin 可用该接口辅助故障排查和确认任务是否部署到目标 Executor。
+     */
     @GetMapping("/handlers")
     public Map<String, Object> handlers(
             @RequestHeader(value = OrbitProtocol.TOKEN_HEADER, required = false) String token) {
@@ -92,6 +109,7 @@ public class ExecutorController {
         return m;
     }
 
+    /** 把认证失败转换为统一的 403 API 响应，并记录安全审计日志。 */
     @ExceptionHandler(IllegalArgumentException.class)
     @ResponseStatus(HttpStatus.FORBIDDEN)
     public ApiResult<Void> forbidden(IllegalArgumentException e) {
@@ -99,6 +117,10 @@ public class ExecutorController {
         return ApiResult.fail(403, e.getMessage());
     }
 
+    /**
+     * 校验 Admin -> Executor 的共享令牌。
+     * {@link OrbitProtocol#constantTimeEquals(String, String)} 用于降低令牌比较的时序侧信道风险。
+     */
     private void checkToken(String header) {
         String expect = properties.getAccessToken();
         if (expect == null || expect.isEmpty()) {
