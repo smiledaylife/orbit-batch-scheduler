@@ -9,6 +9,7 @@ import org.quartz.SchedulerException;
 import org.quartz.impl.matchers.GroupMatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -21,11 +22,9 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-/**
- * DB -> Quartz 最终一致性对账器。
- * DB 是任务定义的唯一事实源，Quartz 是派生运行时；Redis 负责集群对账互斥。
- */
+/** DB -> Quartz 最终一致性对账器；生产集群由 Redis 保证全局单实例对账。 */
 @Component
+@ConditionalOnProperty(prefix = "orbit.admin", name = "execution-lease-enabled", havingValue = "true")
 public class QuartzReconciler {
 
     private static final Logger log = LoggerFactory.getLogger(QuartzReconciler.class);
@@ -80,7 +79,6 @@ public class QuartzReconciler {
                 }
             }
 
-            // 复用 JobService 已验证的 DB -> Quartz 编排逻辑，包含 disabled/invalid cron 和缺失 Trigger 修复。
             jobService.init();
             if (removed > 0) {
                 log.warn("[orbit-admin] quartz reconciliation removed {} orphan job(s)", removed);
@@ -97,11 +95,8 @@ public class QuartzReconciler {
             Boolean acquired = redis.opsForValue().setIfAbsent(LOCK_KEY, LOCK_VALUE, 50L, TimeUnit.SECONDS);
             return Boolean.TRUE.equals(acquired);
         } catch (Exception e) {
-            if (properties.isExecutionLeaseEnabled()) {
-                log.warn("[orbit-admin] redis unavailable; skip quartz reconciliation to avoid multi-node race");
-                return false;
-            }
-            return true;
+            log.warn("[orbit-admin] redis unavailable; skip quartz reconciliation to avoid multi-node race");
+            return false;
         }
     }
 
