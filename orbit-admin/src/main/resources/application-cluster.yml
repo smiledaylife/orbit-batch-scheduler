@@ -1,4 +1,4 @@
-# 集群模式：生产多副本必须使用外部 PostgreSQL / GaussDB、Quartz JDBC JobStore 与 Redis Execution Lease。
+# 集群模式：生产多副本必须使用外部 PostgreSQL / GaussDB、Quartz JDBC JobStore 与 Redis。
 # 数据库与 Redis 地址、账号、密码通过环境变量或外部配置注入，禁止使用内置生产凭据。
 
 spring:
@@ -49,6 +49,10 @@ spring:
 orbit:
   admin:
     execution-lease-enabled: true
-    # 必须大于续租周期的 3 倍；120s 可覆盖常规 Redis/网络抖动。
     execution-lease-ttl-ms: 120000
     execution-lease-renew-interval-ms: 30000
+    durable-callback-enabled: true
+    callback-stream-key: orbit:callback:stream
+    callback-stream-group: orbit-admin
+    quartz-reconcile-interval-ms: 60000
+    quartz-reconcile-initial-delay-ms: 15000
