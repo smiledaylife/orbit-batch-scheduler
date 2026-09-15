@@ -24,6 +24,9 @@ public class ExecutorProperties {
     private boolean executionIdempotencyEnabled = false;
     /** Redis 幂等 key 保留时间；应覆盖最大任务耗时及 callback 重试窗口。 */
     private long executionIdempotencyTtlSeconds = 86400;
+    /** 使用 Redis Stream 持久化执行结果；cluster 生产模式建议开启。 */
+    private boolean durableCallbackEnabled = false;
+    private String callbackStreamKey = "orbit:callback:stream";
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -57,4 +60,8 @@ public class ExecutorProperties {
     public void setExecutionIdempotencyEnabled(boolean value) { this.executionIdempotencyEnabled = value; }
     public long getExecutionIdempotencyTtlSeconds() { return executionIdempotencyTtlSeconds; }
     public void setExecutionIdempotencyTtlSeconds(long value) { this.executionIdempotencyTtlSeconds = value; }
+    public boolean isDurableCallbackEnabled() { return durableCallbackEnabled; }
+    public void setDurableCallbackEnabled(boolean value) { this.durableCallbackEnabled = value; }
+    public String getCallbackStreamKey() { return callbackStreamKey; }
+    public void setCallbackStreamKey(String value) { this.callbackStreamKey = value; }
 }
