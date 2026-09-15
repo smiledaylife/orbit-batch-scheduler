@@ -14,6 +14,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplicat
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 /** Orbit 执行器 Spring Boot 自动装配。 */
 @Configuration
@@ -29,7 +30,7 @@ public class OrbitExecutorAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public ExecutionIdempotency orbitExecutionIdempotency(org.springframework.data.redis.core.StringRedisTemplate redis,
+    public ExecutionIdempotency orbitExecutionIdempotency(StringRedisTemplate redis,
                                                           ExecutorProperties properties) {
         return new ExecutionIdempotency(redis, properties);
     }
@@ -49,8 +50,10 @@ public class OrbitExecutorAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public CallbackClient orbitCallbackClient(ExecutorProperties properties, AdminClient adminClient) {
-        return new CallbackClient(properties, adminClient);
+    public CallbackClient orbitCallbackClient(ExecutorProperties properties,
+                                              AdminClient adminClient,
+                                              StringRedisTemplate redis) {
+        return new CallbackClient(properties, adminClient, redis);
     }
 
     @Bean
