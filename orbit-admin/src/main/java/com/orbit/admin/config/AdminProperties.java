@@ -27,10 +27,15 @@ public class AdminProperties {
 
     /** Redis 集群级执行 Lease。单机开发模式默认关闭，cluster profile 开启。 */
     private boolean executionLeaseEnabled = false;
-    /** Lease 时长；必须明显大于 Redis/网络瞬时抖动，默认 120 秒。 */
     private long executionLeaseTtlMs = 120000L;
-    /** Lease 续租周期，建议不超过 TTL 的 1/3。 */
     private long executionLeaseRenewIntervalMs = 30000L;
+
+    /** Redis Stream callback 持久化。生产 cluster 模式开启。 */
+    private boolean durableCallbackEnabled = false;
+    private String callbackStreamKey = "orbit:callback:stream";
+    private String callbackStreamGroup = "orbit-admin";
+    private long quartzReconcileIntervalMs = 60000L;
+    private long quartzReconcileInitialDelayMs = 15000L;
 
     @Value("${spring.profiles.active:}")
     private String activeProfiles;
@@ -58,6 +63,17 @@ public class AdminProperties {
                         "orbit.admin.execution-lease-renew-interval-ms must be >= 1000 and less than one third of lease TTL");
             }
         }
+        if (durableCallbackEnabled) {
+            if (callbackStreamKey == null || callbackStreamKey.trim().isEmpty()) {
+                throw new IllegalStateException("orbit.admin.callback-stream-key must not be empty");
+            }
+            if (callbackStreamGroup == null || callbackStreamGroup.trim().isEmpty()) {
+                throw new IllegalStateException("orbit.admin.callback-stream-group must not be empty");
+            }
+        }
+        if (quartzReconcileIntervalMs < 10000L || quartzReconcileInitialDelayMs < 0L) {
+            throw new IllegalStateException("orbit.admin quartz reconciliation interval settings are invalid");
+        }
         if (isClusterProfile()) {
             if (accessToken == null || accessToken.trim().isEmpty()) {
                 throw new IllegalStateException("orbit.admin.access-token is required in cluster profile");
@@ -68,6 +84,9 @@ public class AdminProperties {
             }
             if (!executionLeaseEnabled) {
                 throw new IllegalStateException("orbit.admin.execution-lease-enabled must be true in cluster profile");
+            }
+            if (!durableCallbackEnabled) {
+                throw new IllegalStateException("orbit.admin.durable-callback-enabled must be true in cluster profile");
             }
         }
     }
@@ -116,4 +135,14 @@ public class AdminProperties {
     public void setExecutionLeaseTtlMs(long value) { this.executionLeaseTtlMs = value; }
     public long getExecutionLeaseRenewIntervalMs() { return executionLeaseRenewIntervalMs; }
     public void setExecutionLeaseRenewIntervalMs(long value) { this.executionLeaseRenewIntervalMs = value; }
+    public boolean isDurableCallbackEnabled() { return durableCallbackEnabled; }
+    public void setDurableCallbackEnabled(boolean value) { this.durableCallbackEnabled = value; }
+    public String getCallbackStreamKey() { return callbackStreamKey; }
+    public void setCallbackStreamKey(String value) { this.callbackStreamKey = value; }
+    public String getCallbackStreamGroup() { return callbackStreamGroup; }
+    public void setCallbackStreamGroup(String value) { this.callbackStreamGroup = value; }
+    public long getQuartzReconcileIntervalMs() { return quartzReconcileIntervalMs; }
+    public void setQuartzReconcileIntervalMs(long value) { this.quartzReconcileIntervalMs = value; }
+    public long getQuartzReconcileInitialDelayMs() { return quartzReconcileInitialDelayMs; }
+    public void setQuartzReconcileInitialDelayMs(long value) { this.quartzReconcileInitialDelayMs = value; }
 }
