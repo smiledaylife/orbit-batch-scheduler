@@ -2,22 +2,42 @@ package com.orbit.executor.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-/** 执行器核心配置属性（对应前缀：{@code orbit.executor.*}）。 */
+/**
+ * 执行器核心配置属性（对应前缀：{@code orbit.executor.*}）。
+ *
+ * <p>配置覆盖 Admin 地址、注册/心跳、工作线程池、任务等待、callback 重试以及 Redis
+ * 执行幂等和持久化 callback。生产多副本场景建议通过环境变量或配置中心注入。</p>
+ */
 @ConfigurationProperties(prefix = "orbit.executor")
 public class ExecutorProperties {
+
+    /** 是否启用 Orbit Executor 自动装配。 */
     private boolean enabled = true;
+    /** Executor 注册到 Admin 时使用的应用名称。 */
     private String appName = "orbit-executor";
+    /** Admin 地址列表，多个地址以配置约定的分隔符组织。 */
     private String adminAddresses = "http://127.0.0.1:8080";
+    /** Executor 对外暴露的地址；为空时由运行环境/Bootstrap 自动推导。 */
     private String address = "";
+    /** Executor HTTP 服务端口；0 表示使用应用容器的默认端口配置。 */
     private int port = 0;
+    /** 与 Admin 通信使用的访问令牌；生产环境必须通过 Secret 注入。 */
     private String accessToken = "";
+    /** Executor 向 Admin 发送心跳的周期。 */
     private long heartbeatIntervalMs = 20000;
+    /** Executor 节点唯一标识；K8S 场景通常使用 Pod 名称。 */
     private String nodeId = "";
+    /** 执行任务的工作线程数。 */
     private int workerThreads = 8;
+    /** 工作线程池等待队列容量，用于限制本地任务堆积。 */
     private int queueCapacity = 256;
+    /** 单个任务最长允许等待/执行的时间窗口，单位秒。 */
     private int maxJobWaitSeconds = 86400;
+    /** callback 失败后的额外重试次数。 */
     private int callbackRetryTimes = 3;
+    /** callback 重试之间的等待时间，单位毫秒。 */
     private long callbackRetryIntervalMs = 2000;
+    /** 保留兼容配置；callback 实际使用无界队列避免因容量限制主动丢结果。 */
     private int callbackQueueCapacity = 1000;
 
     /** Redis 幂等保护。生产多副本建议开启，使用 logId 防止 HTTP 超时重试造成重复执行。 */
@@ -26,6 +46,7 @@ public class ExecutorProperties {
     private long executionIdempotencyTtlSeconds = 86400;
     /** 使用 Redis Stream 持久化执行结果；cluster 生产模式建议开启。 */
     private boolean durableCallbackEnabled = false;
+    /** Executor 写入、Admin 消费的 Redis Stream key。 */
     private String callbackStreamKey = "orbit:callback:stream";
 
     public boolean isEnabled() { return enabled; }
