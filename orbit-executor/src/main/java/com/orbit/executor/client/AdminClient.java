@@ -9,9 +9,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 
+import java.net.http.HttpClient;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -55,18 +57,23 @@ public class AdminClient {
     private final HttpHeaders jsonHeaders;
 
     /**
-     * 构造方法，初始化 RestTemplate、预解析地址列表与预构建请求头
+     * 构造方法，初始化 RestTemplate、预解析地址列表与预构建请求头。
+     *
+     * 底层使用 JDK HttpClient（NIO，见 ExecutorClient 同款选型）：阻塞等待不持有监视器，
+     * 与 JDK 21 虚拟线程及未来的线程模型演进保持兼容。
      *
      * @param properties 执行器配置
      */
     public AdminClient(ExecutorProperties properties) {
         this.properties = properties;
-        SimpleClientHttpRequestFactory f = new SimpleClientHttpRequestFactory();
-        // 设置与调度中心建立 HTTP 连接的超时时间为 3 秒
-        f.setConnectTimeout(3000);
-        // 设置读取响应的超时时间为 5 秒
-        f.setReadTimeout(5000);
-        this.restTemplate = new RestTemplate(f);
+        HttpClient client = HttpClient.newBuilder()
+                // 与调度中心建立 HTTP 连接的超时时间为 3 秒
+                .connectTimeout(Duration.ofMillis(3000))
+                .build();
+        JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(client);
+        // 读取响应的超时时间为 5 秒
+        factory.setReadTimeout(Duration.ofMillis(5000));
+        this.restTemplate = new RestTemplate(factory);
         this.adminBases = parseAdminBases(properties.getAdminAddresses());
         this.jsonHeaders = buildJsonHeaders(properties.getAccessToken());
     }

@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.baomidou.mybatisplus.annotation.Version;
 
+import java.io.Serial;
 import java.io.Serializable;
 import java.util.Date;
 
@@ -19,6 +20,7 @@ import java.util.Date;
 @TableName("orbit_job")
 public class OrbitJobPO implements Serializable {
 
+    @Serial
     private static final long serialVersionUID = 1L;
 
     /** 主键自增 ID */
@@ -49,8 +51,21 @@ public class OrbitJobPO implements Serializable {
     /** 执行超时（秒） */
     private Integer timeoutSeconds;
 
-    /** 路由策略：ROUND / RANDOM / FIRST */
+    /** 路由策略：ROUND / RANDOM / FIRST / CONSISTENT_HASH */
     private String routeStrategy;
+
+    /** 失败重试次数（不含首次执行）；可空表示历史行，读侧默认 0 */
+    private Integer retryCount;
+
+    /** 失败重试间隔（秒）；可空表示历史行，读侧默认 10 */
+    private Integer retryIntervalSeconds;
+
+    /**
+     * 同名任务串行执行开关（任务级阻塞策略覆盖）；
+     * 可空表示跟随全局配置，更新策略设为 ALWAYS 以允许清空回 NULL（恢复跟随全局）。
+     */
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private Boolean serialExecution;
 
     /** 是否启用调度 */
     private Boolean enabled;
@@ -135,6 +150,30 @@ public class OrbitJobPO implements Serializable {
 
     public void setRouteStrategy(String routeStrategy) {
         this.routeStrategy = routeStrategy;
+    }
+
+    public Integer getRetryCount() {
+        return retryCount;
+    }
+
+    public void setRetryCount(Integer retryCount) {
+        this.retryCount = retryCount;
+    }
+
+    public Integer getRetryIntervalSeconds() {
+        return retryIntervalSeconds;
+    }
+
+    public void setRetryIntervalSeconds(Integer retryIntervalSeconds) {
+        this.retryIntervalSeconds = retryIntervalSeconds;
+    }
+
+    public Boolean getSerialExecution() {
+        return serialExecution;
+    }
+
+    public void setSerialExecution(Boolean serialExecution) {
+        this.serialExecution = serialExecution;
     }
 
     public Boolean getEnabled() {

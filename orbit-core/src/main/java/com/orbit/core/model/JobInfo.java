@@ -1,5 +1,6 @@
 package com.orbit.core.model;
 
+import java.io.Serial;
 import java.io.Serializable;
 import java.util.Date;
 import java.util.HashMap;
@@ -12,6 +13,7 @@ import java.util.Map;
  */
 public class JobInfo implements Serializable {
 
+    @Serial
     private static final long serialVersionUID = 1L;
 
     /**
@@ -60,9 +62,35 @@ public class JobInfo implements Serializable {
      *   - ROUND: 轮询（默认）
      *   - RANDOM: 随机
      *   - FIRST: 首个节点
+     *   - CONSISTENT_HASH: 一致性哈希（同一任务稳定路由到同一节点）
      *
      */
     private String routeStrategy = "ROUND";
+
+    /**
+     * 失败重试次数（不含首次执行），0 表示不重试。
+     * 作用于两层：
+     *
+     *   - 执行级：任务执行失败/超时后由执行器在本地按间隔重试（同一 logId，同一日志行）；
+     *   - 触发级：向执行器派发同步失败（如全部节点不可达）后由调度中心按间隔重试（新 logId，新日志行）。
+     *
+     * 合法范围 [0,10]，由调度中心创建/更新时校验。
+     */
+    private int retryCount = 0;
+
+    /**
+     * 失败重试间隔（秒），0 表示立即重试，默认 10 秒。
+     * 合法范围 [0,3600]，由调度中心创建/更新时校验。
+     */
+    private int retryIntervalSeconds = 10;
+
+    /**
+     * 同名任务串行执行开关（任务级阻塞策略）：
+     * null 表示跟随全局配置 orbit.admin.dispatch-serial-per-job（默认）；
+     * true/false 为任务级显式覆盖，优先级高于全局配置。
+     * 串行开启时，上一轮执行尚未收敛（结果未回传）的后续触发会被跳过。
+     */
+    private Boolean serialExecution;
 
     /**
      * 调度开关（true: 启用定时触发，false: 暂停调度）
@@ -154,6 +182,30 @@ public class JobInfo implements Serializable {
 
     public void setRouteStrategy(String routeStrategy) {
         this.routeStrategy = routeStrategy;
+    }
+
+    public int getRetryCount() {
+        return retryCount;
+    }
+
+    public void setRetryCount(int retryCount) {
+        this.retryCount = retryCount;
+    }
+
+    public int getRetryIntervalSeconds() {
+        return retryIntervalSeconds;
+    }
+
+    public void setRetryIntervalSeconds(int retryIntervalSeconds) {
+        this.retryIntervalSeconds = retryIntervalSeconds;
+    }
+
+    public Boolean getSerialExecution() {
+        return serialExecution;
+    }
+
+    public void setSerialExecution(Boolean serialExecution) {
+        this.serialExecution = serialExecution;
     }
 
     public boolean isEnabled() {

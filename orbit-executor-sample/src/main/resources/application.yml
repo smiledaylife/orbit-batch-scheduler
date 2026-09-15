@@ -5,6 +5,11 @@ server:
 spring:
   application:
     name: orbit-executor-sample
+  # JDK 21 虚拟线程（Boot 3.2+）：Tomcat 请求处理改为虚拟线程每请求一线，
+  # 触发入口在业务高峰下不再占用平台线程；如需回退置为 false。
+  threads:
+    virtual:
+      enabled: true
 
 orbit:
   executor:
@@ -24,12 +29,17 @@ orbit:
     # 排队队列容量：队列满时新触发同步返回 executor saturated（调度中心立刻判失败）
     # 0 = 不排队：并发超过 worker-threads 立即快速失败
     queue-capacity: 256
+    # 任务工作线程改用 JDK 21 虚拟线程（默认 false = 平台线程）。
+    # 有界并发/排队/超时中断语义不变；适合 HTTP/DB 等 IO 密集任务；
+    # 业务 handler 大量使用 synchronized 阻塞时建议保持默认（JDK 21 下 synchronized 会钉住载体线程）。
+    worker-virtual-threads: false
     # ---- 执行结果回传（触发是异步的，任务成败只能靠回传送达调度中心）----
     # 回传失败的重试次数（不含首次）与退避间隔；重试耗尽会打 ERROR，
     # 对应日志将由调度中心的孤儿回收兜底判失败
     callback-retry-times: 3
     callback-retry-interval-ms: 2000
-    # 待回传队列容量：满则丢弃最旧一条并打 ERROR
+    # 兼容保留配置：实际实现使用无界待回传队列，不会因容量限制主动丢结果
+    #（背压靠 Redis Stream 持久化 / 调度中心孤儿回收兜底，见 CallbackClient 类注释）
     callback-queue-capacity: 1000
 
 management:

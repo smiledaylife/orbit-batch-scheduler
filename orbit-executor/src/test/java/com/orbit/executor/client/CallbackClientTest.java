@@ -113,13 +113,14 @@ class CallbackClientTest {
 
         client.send(result("log-f"));
 
-        // 重试耗尽后应重回队列（多次 POST 同一条），而不是一次就丢弃
+        // 重试耗尽后应重回队列（多次 POST 同一条），而不是一次就丢弃；
+        // stats[2] 为重试退回计数，> 0 恰好证明结果被退回而非丢弃
         long deadline = System.currentTimeMillis() + 5000L;
         while (admin.bodies.size() < 2 && System.currentTimeMillis() < deadline) {
             Thread.sleep(20L);
         }
         assertTrue(admin.bodies.size() >= 2, "expected re-queued retries, got " + admin.bodies.size());
-        assertEquals(0L, client.stats()[2], "nothing should be dropped while the queue has room");
+        assertTrue(client.stats()[2] >= 1L, "failed batch must be requeued (retry counter), never dropped");
 
         // 调度中心恢复后应能送达
         admin.succeed = true;
@@ -165,8 +166,9 @@ class CallbackClientTest {
 
         assertTrue(elapsed < 2500L,
                 "shutdown must not wait for full backoff retries, took " + elapsed + "ms");
-        // 结果退回队列而不是丢弃（孤儿回收兜底前仍有机会补发）
+        // 结果仍留在队列中（stats[0] = 待发送数）而不是被丢弃，
+        // 孤儿回收兜底之前仍有机会随下次启动补发
         long[] stats = client.stats();
-        assertEquals(0L, stats[2], "nothing should be dropped by shutdown itself");
+        assertTrue(stats[0] >= 1L, "unsent callbacks must stay queued on shutdown, never dropped");
     }
 }

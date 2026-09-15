@@ -12,20 +12,24 @@
     <description>轻量云原生批量调度框架（调度中心 + 执行器），类似 XXL-JOB</description>
 
     <!--
-      本 POM 只是「聚合器（aggregator）」：仅负责一次性构建下列模块，
-      不作为任何模块的 <parent>，也不下发 properties / dependencyManagement / 插件配置。
+      本 POM 同时是「聚合器」与「父 POM」：四个子模块通过 <parent> 继承本 POM，
+      依赖版本、编译级别与插件配置全部在这里统一下发，子模块 POM 只保留差异部分。
 
-      设计取舍（各模块 POM 自治）：
-      · 每个模块独立声明自己的坐标、编译级别、依赖与插件版本，可脱离本仓库单独构建；
-      · 依赖版本各自通过 import spring-boot-dependencies BOM 收敛；BOM 以 import 方式引入时，
-        父级 <properties> 覆盖版本的写法无效，需要偏离 BOM 的版本必须在模块自身 dependencyManagement
-        中显式声明（例如 orbit-admin 的 Quartz 2.5.2）；
-      · 模块间引用统一用 ${project.version}，同版本号发布，避免版本漂移。
+      统一管理的内容（子模块禁止再各自声明版本）：
+      · properties：JDK 基线、Spring Boot 基线、第三方依赖版本、插件版本；
+      · dependencyManagement：import spring-boot-dependencies BOM 收敛 Spring 全家桶，
+        Quartz / MyBatis / MyBatis-Plus / Druid / openGauss 等需偏离 BOM 的版本在此显式声明；
+      · pluginManagement：compiler（release 21 + -parameters）、surefire、enforcer、
+        spring-boot-maven-plugin（repackage）。
 
-      构建方式（聚合与继承相互独立，reactor 依旧可用）：
+      版本覆盖规则：父 POM 中直接声明的 dependencyManagement 条目优先级高于 import 的 BOM，
+      因此 Quartz 2.5.2、Druid 1.2.25 等覆盖项在父 POM 声明一次即可对全部模块生效。
+
+      构建方式（继承模式下必须从根目录构建，reactor 会自动解析父子关系）：
         mvn clean package -DskipTests                 # 全量
         mvn clean package -DskipTests -pl orbit-admin -am   # 单模块 + 其依赖
-        cd orbit-core && mvn install                  # 也可完全独立构建
+        mvn install -pl orbit-core                    # 需要单独发布 core 时先安装父 POM：
+                                                      # mvn install -N 后再进入子模块构建
     -->
     <modules>
         <module>orbit-core</module>
@@ -33,5 +37,142 @@
         <module>orbit-executor</module>
         <module>orbit-executor-sample</module>
     </modules>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <!-- 全模块统一 JDK 21 基线（Spring Boot 3.x 最低要求 JDK 17，项目为新项目无历史包袱） -->
+        <java.release>21</java.release>
+        <spring-boot.version>3.5.12</spring-boot.version>
+
+        <!--
+          依赖版本统一管理。其余 Spring 生态依赖（Jackson、Tomcat、H2、PostgreSQL 驱动、
+          spring-boot-starter-* 等）均由 spring-boot-dependencies BOM 收敛，不在此重复声明。
+        -->
+        <quartz.version>2.5.2</quartz.version>
+        <!--
+          Druid 从 1.2.13 起才提供 Spring Boot 3 专用 starter（druid-spring-boot-3-starter）。
+          Boot 3 不再读取 spring.factories 自动装配，旧的 druid-spring-boot-starter 在 Boot 3 下
+          不会生效（数据源会静默退回 HikariCP），因此使用 1.2.25 的 boot3 starter。
+        -->
+        <druid.version>1.2.25</druid.version>
+        <mybatis.version>3.5.19</mybatis.version>
+        <mybatis-plus.version>3.5.7</mybatis-plus.version>
+        <opengauss.version>5.0.1</opengauss.version>
+
+        <!-- 构建插件版本 -->
+        <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
+        <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
+        <maven-enforcer-plugin.version>3.4.1</maven-enforcer-plugin.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring 全家桶版本收敛（等价于继承 spring-boot-starter-parent 的版本管理部分） -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- 以下为偏离/补充 BOM 的版本，声明一次即可对全部模块生效 -->
+            <dependency>
+                <groupId>org.quartz-scheduler</groupId>
+                <artifactId>quartz</artifactId>
+                <version>${quartz.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mybatis</groupId>
+                <artifactId>mybatis</artifactId>
+                <version>${mybatis.version}</version>
+            </dependency>
+            <!-- Spring Boot 3 必须使用 mybatis-plus-spring-boot3-starter（版本号与 Boot 2 线相同，artifact 不同） -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter-test</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>druid-spring-boot-3-starter</artifactId>
+                <version>${druid.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.opengauss</groupId>
+                <artifactId>opengauss-jdbc</artifactId>
+                <version>${opengauss.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${maven-compiler-plugin.version}</version>
+                    <configuration>
+                        <release>${java.release}</release>
+                        <!-- Spring Framework 6.1 起不再从字节码局部变量表推断参数名，
+                             @RequestParam/@PathVariable 等注解依赖 -parameters 保留参数名 -->
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${maven-surefire-plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <version>${spring-boot.version}</version>
+                    <executions>
+                        <execution>
+                            <id>repackage</id>
+                            <goals>
+                                <goal>repackage</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
+        <plugins>
+            <!-- 对全部模块强制 JDK 21 基线：用低版本 JDK 构建会在 release=21 处失败，
+                 这里提前给出可读的错误信息，而不是一堆字节码版本报错 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>${maven-enforcer-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>enforce-jdk21</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[21,)</version>
+                                    <message>orbit 全模块统一基线 JDK 21（Spring Boot 3.5），必须使用 JDK 21 及以上构建。</message>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

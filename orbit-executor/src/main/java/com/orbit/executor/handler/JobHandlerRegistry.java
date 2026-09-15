@@ -165,34 +165,10 @@ public class JobHandlerRegistry implements SmartInitializingSingleton, Applicati
     }
 
     /**
-     * 封装业务 Bean 与反射执行 Method 的内部执行器
+     * 封装业务 Bean 与反射执行 Method 的内部执行器。
+     * JDK 21 record：三个只读组件天然不可变， invoke() 作为 record 的附加行为方法。
      */
-    static final class Handler {
-        /**
-         * 业务 Bean 实例
-         */
-        private final Object bean;
-
-        /**
-         * 目标反射执行方法
-         */
-        private final Method method;
-
-        /**
-         * Handler 注册名称
-         */
-        private final String name;
-
-        /**
-         * @param bean   持有该方法的 Spring Bean
-         * @param method 标注了 {@code @OrbitJob} 的方法
-         * @param name   注册名称（注解值，缺省取方法名）
-         */
-        Handler(Object bean, Method method, String name) {
-            this.bean = bean;
-            this.method = method;
-            this.name = name;
-        }
+    record Handler(Object bean, Method method, String name) {
 
         /**
          * 反射执行方法，并根据参数类型完成上下文参数注入
@@ -201,7 +177,7 @@ public class JobHandlerRegistry implements SmartInitializingSingleton, Applicati
          * @return 方法执行结果
          */
         Object invoke(JobContext context) {
-            Class<?>[] types = method.getParameterTypes();
+            Class<?>[] types = method().getParameterTypes();
             Object[] args = new Object[types.length];
             // 动态匹配入参类型：若为 JobContext 则注入上下文，否则注入 params Map
             for (int i = 0; i < types.length; i++) {
@@ -212,13 +188,13 @@ public class JobHandlerRegistry implements SmartInitializingSingleton, Applicati
                 }
             }
             try {
-                return method.invoke(bean, args);
+                return method().invoke(bean(), args);
             } catch (java.lang.reflect.InvocationTargetException e) {
                 // 解包 InvocationTargetException，抛出真实的底层业务异常原因
                 Throwable c = e.getCause() == null ? e : e.getCause();
-                throw new RuntimeException("handler '" + name + "' failed: " + c.getMessage(), c);
+                throw new RuntimeException("handler '" + name() + "' failed: " + c.getMessage(), c);
             } catch (Exception e) {
-                throw new RuntimeException("handler '" + name + "' invoke error: " + e.getMessage(), e);
+                throw new RuntimeException("handler '" + name() + "' invoke error: " + e.getMessage(), e);
             }
         }
     }

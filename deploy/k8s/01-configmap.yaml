@@ -23,19 +23,21 @@ data:
           test-while-idle: true
           time-between-eviction-runs-millis: 60000
           min-evictable-idle-time-millis: 300000
-      redis:
-        host: ${ORBIT_REDIS_HOST}
-        port: ${ORBIT_REDIS_PORT:6379}
-        password: ${ORBIT_REDIS_PASSWORD:}
-        database: ${ORBIT_REDIS_DATABASE:0}
-        timeout: ${ORBIT_REDIS_TIMEOUT:2s}
-        connect-timeout: ${ORBIT_REDIS_CONNECT_TIMEOUT:2s}
-        lettuce:
-          pool:
-            max-active: 16
-            max-idle: 8
-            min-idle: 2
-            max-wait: 2s
+      # Spring Boot 3 起 Redis 配置前缀为 spring.data.redis.*
+      data:
+        redis:
+          host: ${ORBIT_REDIS_HOST}
+          port: ${ORBIT_REDIS_PORT:6379}
+          password: ${ORBIT_REDIS_PASSWORD:}
+          database: ${ORBIT_REDIS_DATABASE:0}
+          timeout: ${ORBIT_REDIS_TIMEOUT:2s}
+          connect-timeout: ${ORBIT_REDIS_CONNECT_TIMEOUT:2s}
+          lettuce:
+            pool:
+              max-active: 16
+              max-idle: 8
+              min-idle: 2
+              max-wait: 2s
       quartz:
         job-store-type: jdbc
         jdbc:
@@ -66,10 +68,12 @@ data:
     server:
       port: 8081
     spring:
-      redis:
-        host: ${SPRING_REDIS_HOST}
-        port: ${SPRING_REDIS_PORT:6379}
-        password: ${SPRING_REDIS_PASSWORD:}
+      # Spring Boot 3 起 Redis 配置前缀为 spring.data.redis.*
+      data:
+        redis:
+          host: ${SPRING_REDIS_HOST}
+          port: ${SPRING_REDIS_PORT:6379}
+          password: ${SPRING_REDIS_PASSWORD:}
     orbit:
       executor:
         enabled: true

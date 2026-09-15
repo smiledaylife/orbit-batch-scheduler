@@ -5,8 +5,15 @@ server:
 spring:
   application:
     name: orbit-admin
+  # JDK 21 虚拟线程（Boot 3.2+）：Tomcat 请求处理改为虚拟线程每请求一线，
+  # 心跳、触发、回传等 HTTP 入口在慢 IO（DB 查询、Redis）下不再占用平台线程；
+  # Quartz 自身线程池、Druid 连接池、@Scheduled 任务模型不受影响。
+  # 如需回退传统线程模型，置为 false 即可。
+  threads:
+    virtual:
+      enabled: true
   datasource:
-    # 使用 Druid 数据库连接池（druid-spring-boot-starter 自动装配，type 可省略，显式声明更清晰）
+    # 使用 Druid 数据库连接池（druid-spring-boot-3-starter 自动装配，type 可省略，显式声明更清晰）
     type: com.alibaba.druid.pool.DruidDataSource
     # 默认嵌入式 H2（PostgreSQL 兼容模式），开箱即用；生产库可配置为 PostgreSQL 或 GaussDB
     url: jdbc:h2:file:./data/orbit-admin;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE
@@ -92,6 +99,10 @@ orbit:
     dispatch-threads: 64
     # 排队上限：满则新触发快速失败并写一条 FAILED 日志（scheduler saturated）；0 = 不排队
     dispatch-queue-capacity: 256
+    # 触发通道改用 JDK 21 虚拟线程（默认 false = 平台线程）。
+    # 有界并发/排队/拒绝语义不变；底层 HTTP 客户端已是虚拟线程友好的 JDK HttpClient，
+    # 高频 Cron 大规模派发时开启可显著降低线程内存占用。
+    dispatch-virtual-threads: false
     # 同名任务串行：上一轮执行的结果尚未回传时，本次到点跳过（只计数，见 /overview 的 dispatchSkipped）。
     # 该守卫是进程内的，跨副本不重叠依赖 Quartz 集群行锁。
     dispatch-serial-per-job: true

@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 任务与日志持久化存储层（MyBatis-Plus 实现）。
@@ -44,6 +45,8 @@ public class JobStore {
 
     /** 默认超时（秒） */
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
+    /** 默认重试间隔（秒）：历史行该列为 NULL 或新任务未显式设置时使用 */
+    private static final int DEFAULT_RETRY_INTERVAL_SECONDS = 10;
     /** 每页最大记录数 */
     private static final int MAX_PAGE_SIZE = 200;
     /** 批量删除每批行数：避免大事务长锁 */
@@ -145,6 +148,9 @@ public class JobStore {
             po.setParams(paramsJson);
             po.setTimeoutSeconds(job.getTimeoutSeconds() <= 0 ? DEFAULT_TIMEOUT_SECONDS : job.getTimeoutSeconds());
             po.setRouteStrategy(blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy());
+            po.setRetryCount(Math.max(0, job.getRetryCount()));
+            po.setRetryIntervalSeconds(Math.max(0, job.getRetryIntervalSeconds()));
+            po.setSerialExecution(job.getSerialExecution());
             po.setEnabled(job.isEnabled());
             po.setVersion(1);
             po.setCreatedAt(now);
@@ -181,6 +187,9 @@ public class JobStore {
         po.setParams(paramsJson);
         po.setTimeoutSeconds(job.getTimeoutSeconds() <= 0 ? DEFAULT_TIMEOUT_SECONDS : job.getTimeoutSeconds());
         po.setRouteStrategy(blankToNull(job.getRouteStrategy()) == null ? "ROUND" : job.getRouteStrategy());
+        po.setRetryCount(Math.max(0, job.getRetryCount()));
+        po.setRetryIntervalSeconds(Math.max(0, job.getRetryIntervalSeconds()));
+        po.setSerialExecution(job.getSerialExecution());
         po.setEnabled(job.isEnabled());
         po.setUpdatedAt(now);
         // 乐观锁版本号：插件据此拼 WHERE version=? 并在 SET 中自增
@@ -315,10 +324,10 @@ public class JobStore {
      * @param liveAddresses  当前在线执行器地址集合；承接节点不在线且超过 offlineMs 的记录被收敛
      * @param hardMessage    硬上界回收写入 message 的原因说明
      * @param offlineMessage 执行器离线回收写入 message 的原因说明
-     * @return 本次收敛的记录数
+     * @return 本次真正完成 RUNNING -> FAILED 转换的日志明细（供告警事件携带任务上下文）
      */
-    public List<String> reapOrphanedRunning(long hardCapMs, long offlineMs,
-                                            java.util.Set<String> liveAddresses, String hardMessage,
+    public List<JobLog> reapOrphanedRunning(long hardCapMs, long offlineMs,
+                                            Set<String> liveAddresses, String hardMessage,
                                             String offlineMessage) {
         long now = System.currentTimeMillis();
         Date hardCap = new Date(now - Math.max(0L, hardCapMs));
@@ -327,58 +336,66 @@ public class JobStore {
         Date scanBefore = new Date(now - Math.max(0L, Math.min(offlineMs, hardCapMs)));
 
         LambdaQueryWrapper<OrbitJobLogPO> qw = new LambdaQueryWrapper<OrbitJobLogPO>()
-                .select(OrbitJobLogPO::getLogId, OrbitJobLogPO::getExecutorAddress,
-                        OrbitJobLogPO::getStartTime)
+                .select(OrbitJobLogPO::getLogId, OrbitJobLogPO::getJobId, OrbitJobLogPO::getJobName,
+                        OrbitJobLogPO::getAppName, OrbitJobLogPO::getHandler,
+                        OrbitJobLogPO::getExecutorAddress, OrbitJobLogPO::getStartTime)
                 .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
                 .lt(OrbitJobLogPO::getStartTime, scanBefore);
         List<OrbitJobLogPO> rows = logMapper.selectList(qw);
         if (rows == null || rows.isEmpty()) {
-            return new ArrayList<String>();
+            return new ArrayList<JobLog>();
         }
 
         // 候选量极小（正常运行时为空），存活判定放在内存里做，
         // 比在 SQL 里对在线节点列表做 NOT IN 更直观，也避免超长 IN 列表。
-        List<String> hardExpired = new ArrayList<String>();
-        List<String> executorGone = new ArrayList<String>();
+        List<OrbitJobLogPO> hardExpired = new ArrayList<OrbitJobLogPO>();
+        List<OrbitJobLogPO> executorGone = new ArrayList<OrbitJobLogPO>();
         for (OrbitJobLogPO row : rows) {
             String address = row.getExecutorAddress();
             boolean alive = address != null && !address.trim().isEmpty() && liveAddresses.contains(address);
             if (row.getStartTime() != null && row.getStartTime().before(hardCap)) {
-                hardExpired.add(row.getLogId());
+                hardExpired.add(row);
             } else if (!alive) {
-                executorGone.add(row.getLogId());
+                executorGone.add(row);
             }
         }
 
-        List<String> reaped = new ArrayList<String>(hardExpired.size() + executorGone.size());
+        List<JobLog> reaped = new ArrayList<JobLog>(hardExpired.size() + executorGone.size());
         reaped.addAll(markFailed(hardExpired, hardMessage));
         reaped.addAll(markFailed(executorGone, offlineMessage));
         return reaped;
     }
 
     /**
-     * 把给定日志从 RUNNING 收敛为 FAILED。更新条件再带一次 status = RUNNING：
-     * 查询与更新之间可能有回传到达并已收敛，该条件保证不会把已经拿到真实结果的日志改写掉。
+     * 把给定日志从 RUNNING 收敛为 FAILED，返回真正被改写的行。
      *
-     * @param logIds  待回收的日志 ID
+     * 逐行条件更新（每行都带 status = RUNNING 条件）：查询与更新之间可能有回传到达并已收敛，
+     * 该条件保证不会把已经拿到真实结果的日志改写掉；逐行而非整批 UPDATE
+     * 是为了准确区分「回收生效」与「回收前已被回传收敛」的行，
+     * 只有真正被回收的日志才应触发告警，否则会向告警渠道泄漏误报。
+     * 候选量极小（正常运行时为空），逐行更新的开销可忽略。
+     *
+     * @param rows    待回收的日志行（含任务上下文字段）
      * @param message 写入日志的原因
-     * @return 实际被回收的日志 ID（与入参一致；未匹配到行的不会被计入调用方语义之外的状态）
+     * @return 实际被回收的日志明细
      */
-    private List<String> markFailed(List<String> logIds, String message) {
-        if (logIds.isEmpty()) {
-            return logIds;
+    private List<JobLog> markFailed(List<OrbitJobLogPO> rows, String message) {
+        List<JobLog> applied = new ArrayList<JobLog>(rows.size());
+        for (OrbitJobLogPO row : rows) {
+            LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                    .eq(OrbitJobLogPO::getLogId, row.getLogId())
+                    .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
+                    .set(OrbitJobLogPO::getStatus, JobLogStatus.FAILED)
+                    .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
+                    .set(OrbitJobLogPO::getEndTime, new Date());
+            if (logMapper.update(null, uw) > 0) {
+                applied.add(toLog(row));
+            }
         }
-        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
-                .in(OrbitJobLogPO::getLogId, logIds)
-                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
-                .set(OrbitJobLogPO::getStatus, JobLogStatus.FAILED)
-                .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
-                .set(OrbitJobLogPO::getEndTime, new Date());
-        int updated = logMapper.update(null, uw);
-        if (updated > 0) {
-            log.warn("[orbit-admin] reaped {} orphaned RUNNING log(s): {}", updated, message);
+        if (!applied.isEmpty()) {
+            log.warn("[orbit-admin] reaped {} orphaned RUNNING log(s): {}", applied.size(), message);
         }
-        return logIds;
+        return applied;
     }
 
     /**
@@ -415,20 +432,32 @@ public class JobStore {
     }
 
     /**
-     * 分页查询调度日志列表（按 ID 倒序，即最新在前）。
+     * 分页查询调度日志列表（按 ID 倒序，即最新在前），支持任务名、状态与时间范围过滤。
      *
      * @param jobName 任务名称筛选（可为空）
+     * @param status  状态筛选（RUNNING / SUCCESS / FAILED，可为空）
+     * @param from    起始时间筛选（start_time >= from，可为空）
+     * @param to      截止时间筛选（start_time <= to，可为空）
      * @param page    页码
      * @param size    每页记录数
      * @return 分页结果集
      */
-    public PageResult<JobLog> pageLogs(String jobName, int page, int size) {
+    public PageResult<JobLog> pageLogs(String jobName, String status, Date from, Date to, int page, int size) {
         int p = Math.max(1, page);
         int s = Math.min(MAX_PAGE_SIZE, Math.max(1, size));
 
         LambdaQueryWrapper<OrbitJobLogPO> qw = new LambdaQueryWrapper<>();
         if (jobName != null && !jobName.trim().isEmpty()) {
             qw.eq(OrbitJobLogPO::getJobName, jobName);
+        }
+        if (status != null && !status.trim().isEmpty()) {
+            qw.eq(OrbitJobLogPO::getStatus, status.trim());
+        }
+        if (from != null) {
+            qw.ge(OrbitJobLogPO::getStartTime, from);
+        }
+        if (to != null) {
+            qw.le(OrbitJobLogPO::getStartTime, to);
         }
         qw.orderByDesc(OrbitJobLogPO::getId);
 
@@ -438,6 +467,25 @@ public class JobStore {
             items.add(toLog(po));
         }
         return new PageResult<JobLog>(p, s, result.getTotal(), items);
+    }
+
+    /**
+     * 按日志 ID 查询单条调度日志。
+     *
+     * 主要供告警事件回退取任务上下文：执行器回传只携带 logId 与结果，
+     * 当回传未回填任务名等字段（旧版执行器或字段丢失）时，用本方法补齐
+     * 告警事件所需的 jobName / appName / handler。
+     *
+     * @param logId 日志追踪 ID
+     * @return 日志 Optional 包装
+     */
+    public Optional<JobLog> findLogByLogId(String logId) {
+        if (logId == null || logId.trim().isEmpty()) {
+            return Optional.empty();
+        }
+        OrbitJobLogPO po = logMapper.selectOne(
+                new LambdaQueryWrapper<OrbitJobLogPO>().eq(OrbitJobLogPO::getLogId, logId));
+        return Optional.ofNullable(po).map(this::toLog);
     }
 
     // ============================ PO <-> 模型 转换 ============================
@@ -477,6 +525,12 @@ public class JobStore {
         j.setParams(parseMap(po.getParams()));
         j.setTimeoutSeconds(po.getTimeoutSeconds() == null ? DEFAULT_TIMEOUT_SECONDS : po.getTimeoutSeconds());
         j.setRouteStrategy(po.getRouteStrategy() == null ? "ROUND" : po.getRouteStrategy());
+        // 重试字段：历史行该列为 NULL，落到安全默认值（不重试 / 10 秒间隔）
+        j.setRetryCount(po.getRetryCount() == null ? 0 : po.getRetryCount());
+        j.setRetryIntervalSeconds(po.getRetryIntervalSeconds() == null
+                ? DEFAULT_RETRY_INTERVAL_SECONDS : po.getRetryIntervalSeconds());
+        // null 透传：表示「跟随全局串行配置」，不能在此落成 true/false，否则会掩盖任务级覆盖语义
+        j.setSerialExecution(po.getSerialExecution());
         j.setEnabled(Boolean.TRUE.equals(po.getEnabled()));
         j.setVersion(po.getVersion() == null ? 0 : po.getVersion());
         j.setCreatedAt(po.getCreatedAt());

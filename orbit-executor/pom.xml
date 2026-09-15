@@ -3,31 +3,23 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    <groupId>com.orbit</groupId>
+
+    <!-- 继承根 POM：依赖版本、编译级别、enforcer 与插件配置全部由父 POM 统一管理 -->
+    <parent>
+        <groupId>com.orbit</groupId>
+        <artifactId>orbit-batch-scheduler</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
     <artifactId>orbit-executor</artifactId>
-    <version>1.0.0</version>
     <packaging>jar</packaging>
     <name>Orbit :: Executor</name>
     <description>执行器 SDK：@OrbitJob 扫描、向调度中心注册、接收触发执行</description>
-    <properties>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <java.release>8</java.release>
-        <spring-boot.version>2.7.18</spring-boot.version>
-        <maven-compiler-plugin.version>3.10.1</maven-compiler-plugin.version>
-        <maven-surefire-plugin.version>2.22.2</maven-surefire-plugin.version>
-    </properties>
-    <dependencyManagement>
-        <dependencies>
-            <dependency>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-dependencies</artifactId>
-                <version>${spring-boot.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
+
+    <!--
+      执行器 SDK 与调度中心同基线 JDK 21 / Spring Boot 3.5（父 POM 统一下发）。
+      依赖 SDK 的业务应用也必须运行在 JDK 21+ / Spring Boot 3.5.x。
+    -->
     <dependencies>
         <dependency>
             <groupId>com.orbit</groupId>
@@ -42,10 +34,17 @@
             <groupId>org.springframework</groupId>
             <artifactId>spring-web</artifactId>
         </dependency>
-        <!-- logId 幂等保护依赖 Redis；默认关闭，不访问 Redis。 -->
+        <!--
+            Redis 仅在两类可选能力中使用：logId 执行幂等（默认关闭）与持久化 callback（默认关闭）。
+            optional=true：业务应用不传递继承该依赖 —— 未使用 Redis 的应用不引入 Redis 客户端 jar，
+            也不会激活 Spring Boot 的 RedisAutoConfiguration / RedisHealthIndicator
+            （否则 actuator 健康探针会因连不上 Redis 误报 DOWN）。
+            自动装配对两类能力都做了无 Redis 降级，见 OrbitExecutorAutoConfiguration。
+        -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -58,34 +57,6 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>${maven-compiler-plugin.version}</version>
-                <configuration><source>${java.release}</source><target>${java.release}</target></configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>${maven-surefire-plugin.version}</version>
-            </plugin>
-        </plugins>
-    </build>
-    <profiles>
-        <profile>
-            <id>jdk9plus</id>
-            <activation><jdk>[9,)</jdk></activation>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-compiler-plugin</artifactId>
-                        <configuration><release>${java.release}</release></configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
+
+    <!-- 纯库模块：不打包可执行 jar，无需 spring-boot-maven-plugin -->
 </project>

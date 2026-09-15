@@ -1,14 +1,21 @@
 package com.orbit.admin.config;
 
+import com.orbit.admin.alert.AlertDispatcher;
+import com.orbit.admin.alert.JobAlertEvent;
 import com.orbit.admin.registry.ExecutorRegistry;
 import com.orbit.admin.dispatch.OutstandingDispatches;
 import com.orbit.admin.store.JobStore;
+import com.orbit.core.model.ExecutorNode;
+import com.orbit.core.model.JobLog;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 /**
  * 调度中心内部后台定时任务组件，承担三类运维性清理：
@@ -44,21 +51,24 @@ public class AdminScheduleTasks {
     private final JobStore jobStore;
     private final AdminProperties properties;
     private final OutstandingDispatches outstanding;
+    private final AlertDispatcher alertDispatcher;
 
     /**
      * 构造方法，注入执行器注册表、存储层与配置
      *
-     * @param registry    执行器注册表
-     * @param jobStore    任务与日志存储
-     * @param properties  调度中心配置
-     * @param outstanding 在途执行登记簿
+     * @param registry        执行器注册表
+     * @param jobStore        任务与日志存储
+     * @param properties      调度中心配置
+     * @param outstanding     在途执行登记簿
+     * @param alertDispatcher 告警异步分发器（回收即告警：执行结果丢失需要运维知情）
      */
     public AdminScheduleTasks(ExecutorRegistry registry, JobStore jobStore, AdminProperties properties,
-                              OutstandingDispatches outstanding) {
+                              OutstandingDispatches outstanding, AlertDispatcher alertDispatcher) {
         this.registry = registry;
         this.jobStore = jobStore;
         this.properties = properties;
         this.outstanding = outstanding;
+        this.alertDispatcher = alertDispatcher;
     }
 
     /**
@@ -98,20 +108,25 @@ public class AdminScheduleTasks {
             long offlineMs = Math.max(MIN_HEARTBEAT_SECONDS, properties.getHeartbeatTimeoutSeconds()) * 1000L
                     + REAP_EXTRA_GRACE_MS;
 
-            java.util.Set<String> live = new java.util.HashSet<String>();
-            for (com.orbit.core.model.ExecutorNode node : registry.listAll()) {
+            Set<String> live = new HashSet<String>();
+            for (ExecutorNode node : registry.listAll()) {
                 if (node.getAddress() != null) {
                     live.add(node.getAddress());
                 }
             }
 
-            java.util.List<String> reaped = jobStore.reapOrphanedRunning(hardCapMs, offlineMs, live,
+            List<JobLog> reaped = jobStore.reapOrphanedRunning(hardCapMs, offlineMs, live,
                     "orphaned running log: execution exceeded max-timeout and no callback arrived",
                     "orphaned running log: executor went offline before calling back");
             // 日志已收敛到终态，必须同步释放串行守卫，
-            // 否则这些任务会被登记簿一直判定为「上一轮在跑」而永久不再触发。
-            for (String logId : reaped) {
-                outstanding.release(logId);
+            // 否则这些任务会被登记簿一直判定为「上一轮在跑」而永久不再触发；
+            // 同时按条投递 EXECUTION_LOST 告警（只有真正被回收的行才会返回）。
+            for (JobLog reapedLog : reaped) {
+                outstanding.release(reapedLog.getLogId());
+                alertDispatcher.fire(new JobAlertEvent(JobAlertEvent.EXECUTION_LOST,
+                        reapedLog.getJobName(), reapedLog.getAppName(), reapedLog.getHandler(),
+                        reapedLog.getLogId(), reapedLog.getExecutorAddress(), reapedLog.getCostMs(),
+                        reapedLog.getMessage(), new Date()));
             }
         } catch (Exception e) {
             log.error("[orbit-admin] failed to reap orphaned running logs: {}", e.getMessage(), e);

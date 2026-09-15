@@ -4,13 +4,13 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
+import jakarta.annotation.PostConstruct;
 
 /**
  * 调度中心配置属性。
  *
- * <p>统一承载注册中心、派发、超时、集群执行 Lease、Redis Stream callback 和 Quartz
- * 对账等运行参数。cluster profile 下会执行更严格的生产配置校验。</p>
+ * 统一承载注册中心、派发、超时、集群执行 Lease、Redis Stream callback 和 Quartz
+ * 对账等运行参数。cluster profile 下会执行更严格的生产配置校验。
  */
 @Component
 @ConfigurationProperties(prefix = "orbit.admin")
@@ -42,6 +42,13 @@ public class AdminProperties {
     private boolean dispatchSerialPerJob = true;
     /** Admin 等待 Executor 接受触发请求的 HTTP 超时时间。 */
     private int triggerTimeoutSeconds = 10;
+    /**
+     * 触发通道是否改用 JDK 21 虚拟线程执行派发。
+     * 虚拟线程内存占用远低于平台线程，且触发本身是短 IO 调用（HTTP 客户端已换用
+     * vthread 友好的 JDK HttpClient），适合高频 Cron 场景；默认关闭以保持与历史版本
+     * 完全一致的线程模型。有界并发语义不变：dispatch-threads 仍是在途触发的并发上限。
+     */
+    private boolean dispatchVirtualThreads = false;
 
     /** Redis 集群级执行 Lease。单机开发模式默认关闭，cluster profile 开启。 */
     private boolean executionLeaseEnabled = false;
@@ -157,6 +164,8 @@ public class AdminProperties {
     public void setDispatchQueueCapacity(int value) { this.dispatchQueueCapacity = value; }
     public boolean isDispatchSerialPerJob() { return dispatchSerialPerJob; }
     public void setDispatchSerialPerJob(boolean value) { this.dispatchSerialPerJob = value; }
+    public boolean isDispatchVirtualThreads() { return dispatchVirtualThreads; }
+    public void setDispatchVirtualThreads(boolean value) { this.dispatchVirtualThreads = value; }
     public int getTriggerTimeoutSeconds() { return triggerTimeoutSeconds; }
     public void setTriggerTimeoutSeconds(int value) { this.triggerTimeoutSeconds = value; }
     public boolean isExecutionLeaseEnabled() { return executionLeaseEnabled; }

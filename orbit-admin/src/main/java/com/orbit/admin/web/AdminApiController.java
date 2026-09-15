@@ -1,5 +1,7 @@
 package com.orbit.admin.web;
 
+import com.orbit.admin.alert.AlertDispatcher;
+import com.orbit.admin.alert.JobAlertEvent;
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.dispatch.DispatchExecutor;
 import com.orbit.admin.registry.ExecutorRegistry;
@@ -14,6 +16,7 @@ import com.orbit.core.model.TriggerResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -26,6 +29,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,9 +46,10 @@ import java.util.Map;
  *   - 运维与管理控制侧：
  *
  *       - {@code /orbit/admin/jobs/**}：任务增删改查、暂停、恢复、即时手动触发
- *       - {@code /orbit/admin/logs}：任务调度执行日志分页查询
+ *       - {@code /orbit/admin/logs}：任务调度执行日志分页查询（支持状态/时间范围过滤）
  *       - {@code /orbit/admin/executors}：在线执行器节点列表查询
  *       - {@code /orbit/admin/overview}：调度中心运行大盘统计数据
+ *       - {@code /orbit/admin/alerts/test}：告警扩展点连通性自检
  *
  */
 @RestController
@@ -57,19 +62,22 @@ public class AdminApiController {
     private final ExecutorRegistry registry;
     private final AdminProperties properties;
     private final DispatchExecutor dispatchExecutor;
+    private final AlertDispatcher alertDispatcher;
 
     /**
      * @param jobService       任务与日志服务
      * @param registry         执行器注册表，供 /executors 查询
      * @param properties       调度中心配置，供 /overview 暴露水位
      * @param dispatchExecutor 触发线程池，供 /overview 暴露水位
+     * @param alertDispatcher  告警分发器，供 /overview 暴露告警指标
      */
     public AdminApiController(JobService jobService, ExecutorRegistry registry, AdminProperties properties,
-                              DispatchExecutor dispatchExecutor) {
+                              DispatchExecutor dispatchExecutor, AlertDispatcher alertDispatcher) {
         this.jobService = jobService;
         this.registry = registry;
         this.properties = properties;
         this.dispatchExecutor = dispatchExecutor;
+        this.alertDispatcher = alertDispatcher;
     }
 
     // ==========================================
@@ -233,18 +241,51 @@ public class AdminApiController {
     // ==========================================
 
     /**
-     * 分页查询调度日志。
+     * 分页查询调度日志，支持任务名、状态与时间范围过滤。
+     *
+     * 时间参数用 {@code LocalDateTime}（ISO 格式，如 2026-01-01T00:00:00）：
+     * Spring 6 下 {@code ISO.DATE_TIME} 对 {@code java.util.Date} 的解析要求毫秒与时区，
+     * 裸秒格式会直接 500；LocalDateTime 裸秒可解析，按 JVM 默认时区转 Date 后与
+     * start_time（同为默认时区写库）口径一致。
      *
      * @param jobName 任务名称过滤
+     * @param status  状态过滤（RUNNING / SUCCESS / FAILED，非法值拋 400）
+     * @param from    起始时间过滤（含，ISO 格式如 2026-01-01T00:00:00）
+     * @param to      截止时间过滤（含，ISO 格式）
      * @param page    页码
      * @param size    每页大小
      * @return 日志分页数据
      */
     @GetMapping("/logs")
     public ApiResult<PageResult<JobLog>> logs(@RequestParam(required = false) String jobName,
+                                              @RequestParam(required = false) String status,
+                                              @RequestParam(required = false)
+                                              @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) java.time.LocalDateTime from,
+                                              @RequestParam(required = false)
+                                              @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) java.time.LocalDateTime to,
                                               @RequestParam(defaultValue = "1") int page,
                                               @RequestParam(defaultValue = "10") int size) {
-        return ApiResult.ok(jobService.pageLogs(jobName, page, size));
+        Date fromDate = from == null ? null : java.util.Date.from(from.atZone(java.time.ZoneId.systemDefault()).toInstant());
+        Date toDate = to == null ? null : java.util.Date.from(to.atZone(java.time.ZoneId.systemDefault()).toInstant());
+        return ApiResult.ok(jobService.pageLogs(jobName, status, fromDate, toDate, page, size));
+    }
+
+    /**
+     * 告警扩展点连通性自检：向已配置的告警处理器异步发送一条 TEST 事件。
+     *
+     * 用于接入告警渠道后验证链路（事件 -> 分发器 -> 处理器）是否通畅：
+     * 事件异步投递，本接口只返回受理结果，实际效果（日志/钉钉/邮件等）由
+     * 处理器实现决定，通常在调用后秒级可见。
+     *
+     * @return 受理回执（含当前告警指标）
+     */
+    @PostMapping("/alerts/test")
+    public ApiResult<Map<String, Object>> alertTest() {
+        alertDispatcher.fire(new JobAlertEvent("TEST", "(test)", "(test)", "(test)", null,
+                null, 0, "alert channel test from /orbit/admin/alerts/test", new Date()));
+        Map<String, Object> data = new LinkedHashMap<String, Object>(alertDispatcher.metrics());
+        data.put("dispatched", true);
+        return ApiResult.ok(data);
     }
 
     /**
@@ -263,7 +304,8 @@ public class AdminApiController {
 
     /**
      * 查询调度中心监控总览统计数据，含派发通道的实时指标
-     * （在跑数 / 排队数 / 累计拒绝数 / 累计跳过数）。
+     * （在跑数 / 排队数 / 累计拒绝数 / 累计跳过数）与告警通道指标
+     * （已投递 / 丢弃 / 失败计数）。
      *
      * @return 统计指标集合
      */
@@ -271,6 +313,7 @@ public class AdminApiController {
     public ApiResult<Map<String, Object>> overview() {
         Map<String, Object> data = new LinkedHashMap<String, Object>(jobService.overview());
         data.putAll(dispatchExecutor.metrics());
+        data.putAll(alertDispatcher.metrics());
         return ApiResult.ok(data);
     }
 
@@ -285,6 +328,17 @@ public class AdminApiController {
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResult<Void> badRequest(IllegalArgumentException e) {
         return ApiResult.fail(400, e.getMessage());
+    }
+
+    /**
+     * 捕获请求参数类型不匹配（400）：如 status 拼错、时间格式不符合 ISO 格式。
+     * 不拦的话会落到全局 500，调用方无法区分「自己传错了」与「服务端坏了」。
+     */
+    @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ApiResult<Void> badType(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException e) {
+        String name = e.getName() == null ? "param" : e.getName();
+        return ApiResult.fail(400, "invalid value for '" + name + "': " + e.getValue());
     }
 
     /**

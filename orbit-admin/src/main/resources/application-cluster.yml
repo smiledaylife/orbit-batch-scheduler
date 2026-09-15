@@ -19,20 +19,22 @@ spring:
       time-between-eviction-runs-millis: 60000
       min-evictable-idle-time-millis: 300000
 
-  redis:
-    # Redis 用于集群执行 Lease、callback Stream 和 Quartz 对账分布式锁。
-    host: ${ORBIT_REDIS_HOST}
-    port: ${ORBIT_REDIS_PORT:6379}
-    password: ${ORBIT_REDIS_PASSWORD:}
-    database: ${ORBIT_REDIS_DATABASE:0}
-    timeout: ${ORBIT_REDIS_TIMEOUT:2s}
-    connect-timeout: ${ORBIT_REDIS_CONNECT_TIMEOUT:2s}
-    lettuce:
-      pool:
-        max-active: 16
-        max-idle: 8
-        min-idle: 2
-        max-wait: 2s
+  # Spring Boot 3 起 Redis 配置前缀从 spring.redis.* 迁移到 spring.data.redis.*
+  data:
+    redis:
+      # Redis 用于集群执行 Lease、callback Stream 和 Quartz 对账分布式锁。
+      host: ${ORBIT_REDIS_HOST}
+      port: ${ORBIT_REDIS_PORT:6379}
+      password: ${ORBIT_REDIS_PASSWORD:}
+      database: ${ORBIT_REDIS_DATABASE:0}
+      timeout: ${ORBIT_REDIS_TIMEOUT:2s}
+      connect-timeout: ${ORBIT_REDIS_CONNECT_TIMEOUT:2s}
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+          max-wait: 2s
 
   quartz:
     # JDBC JobStore + isClustered=true 保证多个 Admin Pod 共享 Quartz 调度状态。

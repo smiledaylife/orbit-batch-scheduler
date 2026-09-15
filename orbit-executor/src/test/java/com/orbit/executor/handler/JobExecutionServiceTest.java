@@ -240,6 +240,65 @@ class JobExecutionServiceTest {
         assertEquals(1, service.stats()[0]);
     }
 
+    // ==================== 失败重试（执行级，同 logId） ====================
+
+    private static TriggerRequest reqWithRetry(String handler, int timeoutSeconds, int retryCount,
+                                               int retryIntervalSeconds) {
+        TriggerRequest r = req(handler, timeoutSeconds);
+        r.setRetryCount(retryCount);
+        r.setRetryIntervalSeconds(retryIntervalSeconds);
+        return r;
+    }
+
+    /**
+     * 执行级重试成功路径：首轮失败不回传，重试轮成功后一次性回传 SUCCESS，
+     * 同一 logId 同一日志行；成功 message 标注重试轮次。
+     */
+    @Test
+    void executionRetryRerunsAndSucceedsWithSameLogId() throws Exception {
+        PoolJobs.flakyCount.set(0);
+        boot(2, 8);
+
+        service.submit(reqWithRetry("flaky", 10, 2, 0), registry(), "node-1");
+
+        TriggerResult result = awaitCallback(1);
+        // 整个重试链只有一条终局回传（中间失败不回传）
+        assertEquals(1, callback.results.size(), "intermediate failures must not be delivered");
+        assertTrue(result.isSuccess());
+        assertEquals("log-flaky", result.getLogId());
+        assertTrue(result.getMessage().contains("attempt 2/3"), "got: " + result.getMessage());
+        // 重试轮次透传给业务上下文
+        assertEquals(2, PoolJobs.lastAttempt.get());
+    }
+
+    /** 重试耗尽后回传失败，message 带轮次轨迹；同样只有一条终局回传。 */
+    @Test
+    void executionRetryExhaustsAndFailsWithAttemptTrail() throws Exception {
+        boot(2, 8);
+
+        service.submit(reqWithRetry("boom", 10, 1, 0), registry(), "node-1");
+
+        TriggerResult result = awaitCallback(1);
+        assertEquals(1, callback.results.size());
+        assertFalse(result.isSuccess());
+        assertTrue(result.getMessage().contains("boom!"), "got: " + result.getMessage());
+        assertTrue(result.getMessage().contains("attempt 2/2"), "got: " + result.getMessage());
+    }
+
+    /** 超时同样计入重试范围：首轮超时后重试轮成功。 */
+    @Test
+    void timeoutTriggersRetryAndRetrySucceeds() throws Exception {
+        PoolJobs.flakyCount.set(0);
+        boot(2, 8);
+
+        // 首轮故意慢到超时；重试轮 flakyCount 已经 >=1（首轮仍会执行 slowOnce 一次）
+        service.submit(reqWithRetry("slowOnce", 1, 2, 0), registry(), "node-1");
+
+        TriggerResult result = awaitCallback(1);
+        assertEquals(1, callback.results.size());
+        assertTrue(result.isSuccess(), "retry attempt should succeed, got: " + result.getMessage());
+    }
+
     /**
      * 测试用 JobHandler 集合。
      */
@@ -247,6 +306,14 @@ class JobExecutionServiceTest {
     static class PoolJobs {
         static volatile CountDownLatch blockerStarted;
         static volatile CountDownLatch releaseBlocker;
+
+        /** flaky handler 的调用计数：首轮抛异常，后续轮成功 */
+        static final java.util.concurrent.atomic.AtomicInteger flakyCount =
+                new java.util.concurrent.atomic.AtomicInteger(0);
+
+        /** 最近一次执行收到的业务轮次（经 JobContext.attempt） */
+        static final java.util.concurrent.atomic.AtomicInteger lastAttempt =
+                new java.util.concurrent.atomic.AtomicInteger(0);
 
         @Bean
         static Jobs jobs() {
@@ -287,6 +354,24 @@ class JobExecutionServiceTest {
             @OrbitJob("threadName")
             public String threadName() {
                 return Thread.currentThread().getName();
+            }
+
+            @OrbitJob("flaky")
+            public String flaky(com.orbit.executor.JobContext ctx) {
+                lastAttempt.set(ctx.getAttempt());
+                if (flakyCount.incrementAndGet() == 1) {
+                    throw new IllegalStateException("first attempt always fails");
+                }
+                return "ok";
+            }
+
+            /** 首轮睡 3 秒（在 1 秒超时内必超时），后续轮立即成功 */
+            @OrbitJob("slowOnce")
+            public String slowOnce(com.orbit.executor.JobContext ctx) throws InterruptedException {
+                if (ctx.getAttempt() == 1) {
+                    Thread.sleep(3000L);
+                }
+                return "ok";
             }
         }
     }

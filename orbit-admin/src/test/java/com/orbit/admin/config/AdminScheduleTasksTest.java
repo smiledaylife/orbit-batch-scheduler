@@ -1,8 +1,12 @@
 package com.orbit.admin.config;
 
+import com.orbit.admin.alert.AlertDispatcher;
+import com.orbit.admin.alert.JobAlertEvent;
+import com.orbit.admin.alert.LoggingAlertHandler;
 import com.orbit.admin.dispatch.OutstandingDispatches;
 import com.orbit.admin.registry.ExecutorRegistry;
 import com.orbit.admin.store.JobStore;
+import com.orbit.core.model.JobLog;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -36,7 +40,8 @@ class AdminScheduleTasksTest {
     private JobStore jobStore;
 
     private AdminScheduleTasks tasks(AdminProperties properties) {
-        return new AdminScheduleTasks(registry, jobStore, properties, new OutstandingDispatches());
+        return new AdminScheduleTasks(registry, jobStore, properties, new OutstandingDispatches(),
+                new AlertDispatcher(new LoggingAlertHandler()));
     }
 
     @Test
@@ -83,14 +88,51 @@ class AdminScheduleTasksTest {
         when(registry.listAll()).thenReturn(java.util.Collections.emptyList());
         OutstandingDispatches outstanding = new OutstandingDispatches();
         outstanding.tryAcquire("jobA", "log-gone");
-        AdminScheduleTasks tasks = new AdminScheduleTasks(registry, jobStore, p, outstanding);
+        AdminScheduleTasks tasks = new AdminScheduleTasks(registry, jobStore, p, outstanding,
+                new AlertDispatcher(new LoggingAlertHandler()));
+        JobLog gone = new JobLog();
+        gone.setLogId("log-gone");
+        gone.setJobName("jobA");
         when(jobStore.reapOrphanedRunning(anyLong(), anyLong(), anySet(), anyString(), anyString()))
-                .thenReturn(java.util.Collections.singletonList("log-gone"));
+                .thenReturn(java.util.Collections.singletonList(gone));
 
         tasks.reapOrphanedRunningLogs();
 
         // 日志收敛到终态后串行守卫必须同步释放，否则该任务永久不再触发
         assertEquals(0, outstanding.outstanding());
+    }
+
+    @Test
+    void reapFiresExecutionLostAlertForEveryReapedLog() throws Exception {
+        AdminProperties p = new AdminProperties();
+        when(registry.listAll()).thenReturn(java.util.Collections.emptyList());
+
+        // 用可观测的处理器记录事件：只有真正被回收的行才应告警（回收返回即生效行）；
+        // 事件在分发线程到达，用并发安全集合保证可见性
+        java.util.List<JobAlertEvent> events = new java.util.concurrent.CopyOnWriteArrayList<JobAlertEvent>();
+        AlertDispatcher dispatcher = new AlertDispatcher(events::add);
+
+        OutstandingDispatches outstanding = new OutstandingDispatches();
+        AdminScheduleTasks tasks = new AdminScheduleTasks(registry, jobStore, p, outstanding, dispatcher);
+        JobLog gone = new JobLog();
+        gone.setLogId("log-gone");
+        gone.setJobName("jobA");
+        gone.setAppName("sample-app");
+        gone.setHandler("demo");
+        when(jobStore.reapOrphanedRunning(anyLong(), anyLong(), anySet(), anyString(), anyString()))
+                .thenReturn(java.util.Collections.singletonList(gone));
+
+        tasks.reapOrphanedRunningLogs();
+
+        // 告警是异步投递的：轮询等待事件到达（上限 2 秒）
+        long deadline = System.currentTimeMillis() + 2000L;
+        while (events.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L);
+        }
+        assertEquals(1, events.size());
+        assertEquals(JobAlertEvent.EXECUTION_LOST, events.get(0).eventType());
+        assertEquals("jobA", events.get(0).jobName());
+        assertEquals("sample-app", events.get(0).appName());
     }
 
     @Test

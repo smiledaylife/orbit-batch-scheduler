@@ -47,7 +47,19 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 4. 优雅停机：先拒绝新任务、等待在跑任务收尾（最长 10 秒），超时再中断，
  *    最后把回传队列里剩余的结果尽量发完。
  *
- * 超时计时口径：从触发请求到达本节点起算，含排队等待时间。
+ * 失败重试（执行级）：任务定义 retryCount > 0 时，执行失败/超时的任务在
+ * 本节点内按 retryIntervalSeconds 延迟重跑 —— 同一 logId、同一日志行，
+ * 中间失败不回传，只回传最终结果（成功或重试耗尽后的失败），
+ * 对齐 XXL-JOB JobThread 的执行侧重试语义；业务方法可经 JobContext.attempt
+ * 区分首轮与重试轮次。重试链路仅存在于本进程内存（执行器重启后链路丢失，
+ * 调度中心孤儿回收兜底），重试再入队饱和时直接回传失败。
+ *
+ * 超时计时口径：从触发请求到达本节点起算，含排队等待时间；每轮重试各自享有完整超时。
+ *
+ * 线程模型：默认平台线程；开启 orbit.executor.worker-virtual-threads 后改用 JDK 21 虚拟线程
+ * （有界并发、排队、饱和拒绝与超时中断语义完全不变，仅线程实现不同）。
+ * 虚拟线程适合 HTTP/DB 等 IO 密集任务；synchronized 阻塞多的业务代码在 JDK 21 下会钉住
+ * 载体线程，此时保持平台线程更稳妥（见 ExecutorProperties#workerVirtualThreads 注释）。
  */
 public class JobExecutionService implements DisposableBean {
 
@@ -70,6 +82,12 @@ public class JobExecutionService implements DisposableBean {
 
     /** 超时看门狗：全节点共享一条线程，负责在到期时中断对应的工作线程 */
     private final ScheduledExecutorService watchdog;
+
+    /**
+     * 执行级重试定时器：全节点共享一条线程，负责把失败任务的下一轮重试
+     * 按延迟重新投递进工作线程池。只做时间触发，不执行任务。
+     */
+    private final ScheduledExecutorService retryTimer;
 
     /** 生效的排队容量（负值归零后保存，仅用于日志与饱和提示，避免展示 -1 这类无意义值） */
     private final int queueCapacity;
@@ -101,7 +119,7 @@ public class JobExecutionService implements DisposableBean {
                 ? new LinkedBlockingQueue<Runnable>(queue)
                 : new SynchronousQueue<Runnable>();
         this.pool = new ThreadPoolExecutor(workerThreads, workerThreads, 60L, TimeUnit.SECONDS,
-                workQueue, newJobThreadFactory(), new ThreadPoolExecutor.AbortPolicy());
+                workQueue, newJobThreadFactory(properties.isWorkerVirtualThreads()), new ThreadPoolExecutor.AbortPolicy());
         // 空闲时允许回收核心线程，避免常驻占用
         this.pool.allowCoreThreadTimeOut(true);
 
@@ -114,9 +132,19 @@ public class JobExecutionService implements DisposableBean {
             }
         });
 
-        log.info("[orbit-executor] job worker pool initialized: workers={}, queueCapacity={} "
+        this.retryTimer = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "orbit-executor-retry");
+                t.setDaemon(true);
+                return t;
+            }
+        });
+
+        log.info("[orbit-executor] job worker pool initialized: workers={}, queueCapacity={}, threadType={} "
                         + "(async execution, result delivered by callback)",
-                workerThreads, queue > 0 ? String.valueOf(queue) : "0 (no queueing, hand-off only)");
+                workerThreads, queue > 0 ? String.valueOf(queue) : "0 (no queueing, hand-off only)",
+                properties.isWorkerVirtualThreads() ? "virtual" : "platform");
     }
 
     /**
@@ -128,6 +156,23 @@ public class JobExecutionService implements DisposableBean {
      * @return 受理回执（accepted=true）；线程池饱和时返回同步失败结果（accepted=false）
      */
     public TriggerResult submit(TriggerRequest request, JobHandlerRegistry registry, String workerNode) {
+        return submit(request, registry, workerNode, 1);
+    }
+
+    /**
+     * 受理一次任务触发（完整版本，支持执行轮次）。
+     *
+     * 首次受理由 {@code ExecutorController} 调用（attempt = 1）；
+     * 执行级重试由本类内部调度（attempt 递增），不走这里。
+     *
+     * @param request    触发请求
+     * @param registry   JobHandler 注册表
+     * @param workerNode 本节点标识（用于结果回填）
+     * @param attempt    执行轮次（1 起始）
+     * @return 受理回执（accepted=true）；线程池饱和时返回同步失败结果（accepted=false）
+     */
+    public TriggerResult submit(TriggerRequest request, JobHandlerRegistry registry, String workerNode,
+                                int attempt) {
         final String handler = request.getHandler();
         final long start = System.currentTimeMillis();
         final long waitMs = resolveWaitMs(request.getTimeoutSeconds());
@@ -135,7 +180,7 @@ public class JobExecutionService implements DisposableBean {
         Runnable work = new Runnable() {
             @Override
             public void run() {
-                runWithTimeout(request, registry, workerNode, handler, start, waitMs);
+                runWithTimeout(request, registry, workerNode, handler, start, waitMs, attempt);
             }
         };
 
@@ -154,16 +199,21 @@ public class JobExecutionService implements DisposableBean {
     }
 
     /**
-     * 在工作线程内执行 handler，到期由看门狗中断，结束后把结果交给回传客户端。
+     * 在工作线程内执行 handler，到期由看门狗中断；失败且仍有重试额度时安排下一轮，
+     * 否则把最终结果交给回传客户端。
      *
      * 超时用「共享看门狗 + FutureTask.cancel(true)」实现：工作线程自己跑 task.run()，
      * 看门狗到期时 cancel 会中断它。相比为每次执行再开一条线程，全节点只需一条看门狗线程。
+     *
+     * 重试语义：中间失败不回传（调度日志保持 RUNNING，串行守卫不释放），
+     * 只在任务成功或重试耗尽时回传一次 —— 调度中心视角下整个重试链是同一条日志。
+     * costMs 从首轮入队起累计，覆盖全部轮次。
      */
     private void runWithTimeout(TriggerRequest request, JobHandlerRegistry registry, String workerNode,
-                                String handler, long start, long waitMs) {
+                                String handler, long start, long waitMs, int attempt) {
         final AtomicBoolean timedOut = new AtomicBoolean(false);
         final FutureTask<TriggerResult> task = new FutureTask<TriggerResult>(
-                () -> invokeAndWrap(request, registry, workerNode, handler, start));
+                () -> invokeAndWrap(request, registry, workerNode, handler, start, attempt));
 
         ScheduledFuture<?> deadline = watchdog.schedule(new Runnable() {
             @Override
@@ -179,13 +229,23 @@ public class JobExecutionService implements DisposableBean {
         TriggerResult result;
         try {
             task.run();
-            result = outcome(task, timedOut.get(), request, workerNode, handler, start);
+            result = outcome(task, timedOut.get(), request, workerNode, handler, start, attempt);
         } finally {
             deadline.cancel(false);
         }
 
+        // 失败且仍有重试额度：不回传，安排下一轮（见类注释「失败重试（执行级）」）
+        if (!result.isSuccess() && attempt <= request.getRetryCount()) {
+            if (scheduleRetry(request, registry, workerNode, attempt + 1, result)) {
+                return;
+            }
+            // 重试无法安排（饱和/停机）：落到底，按最终失败回传
+            result = withRetryTrail(result, request.getRetryCount() + 1,
+                    "retry attempt " + (attempt + 1) + " could not be queued");
+        }
+
         try {
-            callbackClient.send(result);
+            callbackClient.send(withJobContext(result, request));
         } catch (Exception e) {
             // 回传客户端本身不抛异常，这里只兜住极端情况，避免弄死工作线程
             log.error("[orbit-executor] failed to hand result to callback client, logId={}",
@@ -194,59 +254,122 @@ public class JobExecutionService implements DisposableBean {
     }
 
     /**
-     * 取出执行结果：超时优先判定，其次取 FutureTask 的结果或异常。
+     * 安排下一轮执行级重试：延迟 retryIntervalSeconds 后重新投递进工作线程池。
+     *
+     * @return true 表示已安排成功；false 表示重试无法安排（工作池饱和或正在停机），
+     *         调用方应立即把当前失败结果按终局回传
+     */
+    private boolean scheduleRetry(TriggerRequest request, JobHandlerRegistry registry, String workerNode,
+                                  int nextAttempt, TriggerResult lastResult) {
+        int intervalSec = Math.max(0, request.getRetryIntervalSeconds());
+        long start = System.currentTimeMillis() - lastResult.getCostMs();
+        try {
+            retryTimer.schedule(() -> {
+                try {
+                    pool.execute(() -> runWithTimeout(request, registry, workerNode,
+                            request.getHandler(), start, resolveWaitMs(request.getTimeoutSeconds()), nextAttempt));
+                } catch (RejectedExecutionException saturated) {
+                    log.warn("[orbit-executor] retry attempt {} of logId={} rejected by worker pool",
+                            nextAttempt, request.getLogId());
+                }
+            }, intervalSec, TimeUnit.SECONDS);
+            log.warn("[orbit-executor] handler '{}' logId={} attempt {}/{} failed ({}), retry in {}s",
+                    request.getHandler(), request.getLogId(), nextAttempt - 1, request.getRetryCount() + 1,
+                    lastResult.getMessage(), intervalSec);
+            return true;
+        } catch (RejectedExecutionException shutdown) {
+            // retryTimer 已关闭（应用停机）：重试链路中断，交由调用方按终局回传
+            log.warn("[orbit-executor] retry for logId={} abandoned: executor is shutting down",
+                    request.getLogId());
+            return false;
+        }
+    }
+
+    /**
+     * 给结果附加重试轨迹说明（重试链异常中断时的终局信息）。
+     */
+    private static TriggerResult withRetryTrail(TriggerResult result, int maxAttempts, String trail) {
+        String base = result.getMessage() == null ? "" : result.getMessage();
+        result.setMessage(base + " (attempt " + maxAttempts + "/" + maxAttempts + " final; " + trail + ")");
+        return result;
+    }
+
+    /**
+     * 回传结果回填任务上下文（jobName / appName / handler）：
+     * 调度中心据此构造告警事件，无需反查数据库；字段缺失时调度中心会自行兜底。
+     */
+    private static TriggerResult withJobContext(TriggerResult result, TriggerRequest request) {
+        result.setJobName(request.getJobName());
+        result.setAppName(request.getAppName());
+        result.setHandler(request.getHandler());
+        return result;
+    }
+
+    /**
+     * 取出执行结果：超时优先判定，其次取 FutureTask 的结果或异常；
+     * 终局结果会在 message 中标注执行轮次（attempt i/N）。
      */
     private TriggerResult outcome(FutureTask<TriggerResult> task, boolean timedOut, TriggerRequest request,
-                                  String workerNode, String handler, long start) {
+                                  String workerNode, String handler, long start, int attempt) {
         long cost = System.currentTimeMillis() - start;
+        int maxAttempts = request.getRetryCount() + 1;
         if (timedOut) {
             String msg = "execution timed out on executor after " + (cost / 1000) + "s (timeoutSeconds="
-                    + request.getTimeoutSeconds() + ")";
+                    + request.getTimeoutSeconds() + ", attempt " + attempt + "/" + maxAttempts + ")";
             log.warn("[orbit-executor] handler '{}' logId={} {}", handler, request.getLogId(), msg);
             return TriggerResult.fail(request.getLogId(), request.getJobId(), workerNode, cost, msg);
         }
         try {
-            return task.get();
+            TriggerResult r = task.get();
+            return attempt > 1 ? withAttemptNote(r, attempt, maxAttempts) : r;
         } catch (CancellationException ce) {
             // 停机 shutdownNow 或看门狗与完成竞态：按失败回传，避免日志永久 RUNNING
             return TriggerResult.fail(request.getLogId(), request.getJobId(), workerNode, cost,
-                    "execution cancelled on executor");
+                    "execution cancelled on executor (attempt " + attempt + "/" + maxAttempts + ")");
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             return TriggerResult.fail(request.getLogId(), request.getJobId(), workerNode, cost,
-                    "executor interrupted while running job");
+                    "executor interrupted while running job (attempt " + attempt + "/" + maxAttempts + ")");
         } catch (ExecutionException ee) {
             // invokeAndWrap 内部已兜底异常，理论上不可达；防御性处理
             Throwable c = ee.getCause() == null ? ee : ee.getCause();
             return TriggerResult.fail(request.getLogId(), request.getJobId(), workerNode, cost,
-                    c.getMessage() == null ? c.getClass().getSimpleName() : c.getMessage());
+                    (c.getMessage() == null ? c.getClass().getSimpleName() : c.getMessage())
+                            + " (attempt " + attempt + "/" + maxAttempts + ")");
         }
+    }
+
+    /** 成功结果的重试轮次标注：仅重试轮次才追加，首轮保持原始 message */
+    private static TriggerResult withAttemptNote(TriggerResult result, int attempt, int maxAttempts) {
+        String base = result.getMessage() == null ? "OK" : result.getMessage();
+        result.setMessage(base + " (attempt " + attempt + "/" + maxAttempts + ")");
+        return result;
     }
 
     /**
      * 同步调用 handler 并包装为 TriggerResult。
      */
     private TriggerResult invokeAndWrap(TriggerRequest request, JobHandlerRegistry registry,
-                                        String workerNode, String handler, long start) {
+                                        String workerNode, String handler, long start, int attempt) {
         try {
             JobContext ctx = new JobContext(request.getJobId(), request.getJobName(), handler,
-                    request.getLogId(), request.getParams());
+                    request.getLogId(), request.getParams(), attempt);
             Object ret = registry.invoke(handler, ctx);
             long cost = System.currentTimeMillis() - start;
             String msg = ret == null ? "OK" : String.valueOf(ret);
-            log.info("[orbit-executor] run handler={} job={} logId={} {}ms",
-                    handler, request.getJobName(), request.getLogId(), cost);
+            log.info("[orbit-executor] run handler={} job={} logId={} attempt={} {}ms",
+                    handler, request.getJobName(), request.getLogId(), attempt, cost);
             return TriggerResult.ok(request.getLogId(), request.getJobId(), workerNode, cost, msg);
         } catch (Exception e) {
             long cost = System.currentTimeMillis() - start;
-            log.error("[orbit-executor] handler '{}' failed", handler, e);
+            log.error("[orbit-executor] handler '{}' failed (attempt {})", handler, attempt, e);
             return TriggerResult.fail(request.getLogId(), request.getJobId(), workerNode, cost,
                     e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
     }
 
     /**
-     * 计算本次执行的等待上限（毫秒）：timeoutSeconds&gt;0 用之；否则用兜底最大值。
+     * 计算本次执行的等待上限（毫秒）：{@code timeoutSeconds > 0} 用之；否则用兜底最大值。
      *
      * 结果保证不小于 {@link #MIN_WAIT_MS}：{@code orbit.executor.max-job-wait-seconds}
      * 被误配成 0 或负数时看门狗会立刻触发 ——
@@ -270,8 +393,16 @@ public class JobExecutionService implements DisposableBean {
     /**
      * 任务工作线程工厂：独立命名，便于线程 dump 定位；守护线程（不阻止 JVM 退出，
      * 停机收尾由 destroy() 负责）。
+     *
+     * JDK 21 虚拟线程模式下由 {@link Thread#ofVirtual()} 提供工厂：虚拟线程恒为守护态，
+     * 命名规则（orbit-job-worker-N）与平台线程保持一致。
+     *
+     * @param virtual true 使用虚拟线程（JDK 21），false 使用传统平台线程
      */
-    private static ThreadFactory newJobThreadFactory() {
+    private static ThreadFactory newJobThreadFactory(boolean virtual) {
+        if (virtual) {
+            return Thread.ofVirtual().name("orbit-job-worker-", 0).factory();
+        }
         final AtomicInteger seq = new AtomicInteger(0);
         return r -> {
             Thread t = new Thread(r, "orbit-job-worker-" + seq.incrementAndGet());
@@ -298,6 +429,9 @@ public class JobExecutionService implements DisposableBean {
             pool.shutdownNow();
             Thread.currentThread().interrupt();
         }
+        // 先关重试定时器再等回传：未触发的重试直接放弃，
+        // 正在执行的轮次仍会按终局回传（scheduleRetry 已无法安排时也会回传失败）。
+        retryTimer.shutdownNow();
         watchdog.shutdownNow();
         callbackClient.shutdown(CALLBACK_GRACE_SECONDS);
     }

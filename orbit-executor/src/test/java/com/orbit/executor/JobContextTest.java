@@ -18,6 +18,14 @@ class JobContextTest {
         return new JobContext(1L, "job", "handler", "log-1", params);
     }
 
+    /** 旧构造器默认首轮：attempt = 1；完整构造器透传轮次，非法负值兜底为 1。 */
+    @Test
+    void attemptDefaultsToOneAndOverloadPassesThrough() {
+        assertEquals(1, ctx(null).getAttempt());
+        assertEquals(3, new JobContext(1L, "job", "h", "log", null, 3).getAttempt());
+        assertEquals(1, new JobContext(1L, "job", "h", "log", null, -2).getAttempt());
+    }
+
     @Test
     void stringAccessors() {
         Map<String, Object> p = new HashMap<String, Object>();

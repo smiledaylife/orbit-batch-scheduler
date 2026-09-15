@@ -7,6 +7,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -64,4 +66,37 @@ public class DemoJobs {
     public void manualClean() {
         log.info("[demo] manualClean executed successfully");
     }
+
+    /**
+     * 示例 4：可失败任务（演示执行级失败重试）。
+     *
+     * 同一 logId 的首次执行必定抛异常，重试轮成功 —— 用于本地验证
+     * retryCount / retryIntervalSeconds 与 JobContext.attempt 的完整链路：
+     * 中间失败不回传，调度日志只看到带 attempt 标注的最终 SUCCESS。
+     *
+     * @param ctx 任务执行上下文（业务侧据此区分首轮与重试轮次）
+     * @return 执行结果
+     */
+    @OrbitJob("flaky")
+    public String flaky(JobContext ctx) {
+        if (FAILED_ONCE.add(ctx.getLogId())) {
+            log.warn("[demo] flaky first attempt of logId={} fails on purpose", ctx.getLogId());
+            throw new IllegalStateException("flaky first attempt always fails");
+        }
+        return "ok on attempt " + ctx.getAttempt();
+    }
+
+    /**
+     * 示例 5：永远失败的任务（演示重试耗尽后的失败告警）。
+     *
+     * 重试全部耗尽后回传最终 FAILED，调度中心投递 EXECUTION_FAILED 告警事件，
+     * 未接自定义告警处理器时可在 admin 日志看到 [orbit-alert] WARN 行。
+     */
+    @OrbitJob("alwaysFail")
+    public String alwaysFail() {
+        throw new IllegalStateException("intentional failure for retry/alert demo");
+    }
+
+    /** 已记录「首败」的 logId 集合（flaky 用，仅演示用途，进程内生效） */
+    private static final Set<String> FAILED_ONCE = ConcurrentHashMap.newKeySet();
 }

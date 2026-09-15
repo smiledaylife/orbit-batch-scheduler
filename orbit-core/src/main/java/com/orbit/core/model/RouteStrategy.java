@@ -18,6 +18,13 @@ public final class RouteStrategy {
     /** 首节点：固定选取地址序第一个在线节点 */
     public static final String FIRST = "FIRST";
 
+    /**
+     * 一致性哈希：以任务名为哈希键，经虚拟节点环稳定映射到固定节点。
+     * 相比 FIRST 的差别在于节点增减时只有部分任务换点；
+     * 适合有本地状态（本地缓存、文件、分区消费位点）的任务做粘性路由。
+     */
+    public static final String CONSISTENT_HASH = "CONSISTENT_HASH";
+
     private RouteStrategy() {
     }
 }

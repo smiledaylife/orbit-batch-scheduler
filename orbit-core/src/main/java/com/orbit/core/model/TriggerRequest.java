@@ -1,5 +1,6 @@
 package com.orbit.core.model;
 
+import java.io.Serial;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
@@ -10,6 +11,7 @@ import java.util.Map;
  */
 public class TriggerRequest implements Serializable {
 
+    @Serial
     private static final long serialVersionUID = 1L;
 
     /**
@@ -21,6 +23,12 @@ public class TriggerRequest implements Serializable {
      * 任务唯一名称（对应 orbit_job 表 job_name）
      */
     private String jobName;
+
+    /**
+     * 执行器应用名（对应 orbit_job 表 app_name）；
+     * 执行器回传结果时原样带回，供调度中心告警事件直接使用，免去反查库。
+     */
+    private String appName;
 
     /**
      * 目标任务处理函数名称（与方法上的 @OrbitJob 标注值对应）
@@ -42,6 +50,18 @@ public class TriggerRequest implements Serializable {
      */
     private int timeoutSeconds = 300;
 
+    /**
+     * 失败重试次数（不含首次执行）：执行失败/超时后由执行器本地重试的次数上限，0 表示不重试。
+     * 由调度中心随触发下发（来自任务定义 orbit_job.retry_count）。
+     */
+    private int retryCount = 0;
+
+    /**
+     * 失败重试间隔（秒），0 表示立即重试，默认 10 秒。
+     * 由调度中心随触发下发（来自任务定义 orbit_job.retry_interval_seconds）。
+     */
+    private int retryIntervalSeconds = 10;
+
     public long getJobId() {
         return jobId;
     }
@@ -56,6 +76,14 @@ public class TriggerRequest implements Serializable {
 
     public void setJobName(String jobName) {
         this.jobName = jobName;
+    }
+
+    public String getAppName() {
+        return appName;
+    }
+
+    public void setAppName(String appName) {
+        this.appName = appName;
     }
 
     public String getHandler() {
@@ -88,6 +116,22 @@ public class TriggerRequest implements Serializable {
 
     public void setTimeoutSeconds(int timeoutSeconds) {
         this.timeoutSeconds = timeoutSeconds;
+    }
+
+    public int getRetryCount() {
+        return retryCount;
+    }
+
+    public void setRetryCount(int retryCount) {
+        this.retryCount = retryCount;
+    }
+
+    public int getRetryIntervalSeconds() {
+        return retryIntervalSeconds;
+    }
+
+    public void setRetryIntervalSeconds(int retryIntervalSeconds) {
+        this.retryIntervalSeconds = retryIntervalSeconds;
     }
 
 }

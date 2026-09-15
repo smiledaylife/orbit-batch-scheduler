@@ -1,5 +1,6 @@
 package com.orbit.core.model;
 
+import java.io.Serial;
 import java.io.Serializable;
 
 /**
@@ -16,6 +17,7 @@ import java.io.Serializable;
  */
 public class TriggerResult implements Serializable {
 
+    @Serial
     private static final long serialVersionUID = 1L;
 
     /**
@@ -53,6 +55,22 @@ public class TriggerResult implements Serializable {
      * false 表示这是任务的最终执行结果。
      */
     private boolean accepted;
+
+    /**
+     * 任务名称（回传方向由执行器回填，供调度中心构造告警事件，避免反查库）。
+     * 触发回执方向可为空。
+     */
+    private String jobName;
+
+    /**
+     * 执行器应用名称（回传方向由执行器回填，供告警事件使用，可为空）。
+     */
+    private String appName;
+
+    /**
+     * JobHandler 名称（回传方向由执行器回填，供告警事件使用，可为空）。
+     */
+    private String handler;
 
     /**
      * 构建执行成功的 TriggerResult 结果对象
@@ -175,5 +193,29 @@ public class TriggerResult implements Serializable {
 
     public void setWorkerNode(String workerNode) {
         this.workerNode = workerNode;
+    }
+
+    public String getJobName() {
+        return jobName;
+    }
+
+    public void setJobName(String jobName) {
+        this.jobName = jobName;
+    }
+
+    public String getAppName() {
+        return appName;
+    }
+
+    public void setAppName(String appName) {
+        this.appName = appName;
+    }
+
+    public String getHandler() {
+        return handler;
+    }
+
+    public void setHandler(String handler) {
+        this.handler = handler;
     }
 }

@@ -113,6 +113,60 @@ class JobStoreTest {
         assertFalse(jobStore.findJobByName("jobDel").isPresent());
     }
 
+    /** 重试参数与任务级串行开关的完整往返（含可空列 null 语义不被写坏）。 */
+    @Test
+    void retrySettingsRoundTrip() {
+        JobInfo job = newJob("jobRT");
+        job.setRetryCount(3);
+        job.setRetryIntervalSeconds(30);
+        job.setSerialExecution(Boolean.FALSE);
+        JobInfo saved = jobStore.saveJob(job);
+
+        JobInfo found = jobStore.findJobByName("jobRT").orElseThrow();
+        assertEquals(3, found.getRetryCount());
+        assertEquals(30, found.getRetryIntervalSeconds());
+        assertEquals(Boolean.FALSE, found.getSerialExecution());
+
+        // 更新：任务级串行开关改回 null（跟随全局），必须真实写库为 NULL，
+        // 而不是被 FieldStrategy 跳过而永远留在 false
+        found.setSerialExecution(null);
+        found.setRetryCount(5);
+        jobStore.saveJob(found);
+
+        JobInfo reloaded = jobStore.findJobByName("jobRT").orElseThrow();
+        assertEquals(5, reloaded.getRetryCount());
+        assertEquals(null, reloaded.getSerialExecution(),
+                "serialExecution=null must persist as NULL (follow global default)");
+    }
+
+    /** 日志过滤：状态、时间范围组合过滤与非法状态拒绝。 */
+    @Test
+    void pageLogsWithStatusAndTimeRangeFilters() {
+        long now = System.currentTimeMillis();
+        insertFinishedLog("log-f1", new java.util.Date(now - 3 * 3600 * 1000L));
+        // 失败日志：手工收敛一条 RUNNING -> FAILED
+        insertRunningLog("log-f2", new java.util.Date(now - 2 * 3600 * 1000L));
+        jobStore.finishLog("log-f2", "FAILED", null, 1L, "boom");
+        insertRunningLog("log-r1", new java.util.Date());
+
+        // 无过滤：三条
+        assertEquals(3, jobStore.pageLogs(null, null, null, null, 1, 10).getTotal());
+        // 按状态过滤
+        PageResult<JobLog> failed = jobStore.pageLogs(null, "FAILED", null, null, 1, 10);
+        assertEquals(1, failed.getTotal());
+        assertEquals("log-f2", failed.getItems().get(0).getLogId());
+        PageResult<JobLog> running = jobStore.pageLogs(null, "RUNNING", null, null, 1, 10);
+        assertEquals(1, running.getTotal());
+        assertEquals("log-r1", running.getItems().get(0).getLogId());
+        // 按时间范围过滤（只保留 1 小时内）
+        PageResult<JobLog> recent = jobStore.pageLogs(null, null,
+                new java.util.Date(now - 3600 * 1000L), null, 1, 10);
+        assertEquals(1, recent.getTotal());
+        assertEquals("log-r1", recent.getItems().get(0).getLogId());
+        // 任务名 + 状态组合过滤：不匹配时为空列表而非报错
+        assertEquals(0, jobStore.pageLogs("no-such-job", "FAILED", null, null, 1, 10).getTotal());
+    }
+
     @Test
     void insertAndFinishLog() {
         JobInfo job = jobStore.saveJob(newJob("jobLog"));
@@ -130,7 +184,7 @@ class JobStoreTest {
 
         jobStore.finishLog("log-1", "SUCCESS", "http://10.0.0.1:8081", 123L, "ok");
 
-        PageResult<JobLog> page = jobStore.pageLogs("jobLog", 1, 10);
+        PageResult<JobLog> page = jobStore.pageLogs("jobLog", null, null, null, 1, 10);
         assertEquals(1, page.getTotal());
         JobLog done = page.getItems().get(0);
         assertEquals("SUCCESS", done.getStatus());
@@ -181,7 +235,7 @@ class JobStoreTest {
         String huge = repeat('e', 3000);
         jobStore.finishLog("log-big", "FAILED", null, 1L, huge);
 
-        JobLog done = jobStore.pageLogs("bigMsg", 1, 10).getItems().get(0);
+        JobLog done = jobStore.pageLogs("bigMsg", null, null, null, 1, 10).getItems().get(0);
         assertNotNull(done.getMessage());
         assertTrue(done.getMessage().length() <= 2000, "message must fit column width: "
                 + done.getMessage().length());
@@ -194,12 +248,13 @@ class JobStoreTest {
         insertRunningLog("log-old", new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L));
         insertRunningLog("log-new", new java.util.Date());
 
-        java.util.List<String> reaped = jobStore.reapOrphanedRunning(3600 * 1000L, 600 * 1000L,
+        java.util.List<JobLog> reaped = jobStore.reapOrphanedRunning(3600 * 1000L, 600 * 1000L,
                 java.util.Collections.<String>emptySet(), "hard cap", "executor offline");
 
-        // 返回被回收的 logId：调用方要据此释放这些任务的串行守卫
+        // 返回被回收的日志明细：调用方要据此释放串行守卫并告警
         assertEquals(1, reaped.size());
-        assertEquals("log-old", reaped.get(0));
+        assertEquals("log-old", reaped.get(0).getLogId());
+        assertEquals("jobLog", reaped.get(0).getJobName());
         JobLog old = findByLogId("log-old");
         JobLog fresh = findByLogId("log-new");
         assertEquals("FAILED", old.getStatus());
@@ -213,7 +268,7 @@ class JobStoreTest {
         java.util.Date old = new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L);
         insertRunningLog("log-alive", old, "http://10.0.0.1:8081");
 
-        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+        java.util.List<JobLog> reaped = jobStore.reapOrphanedRunning(
                 6 * 3600 * 1000L, 600 * 1000L,
                 java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
 
@@ -228,11 +283,12 @@ class JobStoreTest {
         java.util.Date old = new java.util.Date(System.currentTimeMillis() - 2 * 3600 * 1000L);
         insertRunningLog("log-dead", old, "http://10.0.0.9:8081");
 
-        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+        java.util.List<JobLog> reaped = jobStore.reapOrphanedRunning(
                 6 * 3600 * 1000L, 600 * 1000L,
                 java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
 
         assertEquals(1, reaped.size());
+        assertEquals("log-dead", reaped.get(0).getLogId());
         JobLog gone = findByLogId("log-dead");
         assertEquals("FAILED", gone.getStatus());
         assertTrue(gone.getMessage().contains("offline"), "got: " + gone.getMessage());
@@ -244,7 +300,7 @@ class JobStoreTest {
         java.util.Date old = new java.util.Date(System.currentTimeMillis() - 5 * 3600 * 1000L);
         insertRunningLog("log-stuck", old, "http://10.0.0.1:8081");
 
-        java.util.List<String> reaped = jobStore.reapOrphanedRunning(
+        java.util.List<JobLog> reaped = jobStore.reapOrphanedRunning(
                 3600 * 1000L, 600 * 1000L,
                 java.util.Collections.singleton("http://10.0.0.1:8081"), "hard cap", "executor offline");
 
@@ -288,7 +344,7 @@ class JobStoreTest {
         int deleted = jobStore.deleteLogsBefore(cutoff);
 
         assertEquals(3, deleted);
-        assertEquals(1, jobStore.pageLogs(null, 1, 10).getTotal());
+        assertEquals(1, jobStore.pageLogs(null, null, null, null, 1, 10).getTotal());
         assertNotNull(findByLogId("log-keep"));
     }
 
@@ -325,7 +381,7 @@ class JobStoreTest {
     }
 
     private JobLog findByLogId(String logId) {
-        for (JobLog l : jobStore.pageLogs("jobLog", 1, 200).getItems()) {
+        for (JobLog l : jobStore.pageLogs("jobLog", null, null, null, 1, 200).getItems()) {
             if (logId.equals(l.getLogId())) {
                 return l;
             }

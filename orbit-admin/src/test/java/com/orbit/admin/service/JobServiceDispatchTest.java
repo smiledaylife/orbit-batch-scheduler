@@ -1,5 +1,7 @@
 package com.orbit.admin.service;
 
+import com.orbit.admin.alert.AlertDispatcher;
+import com.orbit.admin.alert.JobAlertEvent;
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.dispatch.ExecutorClient;
 import com.orbit.admin.dispatch.OutstandingDispatches;
@@ -7,6 +9,7 @@ import com.orbit.admin.registry.ExecutorRegistry;
 import com.orbit.admin.store.JobStore;
 import com.orbit.core.model.ExecutorNode;
 import com.orbit.core.model.JobInfo;
+import com.orbit.core.model.JobLog;
 import com.orbit.core.model.TriggerResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,6 +28,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -67,13 +71,19 @@ class JobServiceDispatchTest {
     private OutstandingDispatches outstanding;
     private JobService jobService;
 
+    /** 告警事件捕获器：验证失败告警的触发时机与内容 */
+    private java.util.List<JobAlertEvent> alerts;
+
     @BeforeEach
     void setUp() {
         properties = new AdminProperties();
         properties.setTimezone("Asia/Shanghai");
         properties.setGroup("ORBIT");
         outstanding = new OutstandingDispatches();
-        jobService = new JobService(scheduler, jobStore, registry, executorClient, properties, outstanding);
+        // 告警是异步的：用并发安全列表捕获，测试里轮询断言
+        alerts = new java.util.concurrent.CopyOnWriteArrayList<JobAlertEvent>();
+        jobService = new JobService(scheduler, jobStore, registry, executorClient, properties, outstanding,
+                new AlertDispatcher(alerts::add));
     }
 
     private static JobInfo newJob(String name, String appName) {
@@ -101,7 +111,7 @@ class JobServiceDispatchTest {
         JobInfo job = newJob("jobA", "app");
         List<ExecutorNode> candidates = java.util.Arrays.asList(node("http://10.0.0.1:8081"));
         when(registry.listByApp("app")).thenReturn(candidates);
-        when(registry.route(anyList(), eq("app"), anyString())).thenReturn(candidates.get(0));
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(candidates.get(0));
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
                 TriggerResult.accepted("log-1", 1L, "http://10.0.0.1:8081", "accepted"));
 
@@ -121,7 +131,7 @@ class JobServiceDispatchTest {
         ExecutorNode n1 = node("http://10.0.0.1:8081");
         ExecutorNode n2 = node("http://10.0.0.2:8081");
         when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(n1, n2));
-        when(registry.route(anyList(), eq("app"), anyString())).thenReturn(n1);
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(n1);
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
                 TriggerResult.fail("log-2", 1L, "http://10.0.0.1:8081", 0, "Connection refused"));
         when(executorClient.trigger(eq("http://10.0.0.2:8081"), any())).thenReturn(
@@ -137,11 +147,91 @@ class JobServiceDispatchTest {
         verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
     }
 
+    /**
+     * 模糊失败（connection reset / read timeout）：请求可能已被执行器受理。
+     * 必须故障转移保证可用性，但绝不能据此摘除节点 —— 节点可能只是抖动，仍然健康。
+     */
+    @Test
+    void dispatchFailsOverOnAmbiguousErrorWithoutEvicting() {
+        JobInfo job = newJob("jobAmbiguous", "app");
+        ExecutorNode n1 = node("http://10.0.0.1:8081");
+        ExecutorNode n2 = node("http://10.0.0.2:8081");
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(n1, n2));
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(n1);
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
+                TriggerResult.fail("log-amb", 1L, "http://10.0.0.1:8081", 0, "Connection reset"));
+        when(executorClient.trigger(eq("http://10.0.0.2:8081"), any())).thenReturn(
+                TriggerResult.accepted("log-amb", 1L, "http://10.0.0.2:8081", "accepted"));
+
+        TriggerResult result = jobService.dispatch(job, null);
+
+        assertTrue(result.isSuccess());
+        assertTrue(result.isAccepted());
+        // 换了节点重试，但没有摘除任何节点
+        verify(registry, never()).remove(anyString(), anyString());
+        verify(executorClient, times(1)).trigger(eq("http://10.0.0.2:8081"), any());
+    }
+
+    /**
+     * 手动触发必须接入同名任务串行守卫：上一轮在跑时拒绝本次触发并返回明确原因，
+     * 而不是与在跑实例并行执行；同时不得影响守卫中已登记的上一轮槽位。
+     */
+    @Test
+    void manualTriggerRejectsWhilePreviousRunInFlight() {
+        JobInfo job = newJob("jobGuard", "app");
+        when(jobStore.findJobByName("jobGuard")).thenReturn(Optional.of(job));
+        // 预占用串行守卫（模拟上一轮执行尚未收敛）
+        assertTrue(outstanding.tryAcquire("jobGuard", "prev-log"));
+
+        TriggerResult result = jobService.triggerNow("jobGuard", null);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.getMessage().contains("manual trigger rejected"), result.getMessage());
+        // 被拒的手动触发不得派发，也不能动上一轮的槽位
+        verify(executorClient, never()).trigger(anyString(), any());
+        assertEquals(1, outstanding.outstanding());
+        outstanding.release("prev-log");
+    }
+
+    /**
+     * 手动触发受理后槽位保持到回传收敛（与定时触发一致），同步失败则立即释放。
+     */
+    @Test
+    void manualTriggerHoldsSlotUntilCallbackAndReleasesOnFailure() {
+        JobInfo job = newJob("jobGuard2", "app");
+        when(jobStore.findJobByName("jobGuard2")).thenReturn(Optional.of(job));
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(null);
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any()))
+                .thenReturn(TriggerResult.accepted("manual-log", 1L, "http://10.0.0.1:8081", "accepted"));
+
+        TriggerResult accepted = jobService.triggerNow("jobGuard2", null);
+        assertTrue(accepted.isAccepted());
+        // 受理后槽位保持，防止守卫开启下的并行执行
+        assertEquals(1, outstanding.outstanding());
+
+        // 用实际下发的 logId 回传 -> 槽位随日志收敛一起释放
+        org.mockito.ArgumentCaptor<com.orbit.core.model.TriggerRequest> reqCaptor =
+                org.mockito.ArgumentCaptor.forClass(com.orbit.core.model.TriggerRequest.class);
+        verify(executorClient).trigger(eq("http://10.0.0.1:8081"), reqCaptor.capture());
+        String logId = reqCaptor.getValue().getLogId();
+        when(jobStore.finishLogFromRunning(eq(logId), eq(true), any(), anyLong(), any())).thenReturn(true);
+        jobService.handleCallback(TriggerResult.ok(logId, 1L, "http://10.0.0.1:8081", 5L, "done"));
+        assertEquals(0, outstanding.outstanding());
+
+        // 同步失败场景：槽位立刻释放，不会永久占用
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any()))
+                .thenReturn(TriggerResult.fail("f", 1L, "http://10.0.0.1:8081", 0, "executor saturated"));
+        TriggerResult rejected = jobService.triggerNow("jobGuard2", null);
+        assertFalse(rejected.isAccepted());
+        assertEquals(0, outstanding.outstanding());
+    }
+
     @Test
     void dispatchMarksFailedWhenExecutorRejectsTrigger() {
         JobInfo job = newJob("jobRejected", "app");
         when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
-        when(registry.route(anyList(), eq("app"), anyString())).thenReturn(null);
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(null);
         // 执行器同步失败（饱和、handler 不存在等）：accepted=false
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
                 TriggerResult.fail("log-r", 1L, "http://10.0.0.1:8081", 3L, "executor saturated"));
@@ -240,8 +330,9 @@ class JobServiceDispatchTest {
         assertNotNull(result);
         assertEquals(false, result.isSuccess());
         assertTrue(result.getMessage().contains("no online executor"));
+        // 耗时为真实派发耗时（通常 0ms，偶尔 1ms），不能断言精确值
         verify(jobStore, times(1)).finishLog(anyString(), eq("FAILED"),
-                eq((String) null), eq(0L), anyString());
+                eq((String) null), anyLong(), anyString());
         verify(executorClient, never()).trigger(anyString(), any());
     }
 
@@ -366,5 +457,150 @@ class JobServiceDispatchTest {
             sb.append(c);
         }
         return sb.toString();
+    }
+
+    // ==================== 失败重试 / 告警扩展点 / 任务级串行开关 ====================
+
+    /**
+     * 触发级重试闭环：首次派发同步失败时安排重试（新 logId），重试到点后按
+     * 库里最新任务定义重新走完整派发链路并成功。
+     */
+    @Test
+    void triggerRetryRerunsDispatchAfterSyncFailure() throws Exception {
+        JobInfo job = newJob("jobRetry", "app");
+        job.setRetryCount(2);
+        job.setRetryIntervalSeconds(0); // 立即重试，测试无等待
+        when(jobStore.findJobByName("jobRetry")).thenReturn(Optional.of(job));
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(null);
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any()))
+                .thenReturn(TriggerResult.fail("f1", 1L, "http://10.0.0.1:8081", 0, "connect timed out"))
+                .thenReturn(TriggerResult.accepted("ok", 1L, "http://10.0.0.1:8081", "accepted"));
+
+        TriggerResult first = jobService.triggerNow("jobRetry", null);
+        assertFalse(first.isAccepted());
+        // 首次失败必须标注重试计划，且不告警（重试还有额度）
+        assertTrue(first.getMessage().contains("trigger retry 2/3"), first.getMessage());
+        assertTrue(alerts.isEmpty(), "no alert while retries remain");
+
+        // 重试在定时器线程上异步执行：after() 最多等 5 秒，直到第二次派发发生
+        verify(executorClient, org.mockito.Mockito.after(5000).times(2))
+                .trigger(eq("http://10.0.0.1:8081"), any());
+        assertTrue(alerts.isEmpty(), "retry succeeded, still no alert");
+    }
+
+    /** 重试额度用尽才告警：retryCount=0 时首次同步失败即终局，投递 TRIGGER_FAILED。 */
+    @Test
+    void triggerFiresAlertWhenRetriesExhausted() throws Exception {
+        JobInfo job = newJob("jobNoRetry", "app");
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(null);
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any()))
+                .thenReturn(TriggerResult.fail("f", 1L, "http://10.0.0.1:8081", 0, "executor saturated"));
+
+        TriggerResult result = jobService.dispatch(job, null);
+        assertFalse(result.isAccepted());
+        assertFalse(result.getMessage().contains("trigger retry"), result.getMessage());
+
+        long deadline = System.currentTimeMillis() + 2000L;
+        while (alerts.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L);
+        }
+        assertEquals(1, alerts.size());
+        JobAlertEvent event = alerts.get(0);
+        assertEquals(JobAlertEvent.TRIGGER_FAILED, event.eventType());
+        assertEquals("jobNoRetry", event.jobName());
+        assertEquals("app", event.appName());
+        assertEquals("http://10.0.0.1:8081", event.executorAddress());
+    }
+
+    /** 回传 FAILED（执行器侧执行级重试已耗尽）必须投递 EXECUTION_FAILED，且能反查补齐任务上下文。 */
+    @Test
+    void callbackFailureFiresExecutionFailedAlertWithFallbackContext() throws Exception {
+        when(jobStore.finishLogFromRunning(eq("log-fail"), eq(false), any(), anyLong(), any()))
+                .thenReturn(true);
+        JobLog row = new JobLog();
+        row.setLogId("log-fail");
+        row.setJobName("jobCb");
+        row.setAppName("app");
+        row.setHandler("dailyReport");
+        when(jobStore.findLogByLogId("log-fail")).thenReturn(Optional.of(row));
+
+        // 回传不带任务上下文（模拟旧版执行器）：调度中心按 logId 反查补齐
+        TriggerResult cb = TriggerResult.fail("log-fail", 1L, "http://n:8081", 10L, "boom");
+        assertTrue(jobService.handleCallback(cb));
+
+        long deadline = System.currentTimeMillis() + 2000L;
+        while (alerts.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L);
+        }
+        assertEquals(1, alerts.size());
+        JobAlertEvent event = alerts.get(0);
+        assertEquals(JobAlertEvent.EXECUTION_FAILED, event.eventType());
+        assertEquals("jobCb", event.jobName());
+        assertEquals("app", event.appName());
+        assertEquals("dailyReport", event.handler());
+        assertEquals("boom", event.message());
+    }
+
+    /** 回传成功不得产生告警。 */
+    @Test
+    void callbackSuccessDoesNotAlert() throws Exception {
+        when(jobStore.finishLogFromRunning(eq("log-ok"), eq(true), any(), anyLong(), any())).thenReturn(true);
+        assertTrue(jobService.handleCallback(TriggerResult.ok("log-ok", 1L, "n", 1L, "OK")));
+        Thread.sleep(100L);
+        assertTrue(alerts.isEmpty());
+    }
+
+    /** 任务级串行开关覆盖：serialExecution=false 时，上一轮在跑也不拒绝手动触发。 */
+    @Test
+    void serialExecutionPerJobOverrideAllowsParallelRuns() {
+        JobInfo job = newJob("jobParallel", "app");
+        job.setSerialExecution(false); // 任务级允许并发，覆盖全局默认（串行）
+        when(jobStore.findJobByName("jobParallel")).thenReturn(Optional.of(job));
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any()))
+                .thenReturn(TriggerResult.accepted("p-log", 1L, "http://10.0.0.1:8081", "accepted"));
+        // 预占用串行守卫（模拟上一轮执行尚未收敛）
+        assertTrue(outstanding.tryAcquire("jobParallel", "prev-log"));
+
+        TriggerResult result = jobService.triggerNow("jobParallel", null);
+
+        // 守卫被任务级关闭：不拒绝、正常派发受理
+        assertTrue(result.isAccepted(), "per-job serial=false must bypass the guard, got: " + result.getMessage());
+        verify(executorClient, org.mockito.Mockito.atLeastOnce()).trigger(anyString(), any());
+        outstanding.release("prev-log");
+    }
+
+    /** 重试参数越界必须在创建/更新时以 400 拒绝，而不是静默入库。 */
+    @Test
+    void createRejectsInvalidRetrySettings() {
+        JobInfo tooMany = newJob("jobR1", "app");
+        tooMany.setRetryCount(JobService.MAX_RETRY_COUNT + 1);
+        IllegalArgumentException countEx = assertThrows(IllegalArgumentException.class,
+                () -> jobService.create(tooMany));
+        assertTrue(countEx.getMessage().contains("retryCount"), countEx.getMessage());
+
+        JobInfo negative = newJob("jobR2", "app");
+        negative.setRetryCount(-1);
+        assertThrows(IllegalArgumentException.class, () -> jobService.create(negative));
+
+        JobInfo tooLongInterval = newJob("jobR3", "app");
+        tooLongInterval.setRetryIntervalSeconds(JobService.MAX_RETRY_INTERVAL_SECONDS + 1);
+        IllegalArgumentException intervalEx = assertThrows(IllegalArgumentException.class,
+                () -> jobService.create(tooLongInterval));
+        assertTrue(intervalEx.getMessage().contains("retryIntervalSeconds"), intervalEx.getMessage());
+    }
+
+    /** 一致性哈希路由：合法值（含小写）通过校验并规范化。 */
+    @Test
+    void createAcceptsConsistentHashRoute() {
+        JobInfo job = newJob("jobHash", "app");
+        job.setRouteStrategy("consistent_hash");
+        when(jobStore.findJobByName("jobHash")).thenReturn(Optional.<JobInfo>empty());
+        when(jobStore.saveJob(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        JobInfo saved = jobService.create(job);
+        assertEquals("CONSISTENT_HASH", saved.getRouteStrategy());
     }
 }

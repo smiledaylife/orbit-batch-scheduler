@@ -4,41 +4,36 @@ import com.orbit.core.model.TriggerResult;
 import com.orbit.executor.config.ExecutorProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.connection.stream.StreamRecords;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 执行结果回传客户端。
+ * 执行结果回传客户端（纯 HTTP 模式，零 Redis 依赖）。
  *
- * <p>执行器完成任务后不会阻塞业务工作线程，而是先把结果放入本地待发送队列，
- * 由独立发送线程异步投递。生产模式优先写入 Redis Stream，由 Admin 消费组异步落库；
- * Redis 不可用时再回退到 HTTP callback。</p>
+ * 执行器完成任务后不会阻塞业务工作线程，而是先把结果放入本地待发送队列，
+ * 由独立发送线程异步投递到 Admin 的 {@code POST /orbit/admin/callback}。
  *
- * <p>可靠性边界：Redis Stream 写入成功后，结果具备跨 Executor 进程重启的持久化能力；
- * 如果 Redis 本身不可用，则只能依赖进程存活期间的内存队列和 HTTP 重试。因此生产环境
- * 应保证 Redis 的高可用、持久化以及合理的 Stream 保留策略。</p>
+ * 可靠性边界：投递可靠性由进程内存队列 + 退避重试保障，进程崩溃则未投递结果丢失，
+ * 由调度中心孤儿回收兜底把日志判失败；需要跨进程重启不丢结果的场景使用
+ * {@link DurableCallbackClient}（Redis Stream 持久化回传，Redis 就绪时由自动装配启用）。
  *
- * <p>Admin 侧对同一 logId 的状态更新采用幂等语义，因此 callback 重试和重复消费是安全的。</p>
+ * Admin 侧对同一 logId 的状态更新采用幂等语义，因此 callback 重试和重复消费是安全的。
  */
 public class CallbackClient {
 
     private static final Logger log = LoggerFactory.getLogger(CallbackClient.class);
 
-    /** Admin callback HTTP 接口路径，作为 Redis Stream 不可用时的兜底通道。 */
+    /** Admin callback HTTP 接口路径。 */
     private static final String CALLBACK_PATH = "/orbit/admin/callback";
 
-    /** 单批最多投递的 callback 数量，避免单次 HTTP/Redis 请求过大。 */
+    /** 单批最多投递的 callback 数量，避免单次 HTTP 请求过大。 */
     private static final int BATCH_LIMIT = 200;
 
-    /** 队列达到该阈值时告警，提示 Admin/Redis 可能持续不可用。 */
+    /** 队列达到该阈值时告警，提示 Admin 可能持续不可用。 */
     private static final int QUEUE_WARN_THRESHOLD = 10000;
 
     private final ExecutorProperties properties;
@@ -47,13 +42,11 @@ public class CallbackClient {
     /**
      * 本地待发送队列。
      *
-     * <p>使用无界队列是为了避免通过主动丢弃 callback 结果来解决背压；否则任务可能已经
-     * SUCCESS，但 Admin 永远收不到结果并长期保持 RUNNING。跨进程可靠性由 Redis Stream 提供。</p>
+     * 使用无界队列是为了避免通过主动丢弃 callback 结果来解决背压；否则任务可能已经
+     * SUCCESS，但 Admin 永远收不到结果并长期保持 RUNNING。跨进程可靠性由
+     * {@link DurableCallbackClient} 的 Redis Stream 模式提供。
      */
     private final LinkedBlockingQueue<TriggerResult> pending;
-
-    /** Redis Stream 客户端，生产模式用于持久化 callback。 */
-    private final StringRedisTemplate redis;
 
     /** 独立 callback 发送线程，不占用任务执行线程。 */
     private final Thread sender;
@@ -62,19 +55,25 @@ public class CallbackClient {
     private volatile boolean running = true;
 
     /** 已成功交付到 Redis Stream 或 HTTP 的 callback 数量。 */
-    private final AtomicLong sentCount = new AtomicLong();
+    protected final AtomicLong sentCount = new AtomicLong();
 
     /** 因投递失败而重新进入重试流程的 callback 数量。 */
     private final AtomicLong retryCount = new AtomicLong();
 
-    /** 已成功写入 Redis Stream 的 callback 数量。 */
-    private final AtomicLong streamCount = new AtomicLong();
+    /** 已成功写入 Redis Stream 的 callback 数量；纯 HTTP 模式恒为 0。 */
+    protected final AtomicLong streamCount = new AtomicLong();
 
-    public CallbackClient(ExecutorProperties properties, AdminClient adminClient,
-                          StringRedisTemplate redis) {
+    /**
+     * 创建纯 HTTP 回传客户端，并启动独立发送线程。
+     *
+     * 适用于本地开发或未启用 Redis 持久化回传的场景。
+     *
+     * @param properties  执行器配置，提供重试参数
+     * @param adminClient 与调度中心通信的 HTTP 客户端
+     */
+    public CallbackClient(ExecutorProperties properties, AdminClient adminClient) {
         this.properties = properties;
         this.adminClient = adminClient;
-        this.redis = redis;
         this.pending = new LinkedBlockingQueue<TriggerResult>();
         this.sender = new Thread(this::drainLoop, "orbit-callback-sender");
         this.sender.setDaemon(true);
@@ -84,7 +83,7 @@ public class CallbackClient {
     /**
      * 提交一条待回传结果。
      *
-     * <p>该方法只负责入队，快速返回，不等待网络 I/O。无界队列不会因固定容量而丢弃结果。</p>
+     * 该方法只负责入队，快速返回，不等待网络 I/O。无界队列不会因固定容量而丢弃结果。
      *
      * @param result 任务最终执行结果；null 会被忽略
      */
@@ -95,7 +94,7 @@ public class CallbackClient {
         pending.offer(result);
         int size = pending.size();
         if (size >= QUEUE_WARN_THRESHOLD) {
-            log.warn("[orbit-executor] callback backlog={}, logId={}; durable stream is unavailable or under pressure",
+            log.warn("[orbit-executor] callback backlog={}, logId={}; admin is unavailable or under pressure",
                     size, result.getLogId());
         }
     }
@@ -122,40 +121,24 @@ public class CallbackClient {
 
             boolean delivered = deliver(batch);
             if (!delivered) {
-                // 投递失败时必须整批重新入队，确保不会因为瞬时网络/Redis故障造成结果丢失。
+                // 投递失败时必须整批重新入队，确保不会因为瞬时网络故障造成结果丢失。
                 pending.addAll(batch);
                 retryCount.addAndGet(batch.size());
-                if (running) {
-                    sleep(Math.max(500L, properties.getCallbackRetryIntervalMs()));
+                // 已进入停机流程时不再退避重试：退回队列后直接退出循环，
+                // 否则 admin 不可达时会在剩余宽限期内无退避地忙转空旋（打满 CPU、重试计数暴涨）。
+                if (!running) {
+                    return;
                 }
+                sleep(Math.max(500L, properties.getCallbackRetryIntervalMs()));
             }
         }
     }
 
     /**
-     * 投递一批 callback。
-     *
-     * <p>生产模式先写 Redis Stream。只有 Redis Stream 写入失败时才降级到 HTTP，
-     * 从而让 Redis 正常时 callback 不依赖 Admin HTTP 实例的瞬时可用性。</p>
+     * 投递一批 callback（HTTP 通道，按 {@code callback-retry-*} 退避重试）。
+     * 子类 {@link DurableCallbackClient} 在本方法前先尝试 Redis Stream 持久化通道。
      */
-    private boolean deliver(List<TriggerResult> batch) {
-        if (properties.isDurableCallbackEnabled()) {
-            try {
-                for (TriggerResult result : batch) {
-                    Map<String, String> fields = toFields(result);
-                    redis.opsForStream().add(StreamRecords.newRecord()
-                            .in(properties.getCallbackStreamKey()).ofMap(fields));
-                    streamCount.incrementAndGet();
-                }
-                sentCount.addAndGet(batch.size());
-                return true;
-            } catch (RuntimeException e) {
-                // Redis 不可用时不能直接丢弃 callback，继续走 HTTP 兜底。
-                log.warn("[orbit-executor] redis callback stream unavailable, falling back to HTTP: {}",
-                        e.getMessage());
-            }
-        }
-
+    protected boolean deliver(List<TriggerResult> batch) {
         int attempts = Math.max(1, properties.getCallbackRetryTimes() + 1);
         long interval = Math.max(0L, properties.getCallbackRetryIntervalMs());
         for (int i = 0; i < attempts; i++) {
@@ -173,28 +156,8 @@ public class CallbackClient {
         return false;
     }
 
-    /**
-     * 把领域对象转换成 Redis Stream 的字符串字段，避免 Redis 序列化依赖具体 Java 类型。
-     */
-    private static Map<String, String> toFields(TriggerResult result) {
-        Map<String, String> fields = new HashMap<String, String>();
-        fields.put("logId", safe(result.getLogId()));
-        fields.put("jobId", String.valueOf(result.getJobId()));
-        fields.put("success", String.valueOf(result.isSuccess()));
-        fields.put("accepted", String.valueOf(result.isAccepted()));
-        fields.put("costMs", String.valueOf(result.getCostMs()));
-        fields.put("workerNode", safe(result.getWorkerNode()));
-        fields.put("message", safe(result.getMessage()));
-        return fields;
-    }
-
-    /** Redis Stream 字段允许为空字符串，避免 null 值导致序列化问题。 */
-    private static String safe(String value) {
-        return value == null ? "" : value;
-    }
-
     /** 可中断的退避等待，保证 JVM 停机时线程可以尽快退出。 */
-    private boolean sleep(long ms) {
+    protected final boolean sleep(long ms) {
         try {
             Thread.sleep(ms);
             return true;
@@ -202,6 +165,21 @@ public class CallbackClient {
             Thread.currentThread().interrupt();
             return false;
         }
+    }
+
+    /** 投递通道运行配置（子类复用） */
+    protected ExecutorProperties properties() {
+        return properties;
+    }
+
+    /** 投递通道 HTTP 客户端（子类复用） */
+    protected AdminClient adminClient() {
+        return adminClient;
+    }
+
+    /** 待发送队列（子类复用） */
+    protected LinkedBlockingQueue<TriggerResult> pendingQueue() {
+        return pending;
     }
 
     /**

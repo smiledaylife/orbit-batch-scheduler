@@ -1,11 +1,11 @@
-# 构建调度中心（JRE 11）: docker build -t orbit-admin:1.0.0 --build-arg MODULE=orbit-admin --build-arg RUNTIME_IMAGE=eclipse-temurin:11-jre .
-# 构建执行器示例（JRE 8）: docker build -t orbit-executor-sample:1.0.0 --build-arg MODULE=orbit-executor-sample .
+# 构建调度中心（JRE 21）: docker build -t orbit-admin:1.0.0 --build-arg MODULE=orbit-admin --build-arg RUNTIME_IMAGE=eclipse-temurin:21-jre .
+# 构建执行器示例（JRE 21）: docker build -t orbit-executor-sample:1.0.0 --build-arg MODULE=orbit-executor-sample .
 #
-# 说明：reactor 中 orbit-admin 依赖 Quartz 2.5.x（要求 JDK 11），因此构建阶段统一用 JDK 11；
-#      orbit-executor / orbit-core 编译级别为 8（各模块 POM 自管），产出 Java 8 字节码，运行阶段可使用 JRE 8 镜像。
+# 说明：全模块基于 Spring Boot 3.5 + JDK 21，构建与运行阶段统一使用 JDK/JRE 21；
+#      仅 orbit-core 协议模型保持 Java 8 字节码（可被任意 JRE 解析，但本镜像体系统一 21）。
 ARG MODULE=orbit-admin
-ARG BUILD_IMAGE=maven:3.9-eclipse-temurin-11
-ARG RUNTIME_IMAGE=eclipse-temurin:8-jre
+ARG BUILD_IMAGE=maven:3.9-eclipse-temurin-21
+ARG RUNTIME_IMAGE=eclipse-temurin:21-jre
 
 FROM ${BUILD_IMAGE} AS build
 ARG MODULE

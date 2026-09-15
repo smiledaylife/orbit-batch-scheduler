@@ -21,7 +21,7 @@
 -- Notes: Original sql of this file is based on tables_postgres.sql.
 -- Thanks to Patrick Lightbody for submitting this...
 --
--- In your Quartz properties file, you'll need to set 
+-- In your Quartz properties file, you'll need to set
 -- org.quartz.jobStore.driverDelegateClass = org.quartz.impl.jdbcjobstore.GaussDBDelegate
 
 -- DROP TABLE IF EXISTS QRTZ_FIRED_TRIGGERS;

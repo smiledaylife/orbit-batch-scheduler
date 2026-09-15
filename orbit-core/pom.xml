@@ -4,82 +4,26 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <!-- 无 <parent>：本模块自管依赖与构建配置，可脱离 reactor 独立构建 -->
-    <groupId>com.orbit</groupId>
+    <!-- 继承根 POM：编译级别、插件配置与版本管理全部由父 POM 统一下发 -->
+    <parent>
+        <groupId>com.orbit</groupId>
+        <artifactId>orbit-batch-scheduler</artifactId>
+        <version>1.0.0</version>
+    </parent>
+
     <artifactId>orbit-core</artifactId>
-    <version>1.0.0</version>
     <packaging>jar</packaging>
     <name>Orbit :: Core</name>
     <description>调度中心与执行器共享协议、模型</description>
-
-    <properties>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <!-- 共享模型保持 Java 8 字节码，业务方可在 JRE 8 使用 -->
-        <java.release>8</java.release>
-        <spring-boot.version>2.7.18</spring-boot.version>
-        <maven-compiler-plugin.version>3.10.1</maven-compiler-plugin.version>
-        <maven-surefire-plugin.version>2.22.2</maven-surefire-plugin.version>
-    </properties>
-
-    <dependencyManagement>
-        <dependencies>
-            <!-- 版本收敛：import Spring Boot BOM（等价于继承 spring-boot-starter-parent 的版本管理部分） -->
-            <dependency>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-dependencies</artifactId>
-                <version>${spring-boot.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-        </dependencies>
-    </dependencyManagement>
 
     <!--
       无第三方依赖：本模块只有纯 POJO 协议模型，序列化由使用方（admin/executor 的 Spring MVC + Jackson）完成。
       不声明 jackson-annotations：本模块没有任何 com.fasterxml 引用，
       避免把 Jackson 作为传递依赖强加给业务方。
+
+      字节码基线与全项目统一为 JDK 21（父 POM java.release）：项目为新项目、无老 JRE 兼容诉求，
+      统一基线后协议层与两端可用同一套语言特性（record / switch 模式匹配等），
+      构建、调试与依赖分析也不再需要跨版本工具链。
     -->
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>${maven-compiler-plugin.version}</version>
-                <configuration>
-                    <!-- source/target 在 JDK 8 与 JDK 9+ 上均可用；JDK 9+ 由下方 profile 升级为 release -->
-                    <source>${java.release}</source>
-                    <target>${java.release}</target>
-                </configuration>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>${maven-surefire-plugin.version}</version>
-            </plugin>
-        </plugins>
-    </build>
-
-    <profiles>
-        <!-- JDK 9+：改用 release，同时限制字节码版本与可用 API，避免误用 Java 9+ API -->
-        <profile>
-            <id>jdk9plus</id>
-            <activation>
-                <jdk>[9,)</jdk>
-            </activation>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-compiler-plugin</artifactId>
-                        <configuration>
-                            <release>${java.release}</release>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-    </profiles>
 
 </project>

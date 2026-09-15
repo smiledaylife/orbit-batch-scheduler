@@ -27,8 +27,8 @@ import java.util.Map;
 /**
  * 执行器对外 HTTP API。
  *
- * <p>负责接收 Admin 的任务触发请求、查询已注册 Handler，并在入口处完成访问令牌校验和
- * logId 幂等保护。真正的任务执行由 {@link JobExecutionService} 异步完成。</p>
+ * 负责接收 Admin 的任务触发请求、查询已注册 Handler，并在入口处完成访问令牌校验和
+ * logId 幂等保护。真正的任务执行由 {@link JobExecutionService} 异步完成。
  */
 @RestController
 @RequestMapping("/orbit/executor")
@@ -53,9 +53,9 @@ public class ExecutorController {
     /**
      * 接收一次任务执行请求。
      *
-     * <p>该接口采用“受理即返回”语义：HTTP 返回 accepted=true 只表示任务已进入执行器，
+     * 该接口采用「受理即返回」语义：HTTP 返回 accepted=true 只表示任务已进入执行器，
      * 最终 SUCCESS/FAILED 必须通过 callback 回传 Admin。logId 是一次调度执行的全局幂等主键，
-     * Admin 因 HTTP 超时而重试时不会再次进入执行线程池。</p>
+     * Admin 因 HTTP 超时而重试时不会再次进入执行线程池。
      */
     @PostMapping("/run")
     public TriggerResult run(@RequestBody TriggerRequest request,

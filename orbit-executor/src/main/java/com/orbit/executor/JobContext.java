@@ -37,7 +37,13 @@ public class JobContext {
     private final Map<String, Object> params;
 
     /**
-     * 构造任务执行上下文
+     * 当前执行轮次（1 起始）：首次执行为 1，失败重试的第 N 次执行为 N+1。
+     * 业务方法可据此区分首次执行与重试执行（如重试时降级、跳过已处理分片等）。
+     */
+    private final int attempt;
+
+    /**
+     * 构造任务执行上下文（首次执行，attempt = 1）
      *
      * @param jobId   任务 ID
      * @param jobName 任务名称
@@ -46,6 +52,21 @@ public class JobContext {
      * @param params  入参字典
      */
     public JobContext(long jobId, String jobName, String handler, String logId, Map<String, Object> params) {
+        this(jobId, jobName, handler, logId, params, 1);
+    }
+
+    /**
+     * 构造任务执行上下文（完整版本，支持失败重试轮次）
+     *
+     * @param jobId   任务 ID
+     * @param jobName 任务名称
+     * @param handler Handler 名称
+     * @param logId   日志跟踪 ID
+     * @param params  入参字典
+     * @param attempt 执行轮次（1 起始，失败重试时递增）
+     */
+    public JobContext(long jobId, String jobName, String handler, String logId, Map<String, Object> params,
+                      int attempt) {
         this.jobId = jobId;
         this.jobName = jobName;
         this.handler = handler;
@@ -53,6 +74,7 @@ public class JobContext {
         this.params = params == null
                 ? Collections.<String, Object>emptyMap()
                 : Collections.unmodifiableMap(new HashMap<String, Object>(params));
+        this.attempt = Math.max(1, attempt);
     }
 
     public long getJobId() {
@@ -73,6 +95,13 @@ public class JobContext {
 
     public Map<String, Object> getParams() {
         return params;
+    }
+
+    /**
+     * 当前执行轮次（1 起始）：首次执行为 1，第 N 次失败重试为 N+1。
+     */
+    public int getAttempt() {
+        return attempt;
     }
 
     /**
@@ -150,8 +179,9 @@ public class JobContext {
         if (v == null) {
             return defaultValue;
         }
-        if (v instanceof Boolean) {
-            return (Boolean) v;
+        // JDK 16+ instanceof 模式匹配：判定与绑定一步完成
+        if (v instanceof Boolean b) {
+            return b;
         }
         String s = String.valueOf(v).trim();
         if ("true".equalsIgnoreCase(s)) {
@@ -171,8 +201,8 @@ public class JobContext {
         if (v == null) {
             return null;
         }
-        if (v instanceof Number) {
-            return (Number) v;
+        if (v instanceof Number n) {
+            return n;
         }
         try {
             return Long.parseLong(String.valueOf(v).trim());

@@ -7,8 +7,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * 执行器注册地址校验器单元测试（SSRF 防线）。
- * 覆盖：协议 / host / 端口合法性、保留 IPv4/IPv6 段拒绝、IPv4 映射 IPv6 绕过拦截、
- * 白名单正则命中与拒绝、非法正则的友好报错、末尾斜杠规范化。
+ * 覆盖：协议 / host / 端口合法性、保留 IPv4/IPv6 段拒绝、DNS 解析到保留地址拒绝、
+ * IPv4 映射 IPv6 绕过拦截、白名单正则命中与拒绝、非法正则的友好报错、末尾斜杠规范化。
+ *
+ * 封闭性说明：正向用例一律使用 IP 字面量，DNS 解析分支用 {@code localhost}
+ * （经 hosts 文件确定性地解析到回环地址）覆盖，不依赖外部 DNS，保证 CI 环境稳定。
  */
 class ExecutorAddressValidatorTest {
 
@@ -16,8 +19,16 @@ class ExecutorAddressValidatorTest {
     void acceptsHttpAndHttps() {
         assertEquals("http://10.0.0.1:8081",
                 ExecutorAddressValidator.validateAndNormalize("http://10.0.0.1:8081", ""));
-        assertEquals("https://exec.example.com",
-                ExecutorAddressValidator.validateAndNormalize("https://exec.example.com", ""));
+        assertEquals("https://10.0.0.1:8443",
+                ExecutorAddressValidator.validateAndNormalize("https://10.0.0.1:8443", ""));
+    }
+
+    @Test
+    void rejectsHostnameResolvingToLoopback() {
+        // DNS 解析分支：localhost 经 hosts 文件解析到 127.0.0.1（回环），必须拒绝；
+        // 同时覆盖「域名绕过 IP 字面量拦截」的防线
+        assertThrows(IllegalArgumentException.class,
+                () -> ExecutorAddressValidator.validateAndNormalize("http://localhost:8081", ""));
     }
 
     @Test

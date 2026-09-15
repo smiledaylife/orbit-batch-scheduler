@@ -10,8 +10,8 @@ import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.ReadOffset;
 import org.springframework.data.redis.connection.stream.StreamOffset;
-import org.springframework.data.redis.connection.stream.StreamRecords;
 import org.springframework.data.redis.connection.stream.StreamReadOptions;
+import org.springframework.data.redis.connection.stream.StreamRecords;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.StreamOperations;
 import org.springframework.stereotype.Component;
@@ -21,23 +21,27 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Redis Stream callback 消费器。
  *
- * <p>Executor 先将任务结果写入 Redis Stream，本组件使用 Consumer Group 异步消费并落库。
+ * Executor 先将任务结果写入 Redis Stream，本组件使用 Consumer Group 异步消费并落库。
  * DB 状态更新成功后才 ACK Stream；如果 DB 更新失败，则不 ACK，让消息继续保留在 pending
- * 队列中等待后续重试，从而实现至少一次投递。</p>
+ * 队列中等待后续重试，从而实现至少一次投递。
  *
- * <p>Admin 多副本共享同一个 Consumer Group。这里使用固定逻辑 consumer 名称，并通过
+ * Admin 多副本共享同一个 Consumer Group。这里使用固定逻辑 consumer 名称，并通过
  * record 级 Redis 锁避免同一时刻多个实例重复处理同一条 pending 消息。重复消费最终由
- * JobStore 的状态条件更新保证幂等。</p>
+ * JobStore 的状态条件更新保证幂等。
  */
 @Component
 @ConditionalOnProperty(prefix = "orbit.admin", name = "durable-callback-enabled", havingValue = "true")
 public class CallbackStreamConsumer implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(CallbackStreamConsumer.class);
+
+    /** 每批最多读取的 Stream 记录数。 */
+    private static final int PENDING_BATCH_SIZE = 100;
 
     /** 每条 Stream record 的处理锁前缀；锁 TTL 防止异常退出留下永久死锁。 */
     private static final String PROCESS_LOCK_PREFIX = "orbit:callback:process:";
@@ -66,7 +70,7 @@ public class CallbackStreamConsumer implements DisposableBean {
     }
 
     /**
-     * 主消费循环：先处理当前 Consumer 的 pending，再阻塞等待新消息。
+     * 主消费循环：先把当前 Consumer 的 pending 完全排干，再阻塞等待新消息。
      * Redis 暂时不可用时退避后重试，不因为依赖抖动退出消费线程。
      */
     private void runLoop() {
@@ -80,11 +84,26 @@ public class CallbackStreamConsumer implements DisposableBean {
                 Consumer consumer = Consumer.from(properties.getCallbackStreamGroup(), "orbit-admin");
 
                 // 先读取 pending，保证 Admin 重启后可以继续处理尚未 ACK 的消息。
-                List<MapRecord<String, String, String>> pending = ops.read(
-                        consumer,
-                        StreamReadOptions.empty().count(100),
-                        StreamOffset.create(properties.getCallbackStreamKey(), ReadOffset.from("0-0")));
-                process(pending, ops, consumer);
+                // 必须用「游标推进 + 排干」而不是固定从 0-0 读前 100 条：
+                // 否则一旦积压超过 100 条（如毒消息反复失败、锁竞争遗留），
+                // 每轮都重复读同一段头部，第 100 条之后的消息永久饥饿。
+                String pendingCursor = "0-0";
+                while (running) {
+                    List<MapRecord<String, String, String>> pending = ops.read(
+                            consumer,
+                            StreamReadOptions.empty().count(PENDING_BATCH_SIZE),
+                            StreamOffset.create(properties.getCallbackStreamKey(),
+                                    ReadOffset.from(pendingCursor)));
+                    if (pending == null || pending.isEmpty()) {
+                        break;
+                    }
+                    process(pending, ops, consumer);
+                    // 游标推进到本批最后一条（XREADGROUP 语义为 > id，即严格递增读取）
+                    pendingCursor = pending.get(pending.size() - 1).getId().getValue();
+                    if (pending.size() < PENDING_BATCH_SIZE) {
+                        break;
+                    }
+                }
 
                 if (!running) {
                     return;
@@ -93,7 +112,7 @@ public class CallbackStreamConsumer implements DisposableBean {
                 // pending 清理后再读取新消息；block 避免空闲时持续轮询 Redis。
                 List<MapRecord<String, String, String>> records = ops.read(
                         consumer,
-                        StreamReadOptions.empty().count(100).block(Duration.ofSeconds(2)),
+                        StreamReadOptions.empty().count(PENDING_BATCH_SIZE).block(Duration.ofSeconds(2)),
                         StreamOffset.create(properties.getCallbackStreamKey(), ReadOffset.lastConsumed()));
                 process(records, ops, consumer);
             } catch (Exception e) {
@@ -106,12 +125,16 @@ public class CallbackStreamConsumer implements DisposableBean {
     /**
      * 确保 Stream 和 Consumer Group 已创建。
      * Redis 的 XGROUP CREATE 要求 Stream 已存在，因此首次启动时通过 marker 创建 Stream。
+     *
+     * 建组 offset 用 0-0（从流头开始）：Executor 可能先于 Admin 上线并已写入 callback，
+     * 若用 latest（$），首建的组会直接跳过这些历史记录 —— 任务实际已跑完，
+     * 日志却永远等不到回传，只能靠孤儿回收判失败。组已存在（BUSYGROUP）时不受影响。
      */
     private boolean ensureGroup() {
         try {
             StreamOperations<String, String, String> ops = redis.opsForStream();
             try {
-                ops.createGroup(properties.getCallbackStreamKey(), ReadOffset.latest(),
+                ops.createGroup(properties.getCallbackStreamKey(), ReadOffset.from("0-0"),
                         properties.getCallbackStreamGroup());
             } catch (Exception first) {
                 String message = first.getMessage();
@@ -122,7 +145,7 @@ public class CallbackStreamConsumer implements DisposableBean {
                 ops.add(StreamRecords.newRecord().in(properties.getCallbackStreamKey())
                         .ofMap(Collections.singletonMap(INIT_FIELD, "1")));
                 try {
-                    ops.createGroup(properties.getCallbackStreamKey(), ReadOffset.latest(),
+                    ops.createGroup(properties.getCallbackStreamKey(), ReadOffset.from("0-0"),
                             properties.getCallbackStreamGroup());
                 } catch (Exception second) {
                     if (isBusyGroup(second.getMessage())) {
@@ -201,7 +224,7 @@ public class CallbackStreamConsumer implements DisposableBean {
     private boolean acquireRecordLock(String recordId) {
         try {
             Boolean ok = redis.opsForValue().setIfAbsent(PROCESS_LOCK_PREFIX + recordId,
-                    "1", 60L, java.util.concurrent.TimeUnit.SECONDS);
+                    "1", 60L, TimeUnit.SECONDS);
             return Boolean.TRUE.equals(ok);
         } catch (Exception e) {
             // Redis 故障时宁可暂停消费，也不能退化为本地锁导致多实例并发处理。

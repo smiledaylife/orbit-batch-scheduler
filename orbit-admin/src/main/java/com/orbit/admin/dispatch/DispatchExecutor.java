@@ -31,16 +31,23 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * 三项约束：
  *
- * 1. 有界并发：触发线程数由 orbit.admin.dispatch-threads 决定（默认 64），
- *    与 org.quartz.threadPool.threadCount 相互独立。超出线程数的触发进入有界队列，
+ * 1. 有界并发：在途触发的并发上限由 orbit.admin.dispatch-threads 决定（默认 64），
+ *    与 org.quartz.threadPool.threadCount 相互独立。超出线程数的触发进入有界队列,
  *    队列满则快速失败并写一条 FAILED 日志（scheduler saturated），
  *    保护调度中心不被触发风暴打爆；
  * 2. 同名任务串行：orbit.admin.dispatch-serial-per-job（默认 true）开启时，
  *    上一轮**执行**尚未收敛（结果未回传）的任务本次到点直接跳过。
+ *    任务可用 serialExecution 字段覆盖全局开关（任务级阻塞策略：
+ *    true 串行 / false 允许并发 / null 跟随全局）。
  *    在途判定由 {@link OutstandingDispatches} 承担；logId 在派发前生成并预登记，
  *    执行器毫秒级回传也不会与登记动作竞态（详见 OutstandingDispatches 类注释）；
  * 3. 优雅停机：关闭时先停止接收新任务，给在跑的触发最多 30 秒收尾，
  *    超时再中断，避免硬杀导致调度日志停在 RUNNING。
+ *
+ * 线程模型：默认平台线程；开启 orbit.admin.dispatch-virtual-threads 后改用 JDK 21 虚拟线程
+ * （有界并发、排队与拒绝语义完全不变，仅线程实现不同）。触发本身是一次短 HTTP 调用，
+ * 且底层客户端已换用虚拟线程友好的 JDK HttpClient（见 ExecutorClient），
+ * 虚拟线程模式下内存占用更低，适合大规模高频 Cron 场景。
  *
  * 手动触发（POST /jobs/{name}/trigger）不走本组件，仍是同步的 —— 调用方需要立刻知道派发结果。
  */
@@ -89,12 +96,13 @@ public class DispatchExecutor implements DisposableBean {
                 : new SynchronousQueue<Runnable>();
 
         this.pool = new ThreadPoolExecutor(threads, threads, 60L, TimeUnit.SECONDS,
-                workQueue, newThreadFactory(), new ThreadPoolExecutor.AbortPolicy());
+                workQueue, newThreadFactory(properties.isDispatchVirtualThreads()), new ThreadPoolExecutor.AbortPolicy());
         // 空闲时回收核心线程，避免常驻占用
         this.pool.allowCoreThreadTimeOut(true);
 
-        log.info("[orbit-admin] trigger pool initialized: threads={}, queueCapacity={}, serialPerJob={}",
-                threads, queueCapacity, properties.isDispatchSerialPerJob());
+        log.info("[orbit-admin] trigger pool initialized: threads={}, queueCapacity={}, serialPerJob={}, threadType={}",
+                threads, queueCapacity, properties.isDispatchSerialPerJob(),
+                properties.isDispatchVirtualThreads() ? "virtual" : "platform");
     }
 
     /**
@@ -104,7 +112,11 @@ public class DispatchExecutor implements DisposableBean {
      */
     public void submit(JobInfo job) {
         final String jobName = job.getJobName();
-        final boolean guard = properties.isDispatchSerialPerJob();
+        // 任务级串行开关优先：null 表示跟随全局配置，true/false 为任务级覆盖
+        // （每任务阻塞策略的轻量化实现：串行 = 上一轮未收敛则跳过，非串行 = 允许并发）
+        final boolean guard = job.getSerialExecution() != null
+                ? job.getSerialExecution()
+                : properties.isDispatchSerialPerJob();
         // logId 在派发前生成：串行守卫开启时它随槽位一起预登记，
         // 这样执行器最早可能的回传（请求发出后毫秒级）一定能查到映射。
         final String logId = newLogId();
@@ -192,8 +204,16 @@ public class DispatchExecutor implements DisposableBean {
 
     /**
      * 触发线程工厂：独立命名，便于线程 dump 定位；守护线程，停机收尾由 destroy() 负责。
+     *
+     * JDK 21 虚拟线程模式下由 {@link Thread#ofVirtual()} 提供工厂：虚拟线程恒为守护态，
+     * 命名规则（orbit-dispatch-N）与平台线程保持一致，测试与线程 dump 观测不受影响。
+     *
+     * @param virtual true 使用虚拟线程（JDK 21），false 使用传统平台线程
      */
-    private static ThreadFactory newThreadFactory() {
+    private static ThreadFactory newThreadFactory(boolean virtual) {
+        if (virtual) {
+            return Thread.ofVirtual().name("orbit-dispatch-", 0).factory();
+        }
         final AtomicInteger seq = new AtomicInteger(0);
         return r -> {
             Thread t = new Thread(r, "orbit-dispatch-" + seq.incrementAndGet());

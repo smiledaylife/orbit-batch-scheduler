@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS orbit_job (
     params           VARCHAR(2000),
     timeout_seconds  INT DEFAULT 300,
     route_strategy   VARCHAR(16) DEFAULT 'ROUND',
+    retry_count      INT DEFAULT 0,
+    retry_interval_seconds INT DEFAULT 10,
+    serial_execution BOOLEAN,
     enabled          BOOLEAN DEFAULT TRUE,
     version          INT DEFAULT 1,
     created_at       TIMESTAMP,
@@ -32,9 +35,14 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
-CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);
--- 日志保留期清理（按 start_time 分批删除）与僵尸 RUNNING 回收均依赖该索引，避免全表扫描
+-- 与 deploy/sql/schema-postgresql.sql 对齐：log_id 唯一索引。
+-- 回传收敛（finishLogFromRunning / finishLog / markDispatched）都按 log_id 定位行，
+-- 唯一索引既是性能保障，也在库层面兜底「同一 logId 不允许两条日志」的协议约定。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_orbit_job_log_log_id ON orbit_job_log (log_id);
+-- 日志保留期清理（按 start_time 分批删除）依赖该索引，避免全表扫描
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_start ON orbit_job_log (start_time);
+-- 僵尸 RUNNING 回收（WHERE status='RUNNING' AND start_time < ?）依赖该组合索引
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_status_start ON orbit_job_log (status, start_time);
 
 -- 执行器心跳注册表（对齐 XXL-JOB xxl_job_registry）：共享库即可无状态 Deployment
 CREATE TABLE IF NOT EXISTS orbit_executor_registry (
