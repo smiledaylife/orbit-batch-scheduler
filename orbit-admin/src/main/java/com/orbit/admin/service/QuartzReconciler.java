@@ -23,10 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * DB -> Quartz 最终一致性对账器。
- *
- * DB 是任务定义的唯一事实源，Quartz 只是派生的调度运行时。接口操作成功后即使 Quartz
- * 因重启、异常或历史脏数据出现漂移，本组件也会周期性修复：删除 DB 已不存在的 Quartz Job，
- * 再调用 JobService 重新编排 DB 中的任务。集群环境通过 Redis 锁避免多个 Admin 同时全量对账。
+ * DB 是任务定义的唯一事实源，Quartz 是派生运行时；Redis 负责集群对账互斥。
  */
 @Component
 public class QuartzReconciler {
@@ -55,8 +52,6 @@ public class QuartzReconciler {
 
     @PostConstruct
     public void initialReconcile() {
-        // Quartz 在 Spring 完成启动后再进行完整对账，避免与 Scheduler 初始化竞态。
-        // @Scheduled 的第一次执行也会在固定延迟后再次兜底。
         log.info("[orbit-admin] quartz reconciler initialized");
     }
 
@@ -85,7 +80,7 @@ public class QuartzReconciler {
                 }
             }
 
-            // scheduleOrUpdate 已经封装了 enabled/Cron 合法性、JobDetail、Trigger 和缺失 Trigger 修复。
+            // 复用 JobService 已验证的 DB -> Quartz 编排逻辑，包含 disabled/invalid cron 和缺失 Trigger 修复。
             jobService.init();
             if (removed > 0) {
                 log.warn("[orbit-admin] quartz reconciliation removed {} orphan job(s)", removed);
@@ -102,8 +97,7 @@ public class QuartzReconciler {
             Boolean acquired = redis.opsForValue().setIfAbsent(LOCK_KEY, LOCK_VALUE, 50L, TimeUnit.SECONDS);
             return Boolean.TRUE.equals(acquired);
         } catch (Exception e) {
-            // 集群模式 Redis 是强依赖；单机开发模式允许没有 Redis 时由本地 Scheduler 自行工作。
-            if (isCluster()) {
+            if (properties.isExecutionLeaseEnabled()) {
                 log.warn("[orbit-admin] redis unavailable; skip quartz reconciliation to avoid multi-node race");
                 return false;
             }
@@ -116,10 +110,5 @@ public class QuartzReconciler {
             redis.execute(RELEASE, Arrays.asList(LOCK_KEY), LOCK_VALUE);
         } catch (Exception ignored) {
         }
-    }
-
-    private boolean isCluster() {
-        String profiles = System.getProperty("spring.profiles.active", "");
-        return profiles.contains("cluster");
     }
 }
