@@ -3,8 +3,6 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-
-    <!-- 无 <parent>：本模块自管依赖与构建配置，可脱离 reactor 独立构建 -->
     <groupId>com.orbit</groupId>
     <artifactId>orbit-executor</artifactId>
     <version>1.0.0</version>
@@ -15,7 +13,6 @@
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-        <!-- 业务 SDK：保证 Java 8 字节码，可在 JRE 8 + Spring Boot 2.7 运行 -->
         <java.release>8</java.release>
         <spring-boot.version>2.7.18</spring-boot.version>
         <maven-compiler-plugin.version>3.10.1</maven-compiler-plugin.version>
@@ -35,7 +32,6 @@
     </dependencyManagement>
 
     <dependencies>
-        <!-- 同版本发布，独立构建时需先 mvn install orbit-core -->
         <dependency>
             <groupId>com.orbit</groupId>
             <artifactId>orbit-core</artifactId>
@@ -48,6 +44,12 @@
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-web</artifactId>
+        </dependency>
+        <!-- 可选运行能力：仅在 execution-idempotency-enabled=true 时访问 Redis。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -83,21 +85,16 @@
     <profiles>
         <profile>
             <id>jdk9plus</id>
-            <activation>
-                <jdk>[9,)</jdk>
-            </activation>
+            <activation><jdk>[9,)</jdk></activation>
             <build>
                 <plugins>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-compiler-plugin</artifactId>
-                        <configuration>
-                            <release>${java.release}</release>
-                        </configuration>
+                        <configuration><release>${java.release}</release></configuration>
                     </plugin>
                 </plugins>
             </build>
         </profile>
     </profiles>
-
 </project>
