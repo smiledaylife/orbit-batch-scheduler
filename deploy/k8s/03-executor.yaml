@@ -4,7 +4,6 @@ metadata:
   name: orbit-executor
   namespace: orbit-system
 spec:
-  # 调度中心通过执行器自注册的 Pod IP 直连，Service 主要用于调试
   selector:
     app: orbit-executor
   ports:
@@ -27,7 +26,6 @@ spec:
       labels:
         app: orbit-executor
     spec:
-      # SIGTERM 时 Spring SmartLifecycle 会 POST /registry/remove，立刻摘除旧 IP
       terminationGracePeriodSeconds: 30
       containers:
         - name: executor
@@ -48,7 +46,30 @@ spec:
               value: http://orbit-admin:8080
             - name: ORBIT_EXECUTOR_APP_NAME
               value: demo-executor
-            # 任务工作线程池：单节点并发上限 + 按任务超时强制中断（0 = 旧行为，可省略）
+            - name: ORBIT_EXECUTOR_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: executor-access-token
+            - name: ORBIT_EXECUTOR_EXECUTION_IDEMPOTENCY_ENABLED
+              value: "true"
+            - name: ORBIT_EXECUTOR_EXECUTION_IDEMPOTENCY_TTL_SECONDS
+              value: "86400"
+            - name: SPRING_REDIS_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: redis-host
+            - name: SPRING_REDIS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: redis-port
+            - name: SPRING_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: redis-password
             - name: ORBIT_EXECUTOR_WORKER_THREADS
               value: "8"
             - name: ORBIT_EXECUTOR_QUEUE_CAPACITY
