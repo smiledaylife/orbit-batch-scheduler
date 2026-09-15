@@ -56,3 +56,14 @@ orbit:
     callback-stream-group: orbit-admin
     quartz-reconcile-interval-ms: 60000
     quartz-reconcile-initial-delay-ms: 15000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
