@@ -25,7 +25,13 @@ public class AdminProperties {
     private boolean dispatchSerialPerJob = true;
     private int triggerTimeoutSeconds = 10;
 
-    /** Spring 当前激活的 profile；仅对 cluster profile 强制生产安全配置。 */
+    /** Redis 集群级执行 Lease。单机开发模式默认关闭，cluster profile 开启。 */
+    private boolean executionLeaseEnabled = false;
+    /** Lease 时长；必须明显大于 Redis/网络瞬时抖动，默认 120 秒。 */
+    private long executionLeaseTtlMs = 120000L;
+    /** Lease 续租周期，建议不超过 TTL 的 1/3。 */
+    private long executionLeaseRenewIntervalMs = 30000L;
+
     @Value("${spring.profiles.active:}")
     private String activeProfiles;
 
@@ -43,6 +49,15 @@ public class AdminProperties {
         if (dispatchThreads < 1 || dispatchQueueCapacity < 0) {
             throw new IllegalStateException("orbit.admin dispatch thread/queue settings are invalid");
         }
+        if (executionLeaseEnabled) {
+            if (executionLeaseTtlMs < 5000L) {
+                throw new IllegalStateException("orbit.admin.execution-lease-ttl-ms must be >= 5000");
+            }
+            if (executionLeaseRenewIntervalMs < 1000L || executionLeaseRenewIntervalMs * 3L >= executionLeaseTtlMs) {
+                throw new IllegalStateException(
+                        "orbit.admin.execution-lease-renew-interval-ms must be >= 1000 and less than one third of lease TTL");
+            }
+        }
         if (isClusterProfile()) {
             if (accessToken == null || accessToken.trim().isEmpty()) {
                 throw new IllegalStateException("orbit.admin.access-token is required in cluster profile");
@@ -50,6 +65,9 @@ public class AdminProperties {
             if (executorAddressAllowPattern == null || executorAddressAllowPattern.trim().isEmpty()) {
                 throw new IllegalStateException(
                         "orbit.admin.executor-address-allow-pattern is required in cluster profile");
+            }
+            if (!executionLeaseEnabled) {
+                throw new IllegalStateException("orbit.admin.execution-lease-enabled must be true in cluster profile");
             }
         }
     }
@@ -92,4 +110,10 @@ public class AdminProperties {
     public void setDispatchSerialPerJob(boolean value) { this.dispatchSerialPerJob = value; }
     public int getTriggerTimeoutSeconds() { return triggerTimeoutSeconds; }
     public void setTriggerTimeoutSeconds(int value) { this.triggerTimeoutSeconds = value; }
+    public boolean isExecutionLeaseEnabled() { return executionLeaseEnabled; }
+    public void setExecutionLeaseEnabled(boolean value) { this.executionLeaseEnabled = value; }
+    public long getExecutionLeaseTtlMs() { return executionLeaseTtlMs; }
+    public void setExecutionLeaseTtlMs(long value) { this.executionLeaseTtlMs = value; }
+    public long getExecutionLeaseRenewIntervalMs() { return executionLeaseRenewIntervalMs; }
+    public void setExecutionLeaseRenewIntervalMs(long value) { this.executionLeaseRenewIntervalMs = value; }
 }
