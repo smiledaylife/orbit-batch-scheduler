@@ -2,221 +2,59 @@ package com.orbit.executor.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-/**
- * 执行器核心配置属性（对应前缀：{@code orbit.executor.*}）。
- * 提供执行器的应用名称、调度中心地址、心跳频率、安全凭证等核心参数配置。
- */
+/** 执行器核心配置属性（对应前缀：{@code orbit.executor.*}）。 */
 @ConfigurationProperties(prefix = "orbit.executor")
 public class ExecutorProperties {
-
-    /**
-     * 是否启用执行器组件（默认为 true）。
-     * 设为 false 时将跳过执行器的自动注册和心跳逻辑。
-     */
     private boolean enabled = true;
-
-    /**
-     * 执行器所属应用名称（例如：order-service）。
-     * 调度中心配置的任务 appName 将与此名称严格匹配以完成任务路由。
-     */
     private String appName = "orbit-executor";
-
-    /**
-     * 调度中心集群地址列表，多个地址使用英文逗号分隔。
-     * 示例：{@code http://orbit-admin:8080} 或 {@code http://admin1:8080,http://admin2:8080}。
-     */
     private String adminAddresses = "http://127.0.0.1:8080";
-
-    /**
-     * 执行器对外暴露的完整访问地址（例如：{@code http://192.168.1.50:8081} 或 K8s Service 域名）。
-     * 若留空（默认），系统将根据环境自动探测：优先使用 K8s 环境变量 {@code POD_IP}，其次探测本地网卡 IP，
-     * 端口自动继承应用的 {@code server.port}。
-     */
     private String address = "";
-
-    /**
-     * 执行器通信端口。
-     * 默认值为 0，表示无需显式配置：系统将自动继承应用自身的 Web 端口（即 {@code server.port}
-     * 或内嵌 Tomcat/Undertow 实际监听的端口）。
-     * 仅当存在 Docker 容器端口映射（例如容器内监听 8080，外部宿主机映射为 18080）等特殊网络场景时，
-     * 才需要显式指定此项以覆盖自动探测的端口。
-     */
     private int port = 0;
-
-    /**
-     * 安全访问令牌（Token）。
-     * 若配置，执行器在向调度中心发送注册/心跳，以及调度中心调用执行器触发任务时，将进行双向令牌校验。
-     * 为空则跳过安全校验。
-     */
     private String accessToken = "";
-
-    /**
-     * 执行器向调度中心发送心跳的间隔周期（毫秒），默认为 20000（20秒）。
-     * 框架底层强制保底不低于 5000 毫秒（5秒）。
-     */
     private long heartbeatIntervalMs = 20000;
-
-    /**
-     * 执行器节点唯一标识符（nodeId）。
-     * 若留空（默认），系统将优先读取环境变量 {@code POD_NAME}，其次读取本地主机名（hostname）。
-     */
     private String nodeId = "";
-
-    /**
-     * 任务执行工作线程数（默认 8）。
-     *
-     * 有界工作线程池提供：
-     *   - 限制单节点并发的任务执行数，防止瞬时触发风暴打爆业务应用；
-     *   - 超出线程数的触发进入队列排队，队列满则立即返回「executor saturated」失败
-     *       （调度中心可据此观测并扩容副本）；
-     *   - 任务在独立线程执行后，可按任务 {@code timeoutSeconds} 进行超时强制中断，
-     *       解决「调度中心 HTTP 读超时放弃后，执行器任务永久僵尸运行」的问题；
-     *   - 任务线程独立命名（orbit-job-worker-N），便于线程 dump 定位。
-     * 设为 0 表示内联模式：任务直接在 Web 容器请求线程内执行，无超时强制。
-     */
     private int workerThreads = 8;
-
-    /**
-     * 任务排队队列容量（默认 256）。仅当 {@code worker-threads > 0} 时生效。
-     * 队列满后新触发立即失败返回，不会再占用请求线程等待。
-     *
-     * 设为 0（或负数，按 0 处理）表示不排队：任务直接交付给工作线程，
-     * 并发数超过 {@code worker-threads} 时立即返回「executor saturated」，
-     * 适用于「宁可失败也不要积压」的强实时场景。
-     */
     private int queueCapacity = 256;
-
-    /**
-     * 传入 timeoutSeconds 非法（&lt;=0）时，执行器侧兜底的最大等待秒数（24 小时）。
-     * 正常情况下调度中心总会下发正的超时值，此项仅为防御性兜底。
-     */
     private int maxJobWaitSeconds = 86400;
-
-    /**
-     * 结果回传失败后的重试次数（不含首次发送）。
-     * 回传失败会让调度中心那条日志一直停在 RUNNING 直到孤儿回收，因此默认重试 3 次。
-     */
     private int callbackRetryTimes = 3;
-
-    /**
-     * 结果回传重试间隔（毫秒），退避等待时间。
-     */
     private long callbackRetryIntervalMs = 2000;
-
-    /**
-     * 待回传结果的内存队列容量。队列满时丢弃最旧的一条并打 ERROR 日志。
-     */
     private int callbackQueueCapacity = 1000;
 
-    public boolean isEnabled() {
-        return enabled;
-    }
+    /** Redis 幂等保护。生产多副本建议开启，使用 logId 防止 HTTP 超时重试造成重复执行。 */
+    private boolean executionIdempotencyEnabled = false;
+    /** Redis 幂等 key 保留时间；应覆盖最大任务耗时及 callback 重试窗口。 */
+    private long executionIdempotencyTtlSeconds = 86400;
 
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
-    }
-
-    public String getAppName() {
-        return appName;
-    }
-
-    public void setAppName(String appName) {
-        this.appName = appName;
-    }
-
-    public String getAdminAddresses() {
-        return adminAddresses;
-    }
-
-    public void setAdminAddresses(String adminAddresses) {
-        this.adminAddresses = adminAddresses;
-    }
-
-    public String getAddress() {
-        return address;
-    }
-
-    public void setAddress(String address) {
-        this.address = address;
-    }
-
-    public int getPort() {
-        return port;
-    }
-
-    public void setPort(int port) {
-        this.port = port;
-    }
-
-    public String getAccessToken() {
-        return accessToken;
-    }
-
-    public void setAccessToken(String accessToken) {
-        this.accessToken = accessToken;
-    }
-
-    public long getHeartbeatIntervalMs() {
-        return heartbeatIntervalMs;
-    }
-
-    public void setHeartbeatIntervalMs(long heartbeatIntervalMs) {
-        this.heartbeatIntervalMs = heartbeatIntervalMs;
-    }
-
-    public String getNodeId() {
-        return nodeId;
-    }
-
-    public void setNodeId(String nodeId) {
-        this.nodeId = nodeId;
-    }
-
-    public int getWorkerThreads() {
-        return workerThreads;
-    }
-
-    public void setWorkerThreads(int workerThreads) {
-        this.workerThreads = workerThreads;
-    }
-
-    public int getQueueCapacity() {
-        return queueCapacity;
-    }
-
-    public void setQueueCapacity(int queueCapacity) {
-        this.queueCapacity = queueCapacity;
-    }
-
-    public int getMaxJobWaitSeconds() {
-        return maxJobWaitSeconds;
-    }
-
-    public void setMaxJobWaitSeconds(int maxJobWaitSeconds) {
-        this.maxJobWaitSeconds = maxJobWaitSeconds;
-    }
-
-    public int getCallbackRetryTimes() {
-        return callbackRetryTimes;
-    }
-
-    public void setCallbackRetryTimes(int callbackRetryTimes) {
-        this.callbackRetryTimes = callbackRetryTimes;
-    }
-
-    public long getCallbackRetryIntervalMs() {
-        return callbackRetryIntervalMs;
-    }
-
-    public void setCallbackRetryIntervalMs(long callbackRetryIntervalMs) {
-        this.callbackRetryIntervalMs = callbackRetryIntervalMs;
-    }
-
-    public int getCallbackQueueCapacity() {
-        return callbackQueueCapacity;
-    }
-
-    public void setCallbackQueueCapacity(int callbackQueueCapacity) {
-        this.callbackQueueCapacity = callbackQueueCapacity;
-    }
+    public boolean isEnabled() { return enabled; }
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    public String getAppName() { return appName; }
+    public void setAppName(String appName) { this.appName = appName; }
+    public String getAdminAddresses() { return adminAddresses; }
+    public void setAdminAddresses(String adminAddresses) { this.adminAddresses = adminAddresses; }
+    public String getAddress() { return address; }
+    public void setAddress(String address) { this.address = address; }
+    public int getPort() { return port; }
+    public void setPort(int port) { this.port = port; }
+    public String getAccessToken() { return accessToken; }
+    public void setAccessToken(String accessToken) { this.accessToken = accessToken; }
+    public long getHeartbeatIntervalMs() { return heartbeatIntervalMs; }
+    public void setHeartbeatIntervalMs(long heartbeatIntervalMs) { this.heartbeatIntervalMs = heartbeatIntervalMs; }
+    public String getNodeId() { return nodeId; }
+    public void setNodeId(String nodeId) { this.nodeId = nodeId; }
+    public int getWorkerThreads() { return workerThreads; }
+    public void setWorkerThreads(int workerThreads) { this.workerThreads = workerThreads; }
+    public int getQueueCapacity() { return queueCapacity; }
+    public void setQueueCapacity(int queueCapacity) { this.queueCapacity = queueCapacity; }
+    public int getMaxJobWaitSeconds() { return maxJobWaitSeconds; }
+    public void setMaxJobWaitSeconds(int maxJobWaitSeconds) { this.maxJobWaitSeconds = maxJobWaitSeconds; }
+    public int getCallbackRetryTimes() { return callbackRetryTimes; }
+    public void setCallbackRetryTimes(int callbackRetryTimes) { this.callbackRetryTimes = callbackRetryTimes; }
+    public long getCallbackRetryIntervalMs() { return callbackRetryIntervalMs; }
+    public void setCallbackRetryIntervalMs(long callbackRetryIntervalMs) { this.callbackRetryIntervalMs = callbackRetryIntervalMs; }
+    public int getCallbackQueueCapacity() { return callbackQueueCapacity; }
+    public void setCallbackQueueCapacity(int callbackQueueCapacity) { this.callbackQueueCapacity = callbackQueueCapacity; }
+    public boolean isExecutionIdempotencyEnabled() { return executionIdempotencyEnabled; }
+    public void setExecutionIdempotencyEnabled(boolean value) { this.executionIdempotencyEnabled = value; }
+    public long getExecutionIdempotencyTtlSeconds() { return executionIdempotencyTtlSeconds; }
+    public void setExecutionIdempotencyTtlSeconds(long value) { this.executionIdempotencyTtlSeconds = value; }
 }
