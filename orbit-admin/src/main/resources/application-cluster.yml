@@ -1,5 +1,5 @@
-# 集群模式：生产多副本必须使用外部 PostgreSQL / GaussDB 与 Quartz JDBC JobStore。
-# 数据库地址、账号、密码必须通过环境变量或外部配置注入，禁止使用内置默认凭据。
+# 集群模式：生产多副本必须使用外部 PostgreSQL / GaussDB、Quartz JDBC JobStore 与 Redis Execution Lease。
+# 数据库与 Redis 地址、账号、密码通过环境变量或外部配置注入，禁止使用内置生产凭据。
 
 spring:
   datasource:
@@ -18,6 +18,20 @@ spring:
       time-between-eviction-runs-millis: 60000
       min-evictable-idle-time-millis: 300000
 
+  redis:
+    host: ${ORBIT_REDIS_HOST}
+    port: ${ORBIT_REDIS_PORT:6379}
+    password: ${ORBIT_REDIS_PASSWORD:}
+    database: ${ORBIT_REDIS_DATABASE:0}
+    timeout: ${ORBIT_REDIS_TIMEOUT:2s}
+    connect-timeout: ${ORBIT_REDIS_CONNECT_TIMEOUT:2s}
+    lettuce:
+      pool:
+        max-active: 16
+        max-idle: 8
+        min-idle: 2
+        max-wait: 2s
+
   quartz:
     job-store-type: jdbc
     jdbc:
@@ -31,3 +45,10 @@ spring:
       org.quartz.jobStore.isClustered: true
       org.quartz.jobStore.clusterCheckinInterval: 15000
       org.quartz.jobStore.misfireThreshold: 60000
+
+orbit:
+  admin:
+    execution-lease-enabled: true
+    # 必须大于续租周期的 3 倍；120s 可覆盖常规 Redis/网络抖动。
+    execution-lease-ttl-ms: 120000
+    execution-lease-renew-interval-ms: 30000
