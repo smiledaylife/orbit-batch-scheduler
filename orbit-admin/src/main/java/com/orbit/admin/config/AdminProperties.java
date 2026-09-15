@@ -6,40 +6,69 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
-/** 调度中心配置属性类。 */
+/**
+ * 调度中心配置属性。
+ *
+ * <p>统一承载注册中心、派发、超时、集群执行 Lease、Redis Stream callback 和 Quartz
+ * 对账等运行参数。cluster profile 下会执行更严格的生产配置校验。</p>
+ */
 @Component
 @ConfigurationProperties(prefix = "orbit.admin")
 public class AdminProperties {
 
+    /** Admin 与 Executor 之间的共享访问令牌；生产环境必须通过 Secret 注入。 */
     private String accessToken = "";
+    /** Executor 心跳超过该时间未更新时，视为节点失活。 */
     private int heartbeatTimeoutSeconds = 90;
+    /** Admin 访问 Executor 的 HTTP 连接超时时间。 */
     private int connectTimeoutMs = 3000;
+    /** Quartz 与业务任务使用的统一任务分组。 */
     private String group = "ORBIT";
+    /** 单个任务允许的最大执行超时时间，防止异常配置长期占用资源。 */
     private int maxTimeoutSeconds = 3600;
+    /** Executor 地址白名单；cluster 模式必须显式配置，避免注册任意目标地址。 */
     private String executorAddressAllowPattern = "";
+    /** Cron 表达式解析和 Quartz Trigger 使用的时区。 */
     private String timezone = "Asia/Shanghai";
+    /** Executor 注册信息本地缓存 TTL。 */
     private long registryCacheTtlMs = 3000;
+    /** 执行日志保留天数，供定时清理任务使用。 */
     private int logRetentionDays = 30;
+    /** Admin 派发线程池大小。 */
     private int dispatchThreads = 64;
+    /** 派发线程池等待队列容量；0 表示不缓存等待任务。 */
     private int dispatchQueueCapacity = 256;
+    /** 同一 job 是否在 Admin 层面保证同一时刻最多一个执行实例。 */
     private boolean dispatchSerialPerJob = true;
+    /** Admin 等待 Executor 接受触发请求的 HTTP 超时时间。 */
     private int triggerTimeoutSeconds = 10;
 
     /** Redis 集群级执行 Lease。单机开发模式默认关闭，cluster profile 开启。 */
     private boolean executionLeaseEnabled = false;
+    /** Lease 持有时间；应明显大于 Redis/网络瞬时抖动。 */
     private long executionLeaseTtlMs = 120000L;
+    /** Lease 续租周期，要求小于 TTL 的三分之一以留出故障恢复窗口。 */
     private long executionLeaseRenewIntervalMs = 30000L;
 
     /** Redis Stream callback 持久化。生产 cluster 模式开启。 */
     private boolean durableCallbackEnabled = false;
+    /** Executor 写入、Admin 消费的 Redis Stream key。 */
     private String callbackStreamKey = "orbit:callback:stream";
+    /** Admin Redis Stream Consumer Group 名称。 */
     private String callbackStreamGroup = "orbit-admin";
+    /** DB 与 Quartz 状态对账周期。 */
     private long quartzReconcileIntervalMs = 60000L;
+    /** 首次 Quartz 对账延迟，给应用启动和 Quartz 初始化预留时间。 */
     private long quartzReconcileInitialDelayMs = 15000L;
 
+    /** Spring 当前启用的 profile，用于识别 cluster 生产模式。 */
     @Value("${spring.profiles.active:}")
     private String activeProfiles;
 
+    /**
+     * 应用启动阶段执行配置校验。
+     * 配置错误应尽早失败，而不是等到真实任务触发时才暴露。
+     */
     @PostConstruct
     public void validate() {
         if (heartbeatTimeoutSeconds < 5) {
@@ -91,6 +120,7 @@ public class AdminProperties {
         }
     }
 
+    /** 判断当前 Spring profile 是否包含 cluster。 */
     private boolean isClusterProfile() {
         if (activeProfiles == null) {
             return false;
