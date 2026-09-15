@@ -12,19 +12,19 @@ spec:
       targetPort: 8080
 ---
 # 调度中心：无状态 Deployment。
-# 执行器心跳写入共享库 orbit_executor_registry（对齐 XXL-JOB xxl_job_registry），
-# 任意副本都能读到全量在线节点。执行器只需 ORBIT_EXECUTOR_ADMIN_ADDRESSES=http://orbit-admin:8080。
-# 多副本调度（同一 Cron 只触发一次）仍需 Quartz JDBC 集群：
-#   1. SPRING_PROFILES_ACTIVE=cluster
-#   2. PostgreSQL / GaussDB + deploy/sql/quartz-*.sql
-#   3. 副本时钟 NTP 同步
+# 生产多副本必须使用 cluster profile + 外部 PostgreSQL/GaussDB + Quartz JDBC JobStore。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: orbit-admin
   namespace: orbit-system
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: orbit-admin
@@ -33,6 +33,16 @@ spec:
       labels:
         app: orbit-admin
     spec:
+      terminationGracePeriodSeconds: 45
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: orbit-admin
       containers:
         - name: admin
           image: orbit-admin:1.0.0
@@ -44,33 +54,42 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: SPRING_PROFILES_ACTIVE
+              value: cluster
+            - name: ORBIT_ADMIN_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: orbit-admin-secret
+                  key: access-token
           volumeMounts:
-            - name: data
-              mountPath: /app/data
             - name: conf
               mountPath: /app/config
+              readOnly: true
           args: ["--spring.config.additional-location=file:/app/config/admin.yml"]
           readinessProbe:
             httpGet:
-              path: /actuator/health
+              path: /actuator/health/readiness
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
           livenessProbe:
             httpGet:
-              path: /actuator/health
+              path: /actuator/health/liveness
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources:
             requests:
               cpu: 100m
               memory: 256Mi
             limits:
+              cpu: 1000m
               memory: 512Mi
       volumes:
-        - name: data
-          emptyDir: {}
         - name: conf
           configMap:
             name: orbit-config
