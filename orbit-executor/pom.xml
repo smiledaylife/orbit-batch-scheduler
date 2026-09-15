@@ -9,7 +9,6 @@
     <packaging>jar</packaging>
     <name>Orbit :: Executor</name>
     <description>执行器 SDK：@OrbitJob 扫描、向调度中心注册、接收触发执行</description>
-
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
@@ -18,7 +17,6 @@
         <maven-compiler-plugin.version>3.10.1</maven-compiler-plugin.version>
         <maven-surefire-plugin.version>2.22.2</maven-surefire-plugin.version>
     </properties>
-
     <dependencyManagement>
         <dependencies>
             <dependency>
@@ -30,7 +28,6 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
-
     <dependencies>
         <dependency>
             <groupId>com.orbit</groupId>
@@ -45,11 +42,10 @@
             <groupId>org.springframework</groupId>
             <artifactId>spring-web</artifactId>
         </dependency>
-        <!-- 可选运行能力：仅在 execution-idempotency-enabled=true 时访问 Redis。 -->
+        <!-- logId 幂等保护依赖 Redis；默认关闭，不访问 Redis。 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
-            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -62,17 +58,13 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-
     <build>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>${maven-compiler-plugin.version}</version>
-                <configuration>
-                    <source>${java.release}</source>
-                    <target>${java.release}</target>
-                </configuration>
+                <configuration><source>${java.release}</source><target>${java.release}</target></configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -81,7 +73,6 @@
             </plugin>
         </plugins>
     </build>
-
     <profiles>
         <profile>
             <id>jdk9plus</id>
