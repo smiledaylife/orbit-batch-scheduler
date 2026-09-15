@@ -14,9 +14,10 @@ CREATE TABLE IF NOT EXISTS orbit_job (
     enabled          BOOLEAN DEFAULT TRUE,
     version          INT DEFAULT 1,
     created_at       TIMESTAMP,
-    updated_at       TIMESTAMP,
-    CONSTRAINT uk_orbit_job_name UNIQUE (job_name)
+    updated_at       TIMESTAMP
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_orbit_job_name ON orbit_job (job_name);
 
 CREATE TABLE IF NOT EXISTS orbit_job_log (
     id                BIGSERIAL PRIMARY KEY,
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
     job_id            BIGINT,
     job_name          VARCHAR(64),
     app_name          VARCHAR(64),
-    handler           VARCHAR(128),
+    handler            VARCHAR(128),
     executor_address  VARCHAR(256),
     status            VARCHAR(16),
     message           VARCHAR(2000),
@@ -33,10 +34,10 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
     end_time          TIMESTAMP
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS uk_orbit_job_log_log_id ON orbit_job_log (log_id);
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
-CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);
--- Log retention cleanup and orphaned RUNNING reap both scan by start_time
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_start ON orbit_job_log (start_time);
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_status_start ON orbit_job_log (status, start_time);
 
 CREATE TABLE IF NOT EXISTS orbit_executor_registry (
     id               BIGSERIAL PRIMARY KEY,
