@@ -1,3 +1,4 @@
+# Executor Service：通过普通 ClusterIP Service 暴露，服务发现/负载均衡由 Kubernetes Service 负责。
 apiVersion: v1
 kind: Service
 metadata:
@@ -11,6 +12,8 @@ spec:
       port: 8081
       targetPort: 8081
 ---
+# Executor 生产部署：至少两个副本，避免单 Pod 故障导致整个执行能力不可用。
+# 同一 logId 的重复触发由 Redis 幂等保护；执行结果由 Redis Stream 持久化。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +24,7 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
+      # 滚动升级期间保证至少保留一个可用 Executor。
       maxUnavailable: 0
       maxSurge: 1
   selector:
@@ -31,9 +35,11 @@ spec:
       labels:
         app: orbit-executor
     spec:
+      # 给 callback flush 和任务执行线程预留优雅退出时间。
       terminationGracePeriodSeconds: 30
       affinity:
         podAntiAffinity:
+          # 尽量把副本分散到不同节点，降低单节点故障影响面。
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               podAffinityTerm:
@@ -56,6 +62,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # 普通 Service 负责在多个 Executor Pod 间做服务级负载均衡。
             - name: ORBIT_EXECUTOR_ADMIN_ADDRESSES
               value: http://orbit-admin:8080
             - name: ORBIT_EXECUTOR_APP_NAME
@@ -65,10 +72,12 @@ spec:
                 secretKeyRef:
                   name: orbit-admin-secret
                   key: executor-access-token
+            # Redis SETNX 幂等 key 防止 HTTP 超时重试造成重复执行。
             - name: ORBIT_EXECUTOR_EXECUTION_IDEMPOTENCY_ENABLED
               value: "true"
             - name: ORBIT_EXECUTOR_EXECUTION_IDEMPOTENCY_TTL_SECONDS
               value: "86400"
+            # Redis Stream 持久化 callback，Admin 侧异步消费并落库。
             - name: ORBIT_EXECUTOR_DURABLE_CALLBACK_ENABLED
               value: "true"
             - name: SPRING_REDIS_HOST
@@ -107,6 +116,7 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 10
           resources:
+            # requests 用于调度，limits 用于限制异常负载对节点的影响。
             requests:
               cpu: 50m
               memory: 128Mi
