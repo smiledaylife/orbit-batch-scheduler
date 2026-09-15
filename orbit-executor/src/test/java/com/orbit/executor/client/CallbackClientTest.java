@@ -138,4 +138,35 @@ class CallbackClientTest {
         Thread.sleep(300L);
         assertEquals(0, admin.bodies.size(), "idle sender must not POST empty batches");
     }
+
+    @Test
+    void shutdownStopsBackoffRetriesAndConvergesQuickly() throws Exception {
+        RecordingAdminClient admin = new RecordingAdminClient(props());
+        admin.succeed = false;
+        ExecutorProperties p = props();
+        // 宽退避配置：若停机后仍按完整重试节奏，本测试的耗时下限会被拉到秒级
+        p.setCallbackRetryTimes(5);
+        p.setCallbackRetryIntervalMs(500L);
+        client = new CallbackClient(p, admin);
+
+        client.send(result("log-shut"));
+        // 等第一次发送失败完成（首次 POST 已记账）
+        long deadline = System.currentTimeMillis() + 5000L;
+        while (admin.bodies.size() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L);
+        }
+        assertTrue(admin.bodies.size() >= 1);
+
+        // 停机：发送线程不得再按 retryTimes × interval 退避重试，
+        // 每批只做一次尝试并退回队列，保证优雅停机在宽限期内收敛
+        long t0 = System.currentTimeMillis();
+        client.shutdown(1);
+        long elapsed = System.currentTimeMillis() - t0;
+
+        assertTrue(elapsed < 2500L,
+                "shutdown must not wait for full backoff retries, took " + elapsed + "ms");
+        // 结果退回队列而不是丢弃（孤儿回收兜底前仍有机会补发）
+        long[] stats = client.stats();
+        assertEquals(0L, stats[2], "nothing should be dropped by shutdown itself");
+    }
 }

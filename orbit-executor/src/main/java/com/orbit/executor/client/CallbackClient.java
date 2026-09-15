@@ -138,7 +138,13 @@ public class CallbackClient {
             List<TriggerResult> batch = new ArrayList<TriggerResult>(BATCH_LIMIT);
             batch.add(first);
             pending.drainTo(batch, BATCH_LIMIT - 1);
-            sendWithRetry(batch);
+            boolean sent = sendWithRetry(batch);
+            // 停机宽限期内调度中心仍不可达时，失败批次已退回队列；
+            // 若继续循环会陷入「取出 - 失败 - 放回」的空转，剩余结果保留在队列，
+            // 由 shutdown() 的未送达告警报告，不再尝试。
+            if (!running && !sent) {
+                return;
+            }
         }
     }
 
@@ -147,14 +153,22 @@ public class CallbackClient {
      *
      * 重试耗尽后把整批塞回队列而不是丢弃：调度中心可能只是短暂不可用，
      * 直接丢会让这些任务全部落到孤儿回收里被记成失败。塞不回去的（队列满）才真的丢弃。
+     *
+     * 停机后（running=false）不再退避重试：每批只试一次就退回队列，
+     * 避免发送线程被「重试 × 退避等待」拖住，缩短优雅停机耗时。
+     *
+     * @return 是否成功送达调度中心
      */
-    private void sendWithRetry(List<TriggerResult> batch) {
+    private boolean sendWithRetry(List<TriggerResult> batch) {
         int attempts = Math.max(1, properties.getCallbackRetryTimes() + 1);
         long interval = Math.max(0L, properties.getCallbackRetryIntervalMs());
         for (int i = 0; i < attempts; i++) {
             if (adminClient.post(CALLBACK_PATH, batch)) {
                 sentCount.addAndGet(batch.size());
-                return;
+                return true;
+            }
+            if (!running) {
+                break;
             }
             if (i < attempts - 1 && interval > 0) {
                 if (!sleep(interval)) {
@@ -171,9 +185,10 @@ public class CallbackClient {
         }
         log.warn("[orbit-executor] callback batch of {} item(s) failed after {} attempt(s), re-queued",
                 batch.size(), attempts);
-        if (interval > 0) {
+        if (interval > 0 && running) {
             sleep(interval);
         }
+        return false;
     }
 
     /**

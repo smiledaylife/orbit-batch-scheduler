@@ -304,13 +304,17 @@ public class JobStore {
     }
 
     /**
-     * 回收僵尸 RUNNING 日志：将早于 cutoff 的 RUNNING 记录收敛为 FAILED 终态。
+     * 回收僵尸 RUNNING 日志：将满足任一回收条件的 RUNNING 记录收敛为 FAILED 终态。
      *
-     * 场景：调度中心在派发中途崩溃/重启，插入的 RUNNING 日志无人收敛，
-     * 会永久悬挂并误导 /logs 页面观测、让分页统计失真。后台任务周期调用本方法完成兑底。
+     * 场景：调度中心在派发中途崩溃/重启，或执行器崩溃导致回传永久丢失，
+     * 插入的 RUNNING 日志无人收敛，会永久悬挂并误导 /logs 页面观测、
+     * 让分页统计失真。后台任务周期调用本方法完成兜底。
      *
-     * @param cutoffMs 回收阈值：start_time 早于（now - cutoffMs）的 RUNNING 记录将被收敛
-     * @param message  写入 message 字段的收敛原因说明
+     * @param hardCapMs      硬上界阈值：start_time 早于（now - hardCapMs）的 RUNNING 记录无条件收敛
+     * @param offlineMs      存活判定阈值：未超过该时长的记录一律不碰，避免刚触发的日志被误判
+     * @param liveAddresses  当前在线执行器地址集合；承接节点不在线且超过 offlineMs 的记录被收敛
+     * @param hardMessage    硬上界回收写入 message 的原因说明
+     * @param offlineMessage 执行器离线回收写入 message 的原因说明
      * @return 本次收敛的记录数
      */
     public List<String> reapOrphanedRunning(long hardCapMs, long offlineMs,

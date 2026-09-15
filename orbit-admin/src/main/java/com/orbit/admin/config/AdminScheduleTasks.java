@@ -28,6 +28,18 @@ public class AdminScheduleTasks {
     /** 回收僵尸 RUNNING 日志前的额外宽限（毫秒）：在阈值之上再放宽 5 分钟 */
     private static final long REAP_EXTRA_GRACE_MS = 5 * 60 * 1000L;
 
+    /**
+     * hardCap 阈值的下限保护（秒）：max-timeout-seconds 误配成 0 或负数时，
+     * 若不加下限，回收阈值会只剩 5 分钟宽限，正常长任务会被误判为僵尸。
+     */
+    private static final long MIN_HARD_CAP_SECONDS = 1L;
+
+    /**
+     * 存活判定的下限保护（秒）：heartbeat-timeout-seconds 误配成 0 或负数时，
+     * 与 {@code ExecutorRegistry} 内部一致地倍到 5 秒，避免两处口径不一。
+     */
+    private static final long MIN_HEARTBEAT_SECONDS = 5L;
+
     private final ExecutorRegistry registry;
     private final JobStore jobStore;
     private final AdminProperties properties;
@@ -77,10 +89,14 @@ public class AdminScheduleTasks {
             // 硬上界：任务 timeoutSeconds 在保存时已被 max-timeout-seconds 封顶，
             // 因此超过这个时长的一定是异常，无论执行器是否在线都收敛掉，
             // 保证不会有永久 RUNNING 的日志和永久被占用的串行守卫。
-            long hardCapMs = properties.getMaxTimeoutSeconds() * 1000L + REAP_EXTRA_GRACE_MS;
+            // 下限保护：误配 0/负数时倍到 1 秒，避免正常长任务被成批误杀。
+            long hardCapMs = Math.max(MIN_HARD_CAP_SECONDS, properties.getMaxTimeoutSeconds()) * 1000L
+                    + REAP_EXTRA_GRACE_MS;
             // 存活判定的宽限：心跳超时之上再放宽 5 分钟，
             // 避免执行器短暂网络抖动就被判死、把仍在正常运行的任务记成失败。
-            long offlineMs = properties.getHeartbeatTimeoutSeconds() * 1000L + REAP_EXTRA_GRACE_MS;
+            // 下限与 ExecutorRegistry 的 heartbeatTimeoutMs 口径一致（5 秒）。
+            long offlineMs = Math.max(MIN_HEARTBEAT_SECONDS, properties.getHeartbeatTimeoutSeconds()) * 1000L
+                    + REAP_EXTRA_GRACE_MS;
 
             java.util.Set<String> live = new java.util.HashSet<String>();
             for (com.orbit.core.model.ExecutorNode node : registry.listAll()) {

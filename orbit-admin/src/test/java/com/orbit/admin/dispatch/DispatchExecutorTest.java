@@ -35,7 +35,8 @@ import static org.mockito.Mockito.when;
  *
  * 覆盖触发通道的四项契约：
  *   - 触发跑在专职线程池上，不占用调用方（Quartz）线程；
- *   - 同名任务串行：受理成功后守卫一直持有到回传，其间到点被跳过；
+ *   - 同名任务串行：派发前预登记 logId 占用守卫，一直持有到回传，
+ *     其间到点被跳过；
  *   - 守卫释放：触发同步失败、或 dispatch 抛异常时立即释放，任务不会被永久锁死；
  *   - 背压：队列满时快速失败并写一条 FAILED 调度日志。
  */
@@ -66,8 +67,8 @@ class DispatchExecutorTest {
     /**
      * 轮询等待条件成立。
      *
-     * 守卫的 bind / release 在 {@code dispatch()} 返回之后才执行，而测试桩的 countDown()
-     * 在 {@code dispatch()} 内部就已触发，因此在 countDown 之后立刻断言守卫状态会与之竞态。
+     * 派发跑在专职线程池上，submit() 立即返回；测试桩的动作（countDown、
+     * 守卫状态断言）必须等派发真正发生后才可靠。
      */
     private static void awaitUntil(String what, java.util.function.BooleanSupplier condition)
             throws InterruptedException {
@@ -90,19 +91,19 @@ class DispatchExecutorTest {
         return j;
     }
 
-    /** 受理回执：日志保持 RUNNING，守卫继续持有 */
-    private static TriggerResult accepted(String logId) {
-        return TriggerResult.accepted(logId, 1L, "node-1", "accepted");
+    /** 受理回执：回显派发请求携带的 logId（与真实执行器一致），日志保持 RUNNING、守卫继续持有 */
+    private static TriggerResult acceptedOf(org.mockito.invocation.InvocationOnMock inv) {
+        return TriggerResult.accepted(inv.getArgument(2), 1L, "node-1", "accepted");
     }
 
     @Test
     void dispatchRunsOnPoolThreadNotCaller() throws Exception {
         final CountDownLatch done = new CountDownLatch(1);
         final AtomicReference<String> threadName = new AtomicReference<String>();
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             threadName.set(Thread.currentThread().getName());
             done.countDown();
-            return accepted("log-1");
+            return acceptedOf(inv);
         });
         executor = new DispatchExecutor(jobService, props(2, 8, true), new OutstandingDispatches());
 
@@ -117,31 +118,39 @@ class DispatchExecutorTest {
     @Test
     void serialPerJobSkipsWhilePreviousAwaitingCallback() throws Exception {
         final CountDownLatch first = new CountDownLatch(1);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        final AtomicReference<String> boundLogId = new AtomicReference<String>();
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
+            boundLogId.set(inv.getArgument(2));
             first.countDown();
-            return accepted("log-s1");
+            return acceptedOf(inv);
         });
         OutstandingDispatches outstanding = new OutstandingDispatches();
         executor = new DispatchExecutor(jobService, props(2, 8, true), outstanding);
 
         executor.submit(job("jobS"));
         assertTrue(first.await(5, TimeUnit.SECONDS));
-        // 受理后守卫仍在持有（等回传），后续到点必须被跳过
+        // 派发前已预登记 logId，守卫此刻必然已持有；后续到点必须被跳过
         executor.submit(job("jobS"));
         executor.submit(job("jobS"));
 
-        verify(jobService, times(1)).dispatch(any(JobInfo.class), any());
+        verify(jobService, times(1)).dispatch(any(JobInfo.class), any(), any());
         assertEquals(1, outstanding.outstanding());
         assertEquals(2L, outstanding.skipped());
         assertEquals(2L, executor.metrics().get("dispatchSkipped"));
+        // 预登记的 logId 与派发请求携带的一致，回传（按 logId 释放）必定能找到槽位
+        assertNotNull(boundLogId.get());
+        assertTrue(outstanding.release(boundLogId.get()));
+        assertEquals(0, outstanding.outstanding());
     }
 
     @Test
     void guardReleasedOnCallbackAllowsNextFire() throws Exception {
         final CountDownLatch first = new CountDownLatch(1);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        final AtomicReference<String> boundLogId = new AtomicReference<String>();
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
+            boundLogId.set(inv.getArgument(2));
             first.countDown();
-            return accepted("log-c1");
+            return acceptedOf(inv);
         });
         OutstandingDispatches outstanding = new OutstandingDispatches();
         executor = new DispatchExecutor(jobService, props(2, 8, true), outstanding);
@@ -150,27 +159,27 @@ class DispatchExecutorTest {
         assertTrue(first.await(5, TimeUnit.SECONDS));
         assertEquals(1, outstanding.outstanding());
 
-        // 执行器回传 -> 释放守卫 -> 下一次到点可以正常触发。
-        // 轮询等待：bind 在 dispatch 返回后才发生，此刻 logId 可能还没登记。
-        awaitUntil("callback released the guard", () -> outstanding.release("log-c1"));
+        // 执行器回传（按实际 logId） -> 释放守卫 -> 下一次到点可以正常触发。
+        // 轮询等待：派发在池线程上异步执行，此刻 submit 可能还没返回。
+        awaitUntil("callback released the guard", () -> outstanding.release(boundLogId.get()));
         assertEquals(0, outstanding.outstanding());
 
         final CountDownLatch second = new CountDownLatch(1);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             second.countDown();
-            return accepted("log-c2");
+            return acceptedOf(inv);
         });
         executor.submit(job("jobC"));
         assertTrue(second.await(5, TimeUnit.SECONDS));
-        verify(jobService, times(2)).dispatch(any(JobInfo.class), any());
+        verify(jobService, times(2)).dispatch(any(JobInfo.class), any(), any());
     }
 
     @Test
     void guardReleasedWhenTriggerRejectedSynchronously() throws Exception {
         final CountDownLatch done = new CountDownLatch(1);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             done.countDown();
-            return TriggerResult.fail("log-f", 1L, "node-1", 0, "executor saturated");
+            return TriggerResult.fail(inv.getArgument(2), 1L, "node-1", 0, "executor saturated");
         });
         OutstandingDispatches outstanding = new OutstandingDispatches();
         executor = new DispatchExecutor(jobService, props(2, 8, true), outstanding);
@@ -187,7 +196,7 @@ class DispatchExecutorTest {
     @Test
     void guardReleasedAfterDispatchThrows() throws Exception {
         final CountDownLatch done = new CountDownLatch(1);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             done.countDown();
             throw new IllegalStateException("db unavailable");
         });
@@ -204,9 +213,9 @@ class DispatchExecutorTest {
     @Test
     void serialDisabledAllowsOverlap() throws Exception {
         final CountDownLatch both = new CountDownLatch(2);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             both.countDown();
-            return accepted("log-o");
+            return acceptedOf(inv);
         });
         OutstandingDispatches outstanding = new OutstandingDispatches();
         executor = new DispatchExecutor(jobService, props(4, 8, false), outstanding);
@@ -215,16 +224,16 @@ class DispatchExecutorTest {
         executor.submit(job("jobO"));
 
         assertTrue(both.await(5, TimeUnit.SECONDS), "both fires should run when serial guard is off");
-        verify(jobService, times(2)).dispatch(any(JobInfo.class), any());
+        verify(jobService, times(2)).dispatch(any(JobInfo.class), any(), any());
         assertEquals(0, outstanding.outstanding());
     }
 
     @Test
     void differentJobsAreIndependent() throws Exception {
         final CountDownLatch both = new CountDownLatch(2);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             both.countDown();
-            return accepted("log-" + ((JobInfo) inv.getArgument(0)).getJobName());
+            return TriggerResult.accepted(inv.getArgument(2), 1L, "node-1", "accepted");
         });
         OutstandingDispatches outstanding = new OutstandingDispatches();
         executor = new DispatchExecutor(jobService, props(4, 8, true), outstanding);
@@ -240,10 +249,10 @@ class DispatchExecutorTest {
     void saturationRecordsFailedLog() throws Exception {
         final CountDownLatch entered = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             entered.countDown();
             release.await(5, TimeUnit.SECONDS);
-            return accepted("log-b");
+            return acceptedOf(inv);
         });
         // 1 个线程 + 不排队：第二个触发必然被拒绝
         executor = new DispatchExecutor(jobService, props(1, 0, false), new OutstandingDispatches());
@@ -272,10 +281,10 @@ class DispatchExecutorTest {
     void zeroThreadsBootsWithFloorOfOne() throws Exception {
         final CountDownLatch done = new CountDownLatch(1);
         final AtomicInteger calls = new AtomicInteger();
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             calls.incrementAndGet();
             done.countDown();
-            return accepted("log-z");
+            return acceptedOf(inv);
         });
         // dispatch-threads=0 是误配，必须兜底为 1 而不是启动失败或永不执行
         executor = new DispatchExecutor(jobService, props(0, 4, true), new OutstandingDispatches());
@@ -292,10 +301,10 @@ class DispatchExecutorTest {
     void rejectedDispatchFailureIsSwallowed() throws Exception {
         final CountDownLatch entered = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
-        when(jobService.dispatch(any(JobInfo.class), any())).thenAnswer(inv -> {
+        when(jobService.dispatch(any(JobInfo.class), any(), any())).thenAnswer(inv -> {
             entered.countDown();
             release.await(5, TimeUnit.SECONDS);
-            return accepted("log-rb");
+            return acceptedOf(inv);
         });
         // 落库同样不可用时，记录拒绝日志自身会抛异常：不能让它冒泡到 Quartz 线程
         org.mockito.Mockito.doThrow(new IllegalStateException("db down"))

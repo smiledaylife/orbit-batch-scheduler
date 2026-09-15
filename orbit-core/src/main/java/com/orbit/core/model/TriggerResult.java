@@ -76,16 +76,6 @@ public class TriggerResult implements Serializable {
     }
 
     /**
-     * 构建执行失败的 TriggerResult 结果对象
-     *
-     * @param logId      日志 ID
-     * @param jobId      任务 ID
-     * @param workerNode 执行节点标识
-     * @param costMs     耗时（毫秒）
-     * @param message    失败原因或异常描述
-     * @return 失败响应对象
-     */
-    /**
      * 构建触发回执：执行器已受理本次触发、任务已入队，但尚未执行完毕。
      * success 置为 true 仅表示「受理成功」，不代表任务会成功。
      *

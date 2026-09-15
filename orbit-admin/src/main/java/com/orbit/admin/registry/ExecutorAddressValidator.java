@@ -133,8 +133,4 @@ public final class ExecutorAddressValidator {
             throw new IllegalArgumentException("executor address must not be a reserved IPv4 address: " + rawAddress);
         }
     }
-
-    /**
-     * 去掉末尾多余的斜杠（保留单独的 "/"）。
-     */
 }

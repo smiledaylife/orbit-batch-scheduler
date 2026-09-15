@@ -366,51 +366,6 @@ public class JobService {
     }
 
     /**
-     * 记录一次「未能派发」的触发。
-     * 调度侧派发通道饱和时由 {@link com.orbit.admin.dispatch.DispatchExecutor} 调用：
-     * 直接落一条 FAILED 终态日志，让 /logs 里每次 Cron 到点都有记录，
-     * 否则「派发被拒绝」与「任务根本没被触发」在观测上无法区分。
-     *
-     * @param job    任务定义
-     * @param reason 未派发的原因
-     */
-    /**
-     * 处理执行器回传的执行结果，把对应的 RUNNING 日志收敛到终态。
-     *
-     * 幂等性由存储层保证：只有 status = RUNNING 的日志才会被更新，
-     * 因此执行器重试、重复回传、以及与孤儿回收的竞态都不会覆盖已经写入的真实结果。
-     * 无论本次是否真的发生状态转换，都会释放该 logId 占用的串行守卫 ——
-     * 释放本身是幂等的，而漏放会让任务永久无法再被触发。
-     *
-     * @param result 执行器回传的最终结果
-     * @return 是否真的完成了 RUNNING -> 终态的转换（false 表示日志已不是 RUNNING，本次回传被忽略）
-     */
-    /**
-     * 处理执行器批量回传的一批执行结果。
-     *
-     * 执行器会把积压的结果打包成一个请求发送，因此这里是逐条处理、逐条幂等，
-     * 单条被忽略（重复回传或已被回收）不影响同批其余结果。
-     *
-     * @param results 执行器回传的一批最终结果
-     * @return 其中真正完成 RUNNING -> 终态 转换的条数
-     */
-    public int handleCallbacks(List<TriggerResult> results) {
-        if (results == null || results.isEmpty()) {
-            return 0;
-        }
-        int applied = 0;
-        for (TriggerResult result : results) {
-            if (handleCallback(result)) {
-                applied++;
-            }
-        }
-        if (results.size() > 1) {
-            log.info("[orbit-admin] callback batch of {} item(s), {} applied", results.size(), applied);
-        }
-        return applied;
-    }
-
-    /**
      * 处理单条执行结果回传：把 RUNNING 日志收敛为终态，并释放在途登记簿。
      *
      * 收敛是条件更新（{@code WHERE log_id=? AND status='RUNNING'}），所以重复回传、
@@ -455,7 +410,7 @@ public class JobService {
     public void recordRejectedDispatch(JobInfo job, String reason) {
         Date now = new Date();
         JobLog rejected = new JobLog();
-        rejected.setLogId(UUID.randomUUID().toString().replace("-", ""));
+        rejected.setLogId(newLogId());
         rejected.setJobId(job.getId());
         rejected.setJobName(job.getJobName());
         rejected.setAppName(job.getAppName());
@@ -466,6 +421,44 @@ public class JobService {
         rejected.setStartTime(now);
         rejected.setEndTime(now);
         jobStore.insertLog(rejected);
+    }
+
+    /** 单个回传请求允许携带的最大结果条数。执行器侧单批上限为 200 条，
+     *  这里给出 10 倍余量做服务端守门：防止失控/恶意客户端一次投递海量条目，
+     *  把回传端点变成内存与数据库的压力源。超限直接 400，整批不处理。 */
+    public static final int MAX_CALLBACK_BATCH = 2000;
+
+    /**
+     * 处理执行器批量回传的一批执行结果，把对应的 RUNNING 日志逐条收敛到终态。
+     *
+     * 执行器会把积压的结果打包成一个请求发送，因此这里是逐条处理、逐条幂等，
+     * 单条被忽略（重复回传或已被回收）不影响同批其余结果。
+     *
+     * 服务端守门：单批条数不得超过 {@link #MAX_CALLBACK_BATCH}，超限抛出
+     * {@link IllegalArgumentException}（由 Controller 转为 400）。回传的幂等收敛
+     * 按 logId 逐条进行，分批重发是安全的。
+     *
+     * @param results 执行器回传的一批最终结果
+     * @return 其中真正完成 RUNNING -> 终态 转换的条数
+     */
+    public int handleCallbacks(List<TriggerResult> results) {
+        if (results == null || results.isEmpty()) {
+            return 0;
+        }
+        if (results.size() > MAX_CALLBACK_BATCH) {
+            throw new IllegalArgumentException("callback batch too large: " + results.size()
+                    + " (max " + MAX_CALLBACK_BATCH + "); split the batch and retry");
+        }
+        int applied = 0;
+        for (TriggerResult result : results) {
+            if (handleCallback(result)) {
+                applied++;
+            }
+        }
+        if (results.size() > 1) {
+            log.info("[orbit-admin] callback batch of {} item(s), {} applied", results.size(), applied);
+        }
+        return applied;
     }
 
     /**
@@ -482,8 +475,26 @@ public class JobService {
      * @return 任务执行结果
      */
     public TriggerResult dispatch(JobInfo job, Map<String, Object> extraParams) {
+        return dispatch(job, extraParams, null);
+    }
+
+    /**
+     * 派发执行逻辑（带外部指定 logId 的完整版本）。
+     *
+     * logId 允许由调用方预先生成：定时触发通道（DispatchExecutor）需要在派发前
+     * 把 logId 预登记进串行守卫，以消除「执行器毫秒级回传早于登记」的竞态；
+     * 手动触发则传 null，由本方法自行生成。
+     *
+     * @param job         任务元数据
+     * @param extraParams 单次触发传入的覆盖参数（可为空）
+     * @param logId       外部指定的调度日志 ID（可为空，为空时自动生成）
+     * @return 受理回执或同步失败结果
+     */
+    public TriggerResult dispatch(JobInfo job, Map<String, Object> extraParams, String logId) {
         // 1. 生成全局唯一日志 ID 与记录开始时间
-        String logId = UUID.randomUUID().toString().replace("-", "");
+        if (logId == null || logId.trim().isEmpty()) {
+            logId = newLogId();
+        }
         Date start = new Date();
 
         // 2. 插入初始运行中日志记录
@@ -749,6 +760,13 @@ public class JobService {
         rotated.addAll(list.subList(idx, list.size()));
         rotated.addAll(list.subList(0, idx));
         return rotated;
+    }
+
+    /**
+     * 生成全局唯一调度日志 ID（32 位无连字符 UUID）。
+     */
+    private static String newLogId() {
+        return UUID.randomUUID().toString().replace("-", "");
     }
 
     /**

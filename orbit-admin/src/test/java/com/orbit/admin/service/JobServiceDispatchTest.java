@@ -196,6 +196,33 @@ class JobServiceDispatchTest {
     }
 
     @Test
+    void handleCallbacksRejectsBatchAboveServerLimit() {
+        // 服务端守门：超过单批上限直接 400（IllegalArgumentException），整批不处理。
+        // 防止失控/恶意客户端用海量条目把回传端点变成内存与数据库压力源。
+        java.util.List<TriggerResult> oversized =
+                new java.util.ArrayList<TriggerResult>(JobService.MAX_CALLBACK_BATCH + 1);
+        for (int i = 0; i <= JobService.MAX_CALLBACK_BATCH; i++) {
+            oversized.add(TriggerResult.ok("log-" + i, 1L, "n", 1L, "ok"));
+        }
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> jobService.handleCallbacks(oversized));
+        assertTrue(ex.getMessage().contains("max " + JobService.MAX_CALLBACK_BATCH));
+        verify(jobStore, never()).finishLogFromRunning(anyString(), org.mockito.ArgumentMatchers.anyBoolean(),
+                any(), anyLong(), any());
+
+        // 恰好在上限内的一批正常受理（不触发守门）
+        when(jobStore.finishLogFromRunning(anyString(), org.mockito.ArgumentMatchers.anyBoolean(),
+                any(), anyLong(), any())).thenReturn(true);
+        java.util.List<TriggerResult> atLimit =
+                new java.util.ArrayList<TriggerResult>(JobService.MAX_CALLBACK_BATCH);
+        for (int i = 0; i < JobService.MAX_CALLBACK_BATCH; i++) {
+            atLimit.add(TriggerResult.ok("ok-" + i, 1L, "n", 1L, "ok"));
+        }
+        assertEquals(JobService.MAX_CALLBACK_BATCH, jobService.handleCallbacks(atLimit));
+    }
+
+    @Test
     void handleCallbackWithoutLogIdIsIgnored() {
         assertEquals(false, jobService.handleCallback(null));
         assertEquals(false, jobService.handleCallback(TriggerResult.ok(null, 1L, "n", 0, "x")));

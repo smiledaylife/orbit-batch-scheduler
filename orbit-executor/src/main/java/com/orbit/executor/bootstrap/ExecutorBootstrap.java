@@ -126,9 +126,6 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
         log.info("[orbit-executor] starting appName={} address={} admin={}",
                 properties.getAppName(), resolvedAddress, properties.getAdminAddresses());
 
-        // 启动时立即向调度中心同步执行一次心跳注册
-        heartbeatOnce();
-
         // 创建专职的单线程守护线程池，用于执行周期性心跳任务
         scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "orbit-executor-heartbeat");
@@ -139,8 +136,11 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
         // 心跳周期保底不得低于 5 秒（5000 毫秒）
         long interval = Math.max(5000L, properties.getHeartbeatIntervalMs());
 
-        // 按照固定频率定期发送心跳请求
-        scheduler.scheduleAtFixedRate(this::heartbeatOnce, interval, interval, TimeUnit.MILLISECONDS);
+        // 首跳立即执行，但走同一条心跳线程异步发出：admin 短暂不可达时，
+        // 每个地址最多阻塞 connect 3s + read 5s，若在 start() 里同步首跳会把
+        // 业务应用的启动拖住（多地址场景可达数十秒）。异步首跳让应用启动
+        // 不再依赖调度中心的可用性，后续重试由固定频率心跳自然覆盖。
+        scheduler.scheduleAtFixedRate(this::heartbeatOnce, 0L, interval, TimeUnit.MILLISECONDS);
     }
 
     /**

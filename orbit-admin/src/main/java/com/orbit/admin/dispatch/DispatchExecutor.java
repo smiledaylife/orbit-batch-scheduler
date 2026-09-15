@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -36,8 +37,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *    保护调度中心不被触发风暴打爆；
  * 2. 同名任务串行：orbit.admin.dispatch-serial-per-job（默认 true）开启时，
  *    上一轮**执行**尚未收敛（结果未回传）的任务本次到点直接跳过。
- *    在途判定由 {@link OutstandingDispatches} 承担，因此 OrbitQuartzJob 本身
- *    不需要 @DisallowConcurrentExecution；
+ *    在途判定由 {@link OutstandingDispatches} 承担；logId 在派发前生成并预登记，
+ *    执行器毫秒级回传也不会与登记动作竞态（详见 OutstandingDispatches 类注释）；
  * 3. 优雅停机：关闭时先停止接收新任务，给在跑的触发最多 30 秒收尾，
  *    超时再中断，避免硬杀导致调度日志停在 RUNNING。
  *
@@ -104,8 +105,11 @@ public class DispatchExecutor implements DisposableBean {
     public void submit(JobInfo job) {
         final String jobName = job.getJobName();
         final boolean guard = properties.isDispatchSerialPerJob();
+        // logId 在派发前生成：串行守卫开启时它随槽位一起预登记，
+        // 这样执行器最早可能的回传（请求发出后毫秒级）一定能查到映射。
+        final String logId = newLogId();
 
-        if (guard && !outstanding.tryAcquire(jobName)) {
+        if (guard && !outstanding.tryAcquire(jobName, logId)) {
             // 只计数 + DEBUG 日志，不写调度日志：一个 1 秒 Cron 配 1 小时 Handler
             // 会每秒产生一条「被跳过」记录，足以刷爆日志表。
             log.debug("[orbit-admin] skip fire, previous run of {} still awaiting callback", jobName);
@@ -113,18 +117,15 @@ public class DispatchExecutor implements DisposableBean {
         }
 
         try {
-            pool.execute(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        triggerAndTrack(job, jobName, guard);
-                    } catch (Exception e) {
-                        // jobStore.insertLog 在 dispatch() 的 try 之外，数据库不可用时会抛出。
-                        // 不在这里兜住，异常会杀死工作线程并打到 stderr。
-                        log.error("[orbit-admin] dispatch failed for job {}", jobName, e);
-                        if (guard) {
-                            outstanding.releaseByJob(jobName);
-                        }
+            pool.execute(() -> {
+                try {
+                    triggerAndTrack(job, jobName, guard, logId);
+                } catch (Exception e) {
+                    // jobStore.insertLog 在 dispatch() 的 try 之外，数据库不可用时会抛出。
+                    // 不在这里兜住，异常会杀死工作线程并打到 stderr。
+                    log.error("[orbit-admin] dispatch failed for job {}", jobName, e);
+                    if (guard) {
+                        outstanding.releaseByJob(jobName);
                     }
                 }
             });
@@ -142,20 +143,16 @@ public class DispatchExecutor implements DisposableBean {
     }
 
     /**
-     * 发起触发并登记在途状态。
+     * 发起触发并维护在途状态。
      *
+     * 槽位（含 logId 映射）在派发前已登记，这里只需处理失败侧：
      * 受理成功时日志保持 RUNNING，槽位留到回传或孤儿回收时释放；
-     * 触发同步失败（执行器不可达、饱和等）时日志已经是终态，槽位必须立刻释放，
-     * 否则该任务会永久无法再被触发。
+     * 触发同步失败（执行器不可达、饱和等）时日志已经是终态、不会有回传到达，
+     * 槽位必须立刻释放，否则该任务会永久无法再被触发。
      */
-    private void triggerAndTrack(JobInfo job, String jobName, boolean guard) {
-        TriggerResult result = jobService.dispatch(job, null);
-        if (!guard) {
-            return;
-        }
-        if (result != null && result.isAccepted()) {
-            outstanding.bind(jobName, result.getLogId());
-        } else {
+    private void triggerAndTrack(JobInfo job, String jobName, boolean guard, String logId) {
+        TriggerResult result = jobService.dispatch(job, null, logId);
+        if (guard && (result == null || !result.isAccepted())) {
             outstanding.releaseByJob(jobName);
         }
     }
@@ -198,14 +195,16 @@ public class DispatchExecutor implements DisposableBean {
      */
     private static ThreadFactory newThreadFactory() {
         final AtomicInteger seq = new AtomicInteger(0);
-        return new ThreadFactory() {
-            @Override
-            public Thread newThread(Runnable r) {
-                Thread t = new Thread(r, "orbit-dispatch-" + seq.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            }
+        return r -> {
+            Thread t = new Thread(r, "orbit-dispatch-" + seq.incrementAndGet());
+            t.setDaemon(true);
+            return t;
         };
+    }
+
+    /** 生成全局唯一调度日志 ID（32 位无连字符 UUID） */
+    private static String newLogId() {
+        return UUID.randomUUID().toString().replace("-", "");
     }
 
     /**

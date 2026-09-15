@@ -165,7 +165,7 @@ public class OrderJobs {
 | POST | `/orbit/admin/jobs/{name}/trigger` | 立即触发一次（body 可传本次临时参数 JSON）。返回**受理回执**而非执行结果，结果查 `/logs` |
 | GET | `/orbit/admin/logs` | 执行日志分页（`jobName`/`page`/`size`） |
 | GET | `/orbit/admin/executors` | 在线执行器（`appName` 可选过滤） |
-| POST | `/orbit/admin/callback` | 执行器**批量**回传执行结果（执行器调用；body 为结果数组，逐条按 `logId` 幂等收敛，响应返回实际收敛条数） |
+| POST | `/orbit/admin/callback` | 执行器**批量**回传执行结果（执行器调用；body 为结果数组，单批上限 2000 条、超限返回 400，逐条按 `logId` 幂等收敛，响应返回实际收敛条数） |
 | GET | `/orbit/admin/overview` | 总览（含触发通道指标：`dispatchActive` / `dispatchQueueSize` / `dispatchRejected` / `dispatchSkipped` / `dispatchOutstanding`） |
 | POST | `/orbit/executor/run` | 执行器：受理调度触发（调度中心调用）。入队即返回 `accepted=true`，不等待任务执行 |
 | GET | `/orbit/executor/handlers` | 执行器：查询本节点注册的 Handler 列表 |
@@ -222,7 +222,13 @@ Cron 到点 / 手动触发
   `orbit_job_log` 里 `status='RUNNING'` 表示「已触发、结果未回传」，不代表卡死；
 - **回传是批量的**：执行器把结果先压进有界队列，发送线程一次取一条、再把队列里已积压的一起打包
   （上限 200 条）成一个请求。调度中心短暂不可用后恢复时，积压的结果一次补发完，不必逐条重连；
-  单批失败按 `callback-retry-*` 退避重试，重试耗尽则整批退回队列而不是丢弃，靠队列容量做背压；
+  单批失败按 `callback-retry-*` 退避重试，重试耗尽则整批退回队列而不是丢弃，靠队列容量做背压。
+  调度中心侧另有服务端守门：单批最多 2000 条，超限直接 400 整批拒绝，
+  防止失控/恶意客户端把回传端点变成内存与数据库的压力源；
+- **串行守卫的登记是派发前完成的**：定时触发在向执行器发起请求**之前**就把本次 logId 预登记进
+  同名任务串行守卫，而不是拿到受理回执后再登记。否则执行器毫秒级跑完并回传时，
+  回传可能与登记动作竞态，守卫被永久占用，任务从此不再被触发（且孤儿回收只扫 RUNNING 日志，
+  无法兜底）。预登记让「回传可见」先于「回传可能发生」，从根上消除这个窗口；
 - **回传幂等**：`finishLogFromRunning` 的 `WHERE` 带 `status='RUNNING'`，
   所以执行器重试、重复回传、以及与孤儿回收的竞态都不会覆盖已写入的真实结果。
   重复回传同样返回成功，避免执行器把「已处理过」误判为失败而无限重试；
