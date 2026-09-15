@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
     job_id            BIGINT,
     job_name          VARCHAR(64),
     app_name          VARCHAR(64),
-    handler           VARCHAR(128),
+    handler            VARCHAR(128),
     executor_address  VARCHAR(256),
     status            VARCHAR(16),
     message           VARCHAR(2000),
@@ -32,10 +32,10 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
     end_time          TIMESTAMP
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS uk_orbit_job_log_log_id ON orbit_job_log (log_id);
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_name ON orbit_job_log (job_name);
-CREATE INDEX IF NOT EXISTS idx_orbit_job_log_id ON orbit_job_log (log_id);
--- Log retention cleanup and orphaned RUNNING reap both scan by start_time
 CREATE INDEX IF NOT EXISTS idx_orbit_job_log_start ON orbit_job_log (start_time);
+CREATE INDEX IF NOT EXISTS idx_orbit_job_log_status_start ON orbit_job_log (status, start_time);
 
 CREATE TABLE IF NOT EXISTS orbit_executor_registry (
     id               BIGSERIAL PRIMARY KEY,
