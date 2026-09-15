@@ -10,9 +10,9 @@ import java.util.regex.PatternSyntaxException;
 
 /**
  * 执行器注册地址校验器。
- *
- * 注册地址最终会被调度中心作为 HTTP 出口访问，因此必须同时防护 IP 字面量和 DNS
- * 解析后的保留地址，避免通过恶意域名绕过 SSRF 检查。
+ * 注册地址最终会被调度中心作为 HTTP 出口访问，因此同时防护 IP 字面量和 DNS
+ * 解析后的保留地址，避免通过恶意域名绕过 SSRF 检查。RFC1918 私网地址允许使用，
+ * 因为执行器通常部署在 VPC/K8S 私网中。
  */
 public final class ExecutorAddressValidator {
 
@@ -21,26 +21,17 @@ public final class ExecutorAddressValidator {
     private ExecutorAddressValidator() {
     }
 
-    /**
-     * 校验并规范化执行器地址。
-     *
-     * @param rawAddress 原始地址，例如 http://10.0.0.1:8081
-     * @param allowPattern 白名单正则，为空时仍执行 DNS/保留地址检查
-     * @return 去掉末尾斜杠后的规范化地址
-     */
     public static String validateAndNormalize(String rawAddress, String allowPattern) {
         if (rawAddress == null || rawAddress.trim().isEmpty()) {
             throw new IllegalArgumentException("address required");
         }
         String address = OrbitProtocol.trimTrailingSlash(rawAddress.trim());
-
         URI uri;
         try {
             uri = new URI(address);
         } catch (URISyntaxException e) {
             throw new IllegalArgumentException("invalid executor address: " + rawAddress);
         }
-
         String scheme = uri.getScheme();
         if (scheme == null || !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
             throw new IllegalArgumentException("executor address must use http or https: " + rawAddress);
@@ -48,7 +39,6 @@ public final class ExecutorAddressValidator {
         if (uri.getUserInfo() != null || uri.getQuery() != null || uri.getFragment() != null) {
             throw new IllegalArgumentException("executor address must not contain user-info, query or fragment: " + rawAddress);
         }
-
         String host = uri.getHost();
         if (host == null || host.trim().isEmpty()) {
             throw new IllegalArgumentException("executor address must contain a host: " + rawAddress);
@@ -92,21 +82,15 @@ public final class ExecutorAddressValidator {
 
     private static boolean isReserved(InetAddress address) {
         if (address.isAnyLocalAddress() || address.isLoopbackAddress()
-                || address.isLinkLocalAddress() || address.isSiteLocalAddress()
-                || address.isMulticastAddress()) {
+                || address.isLinkLocalAddress() || address.isMulticastAddress()) {
             return true;
         }
         byte[] bytes = address.getAddress();
         if (bytes.length == 4) {
             int a = bytes[0] & 0xff;
             int b = bytes[1] & 0xff;
-            // RFC1918、link-local、CGNAT，以及 0/8、127/8、multicast/broadcast。
-            return a == 0 || a == 127
-                    || (a == 10)
-                    || (a == 172 && b >= 16 && b <= 31)
-                    || (a == 192 && b == 168)
-                    || (a == 169 && b == 254)
-                    || (a >= 224 && a <= 255);
+            // 0/8、127/8、169.254/16（云元数据地址所在链路本地网段）、组播/广播。
+            return a == 0 || a == 127 || (a == 169 && b == 254) || a >= 224;
         }
         return false;
     }
@@ -120,7 +104,6 @@ public final class ExecutorAddressValidator {
             }
             return;
         }
-
         java.util.regex.Matcher m = IPV4.matcher(host);
         if (!m.matches()) {
             return;
@@ -133,11 +116,7 @@ public final class ExecutorAddressValidator {
             }
         }
         boolean reserved = o[0] == 0 || o[0] == 127
-                || (o[0] == 10)
-                || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)
-                || (o[0] == 192 && o[1] == 168)
-                || (o[0] == 169 && o[1] == 254)
-                || (o[0] >= 224 && o[0] <= 255);
+                || (o[0] == 169 && o[1] == 254) || o[0] >= 224;
         if (reserved) {
             throw new IllegalArgumentException("executor address must not be a reserved IPv4 address: " + rawAddress);
         }
