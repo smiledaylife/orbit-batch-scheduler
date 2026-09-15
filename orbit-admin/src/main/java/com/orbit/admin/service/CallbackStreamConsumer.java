@@ -5,14 +5,15 @@ import com.orbit.core.model.TriggerResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.ReadOffset;
 import org.springframework.data.redis.connection.stream.StreamOffset;
 import org.springframework.data.redis.connection.stream.StreamRecords;
+import org.springframework.data.redis.connection.stream.StreamReadOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.StreamOperations;
-import org.springframework.data.redis.connection.stream.StreamReadOptions;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -23,13 +24,11 @@ import java.util.UUID;
 
 /**
  * Redis Stream callback 消费器。
- *
- * 使用 at-least-once 投递语义：DB 状态先成功，再 ACK Stream 消息；ACK 失败会导致重复消费，
- * 但 JobStore 的 RUNNING -> 终态条件更新保证重复消费不会覆盖已有结果。
- * Consumer 名称故意使用固定逻辑名，使 Pod 重启后仍可读取该 consumer 的 pending entries；
- * 多 Admin 副本同时消费时再通过 Redis record lock 做单消息互斥。
+ * DB 状态先成功，再 ACK Stream；ACK 失败会导致重复消费，但 JobStore 的条件更新保证幂等。
+ * 使用固定逻辑 consumer 名称，配合 record lock，使 Admin Pod 重启后可以继续处理 pending。
  */
 @Component
+@ConditionalOnProperty(prefix = "orbit.admin", name = "durable-callback-enabled", havingValue = "true")
 public class CallbackStreamConsumer implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(CallbackStreamConsumer.class);
@@ -46,7 +45,8 @@ public class CallbackStreamConsumer implements DisposableBean {
         this.redis = redis;
         this.jobService = jobService;
         this.properties = properties;
-        this.worker = new Thread(this::runLoop, "orbit-callback-stream-consumer-" + UUID.randomUUID().toString().substring(0, 8));
+        this.worker = new Thread(this::runLoop,
+                "orbit-callback-stream-consumer-" + UUID.randomUUID().toString().substring(0, 8));
         this.worker.setDaemon(true);
         this.worker.start();
     }
@@ -61,7 +61,6 @@ public class CallbackStreamConsumer implements DisposableBean {
                 StreamOperations<String, String, String> ops = redis.opsForStream();
                 Consumer consumer = Consumer.from(properties.getCallbackStreamGroup(), "orbit-admin");
 
-                // 先处理当前 consumer 的 pending，避免 Admin 重启后留下未 ACK 消息。
                 List<MapRecord<String, String, String>> pending = ops.read(
                         consumer,
                         StreamReadOptions.empty().count(100),
@@ -89,31 +88,37 @@ public class CallbackStreamConsumer implements DisposableBean {
             try {
                 ops.createGroup(properties.getCallbackStreamKey(), ReadOffset.latest(),
                         properties.getCallbackStreamGroup());
-            } catch (Exception existsOrMissing) {
-                String message = existsOrMissing.getMessage();
-                if (message != null && message.toLowerCase().contains("busygroup")) {
+            } catch (Exception first) {
+                String message = first.getMessage();
+                if (isBusyGroup(message)) {
                     return true;
                 }
-                // Stream 尚未创建：写一个仅用于建立 Stream 的 marker，随后创建 group。
-                if (message != null && (message.toLowerCase().contains("no such key")
-                        || message.toLowerCase().contains("does not exist"))) {
-                    ops.add(StreamRecords.newRecord().in(properties.getCallbackStreamKey())
-                            .ofMap(Collections.singletonMap(INIT_FIELD, "1")));
+                // Redis XGROUP CREATE 要求 Stream 已存在；写 marker 建立 Stream 后重试。
+                ops.add(StreamRecords.newRecord().in(properties.getCallbackStreamKey())
+                        .ofMap(Collections.singletonMap(INIT_FIELD, "1")));
+                try {
                     ops.createGroup(properties.getCallbackStreamKey(), ReadOffset.latest(),
                             properties.getCallbackStreamGroup());
-                    return true;
+                } catch (Exception second) {
+                    if (isBusyGroup(second.getMessage())) {
+                        return true;
+                    }
+                    throw second;
                 }
-                // 某些 Redis 版本在 stream 刚创建的竞态下会返回 BUSYGROUP/已有 group。
-                if (message != null && message.toLowerCase().contains("group name already exists")) {
-                    return true;
-                }
-                throw existsOrMissing;
             }
             return true;
         } catch (Exception e) {
             log.debug("[orbit-admin] callback stream group not ready: {}", e.getMessage());
             return false;
         }
+    }
+
+    private static boolean isBusyGroup(String message) {
+        if (message == null) {
+            return false;
+        }
+        String m = message.toLowerCase();
+        return m.contains("busygroup") || m.contains("group name already exists");
     }
 
     private void process(List<MapRecord<String, String, String>> records,
@@ -146,13 +151,11 @@ public class CallbackStreamConsumer implements DisposableBean {
                 result.setCostMs(parseLong(value.get("costMs")));
                 result.setWorkerNode(value.get("workerNode"));
                 result.setMessage(value.get("message"));
-                // Stream 只承载最终执行结果；accepted=true 的同步触发回执不应进入 Stream。
                 if (!result.isAccepted()) {
                     jobService.handleCallback(result);
                 }
                 ack(ops, consumer, record);
             } catch (Exception e) {
-                // 不 ACK：下一次 pending/retry 会再次处理，确保 DB 瞬时故障不会吞消息。
                 log.error("[orbit-admin] callback stream processing failed, recordId={}, logId={}",
                         recordId, logId, e);
             } finally {
@@ -167,7 +170,6 @@ public class CallbackStreamConsumer implements DisposableBean {
                     "1", 60L, java.util.concurrent.TimeUnit.SECONDS);
             return Boolean.TRUE.equals(ok);
         } catch (Exception e) {
-            // Redis 本身就是消息源，Redis 异常时不应继续消费并产生重复处理。
             return false;
         }
     }
