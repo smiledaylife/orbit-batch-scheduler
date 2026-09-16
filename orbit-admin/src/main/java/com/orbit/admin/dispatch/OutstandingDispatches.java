@@ -114,7 +114,10 @@ public class OutstandingDispatches {
      * {@link #OutstandingDispatches(ObjectProvider, AdminProperties)}。
      */
     public OutstandingDispatches() {
-        this(null, new AdminProperties());
+        // 显式指向私有规范构造器：null 无类型实参会同时匹配
+        // (StringRedisTemplate, AdminProperties) 与 (ObjectProvider, AdminProperties) 两个构造器，
+        // 必须强转消除重载歧义。
+        this((StringRedisTemplate) null, new AdminProperties());
     }
 
     /**
