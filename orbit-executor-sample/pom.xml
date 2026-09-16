@@ -30,6 +30,19 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+
+        <!--
+          引入 Redis（第 1 步）：取消本段注释。
+          orbit-executor 将 Redis 依赖声明为 optional（不传递给业务应用），
+          需要跨副本幂等 / Redis Stream 持久化回传时必须由业务侧显式引入，
+          再完成 application.yml 中的第 2、3 步（连接配置 + 开关）。
+        -->
+        <!--
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        -->
     </dependencies>
 
     <build>

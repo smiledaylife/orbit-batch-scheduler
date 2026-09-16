@@ -120,6 +120,12 @@ management:
       show-details: always
       probes:
         enabled: true
+  health:
+    # 默认单副本模式不使用 Redis：orbit-admin 自带 Redis starter（供 cluster 模式使用），
+    # 不显式关闭会让 /actuator/health 因本机没有 Redis 而误报 DOWN。
+    # cluster profile 已重新开启（management.health.redis.enabled: true）。
+    redis:
+      enabled: false
 
 logging:
   level:

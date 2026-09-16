@@ -16,11 +16,12 @@
                              └──────────────────┘
 ```
 
-- **JDK 拓扑**：全模块统一 **JDK 21 + Spring Boot 3.5**（调度中心、执行器 SDK、协议层、示例应用同基线；新项目无历史包袱，`orbit-core` 也不再保留 Java 8 字节码双轨）。admin 与 executor 仅通过 HTTP/JSON 通信、不共享 JVM
+- **JDK 拓扑**：全模块统一 **JDK 21 + Spring Boot 3.5**（调度中心、执行器 SDK、协议层、示例应用同基线）。admin 与 executor 仅通过 HTTP/JSON 通信、不共享 JVM
 - Spring Boot 3.5.12（要求 JDK 17+，本框架基线 **JDK 21**，建议 21.0.7+）· Quartz 2.5.2（调度中心）
 - 持久层：**Druid 1.2.25** 连接池（`druid-spring-boot-3-starter`）+ **MyBatis 3.5.19** + **MyBatis-Plus 3.5.7**（`mybatis-plus-spring-boot3-starter`，仅 `orbit-admin` 使用；`orbit-core`/`orbit-executor` 不依赖 ORM）
+- 单节点缓存统一采用 **Caffeine**（TTL 过期 + Window TinyLFU 容量淘汰）：调度中心的注册表快照 / 执行器地址校验结果、执行器的 JVM 本地幂等记录
 - 执行器无状态，K8s 直接扩缩容；心跳超时自动摘除
-- 默认 H2 文件库开箱即用（PostgreSQL 兼容模式），生产支持 PostgreSQL / GaussDB
+- 默认 H2 文件库开箱即用（PostgreSQL 兼容模式），生产支持 PostgreSQL / GaussDB；Redis 为可选集群级能力（见 §4.4）
 
 ---
 
@@ -40,7 +41,7 @@ orbit-batch-scheduler
 根 `pom.xml` 既是聚合器也是**父 POM**：四个子模块通过 `<parent>` 继承，版本与插件配置全部在根 POM 统一下发，
 子模块 POM 只保留差异部分（依赖清单与个别插件启用声明）：
 
-- 根 POM 统一管理：`properties`（JDK/Boot 基线、第三方依赖版本、插件版本）+ `dependencyManagement`（import `spring-boot-dependencies:3.5.12` BOM，并显式锁定 Quartz 2.5.2 / MyBatis 3.5.19 / MyBatis-Plus 3.5.7 / Druid 1.2.25 / openGauss 5.0.1）+ `pluginManagement`（compiler `release=21` + `-parameters`、surefire、enforcer、spring-boot-maven-plugin）；
+- 根 POM 统一管理：`properties`（JDK/Boot 基线、第三方依赖版本、插件版本）+ `dependencyManagement`（import `spring-boot-dependencies:3.5.12` BOM，并显式锁定 Quartz 2.5.2 / MyBatis 3.5.19 / MyBatis-Plus 3.5.7 / Druid 1.2.25 / openGauss 5.0.1；Caffeine 等 BOM 托管依赖直接使用、无需声明版本）+ `pluginManagement`（compiler `release=21` + `-parameters`、surefire、enforcer、spring-boot-maven-plugin）；
 - 父 POM 直接声明的 `dependencyManagement` 条目优先级高于 import 的 BOM，版本覆盖只需在根 POM 写一次；
 - 模块间引用统一用 `${project.version}`，保证同版本号发布；
 - enforcer（JDK 21 基线校验）在根 POM 的 `<build><plugins>` 中声明，对所有模块生效。
@@ -60,7 +61,7 @@ orbit-batch-scheduler
 | 虚拟线程（JEP 444） | `orbit.executor.worker-virtual-threads`（默认 false） | 任务工作线程改虚拟线程，适合 IO 密集任务；synchronized 阻塞多的业务代码建议保持平台线程（JDK 21 下 synchronized 会钉住载体线程，JEP 491 于 JDK 24 才解除） |
 | switch 模式匹配（JEP 441） | `ExecutorRegistry.route()` 路由分发；`JobService.validate()` 策略校验；`ExecutorClient.describeTriggerFailure()` 故障分类 | 路由策略按常量标签分发；故障分类按异常层级（含守卫模式 `when`）归一化关键词，且 `HttpConnectTimeoutException` 排在父类 `HttpTimeoutException` 之前展示优先级匹配 |
 | instanceof 模式匹配 | `JobContext` 类型判定；`ExecutorClient` 异常解包链 | 判定与绑定一步完成 |
-| record | `ExecutorRegistry.RegistrySnapshot`、`ExecutorAddressValidator.CachedResult`、`JobHandlerRegistry.Handler` | 只读内部值类，天然不可变；协议层 DTO 仍为可变 POJO（Jackson 反序列化需要字段默认值，变更收益不抵风险） |
+| record | `ExecutorAddressValidator.CachedResult`、`JobHandlerRegistry.Handler` | 只读内部值类，天然不可变；协议层 DTO 保留可变 POJO（Jackson 反序列化需要无参构造与字段默认值） |
 | 文本块 | `OutstandingDispatches` 三段 Lua、`QuartzReconciler` 释放锁 Lua | 脚本原文直接可读、易比对 |
 | SequencedCollection（JDK 21） | `route()` 的 `getFirst()`、handlers 截断的 `removeLast()` | 替代 `get(0)` / `remove(size()-1)` |
 | `@Serial` | 全部 Serializable 模型 / PO | 序列化版本字段的标准化注解 |
@@ -68,7 +69,7 @@ orbit-batch-scheduler
 
 > 虚拟线程的并发上限语义：`dispatch-threads` / `worker-threads` 仍是在途并发的硬上限
 > （线程池 + 有界队列 + 快速失败不变），虚拟线程只是线程实现更轻，不会放开背压。
-> 两个开关默认关闭以保持与历史版本一致的线程模型，可按部署形态逐步开启。
+> 两个开关默认关闭（平台线程模型），可按部署形态按需开启。
 
 ---
 
@@ -168,12 +169,12 @@ public class OrderJobs {
 > 业务 handler 大量使用 synchronized 阻塞时建议保持默认平台线程。
 
 > 执行器 SDK（`orbit-executor`）与调度中心同基线发布：业务应用需运行在 **JDK 21+ / Spring Boot 3.5.x** 接入
-> （SDK 基于 `jakarta.*`，不再支持 Spring Boot 2.7 业务应用；两端仅经 HTTP/JSON 交互）。
+> （SDK 基于 `jakarta.*`，要求 Spring Boot 3.x；两端仅经 HTTP/JSON 交互）。
 > 调度中心的 Quartz / ORM 依赖不会传递到业务侧。
 
 > **Redis 是可选依赖**：`orbit-executor` 的 `spring-boot-starter-data-redis` 声明为 `optional`，
 > 业务应用不引入 Redis 也能完整运行 —— logId 幂等自动降级为 JVM 本地实现（仅保护本节点，TTL 上限 300 秒），
-> 持久化回传退回纯 HTTP 回传；开启集群级能力（跨副本幂等 / Redis Stream 回传）时再自行补充 Redis 依赖与配置。
+> 持久化回传退回纯 HTTP 回传；开启集群级能力（跨副本幂等 / Redis Stream 回传）的完整引入流程见 **§4.4 引入 Redis**。
 > 这也意味着不使用 Redis 的应用不会被被动拖入 Redis 健康探针（`/actuator/health` 不会因 Redis 不在而误报 DOWN）。
 
 ---
@@ -260,7 +261,7 @@ Cron 到点 / 手动触发
   防止失控/恶意客户端把回传端点变成内存与数据库的压力源；
 - **可选持久化回传（cluster 模式）**：执行器配置 `orbit.executor.durable-callback-enabled=true` 后，
   结果优先写入 Redis Stream（跨进程重启不丢），Admin 侧由消费组异步落库
-  （`orbit.admin.durable-callback-enabled=true`）；Redis 不可用时自动降级回 HTTP 回传。
+  （`orbit.admin.durable-callback-enabled=true`）；Redis 不可用时自动降级回 HTTP 回传（接入流程见 §4.4）。
 - **串行守卫的登记是派发前完成的**：定时触发在向执行器发起请求**之前**就把本次 logId 预登记进
   同名任务串行守卫，而不是拿到受理回执后再登记。否则执行器毫秒级跑完并回传时，
   回传可能与登记动作竞态，守卫被永久占用，任务从此不再被触发（且孤儿回收只扫 RUNNING 日志，
@@ -278,13 +279,6 @@ Cron 到点 / 手动触发
 - **兜底**：执行器崩溃或回传彻底丢失时，日志由后台的僵尸回收
   （`log-reap-interval-ms`，阈值 = `max-timeout-seconds` + 5 分钟宽限）判为 FAILED。
 
-> **升级注意（破坏性变更）**：`/orbit/executor/run` 的响应语义从「执行结果」变成了「受理回执」。
-> 旧版执行器对新版调度中心会返回 `accepted=false` 的结果对象，被当成触发失败；
-> 新版执行器对旧版调度中心则会让日志永远停在 RUNNING。**调度中心与执行器必须同版本升级。**
->
-> 同批变更：令牌只走 `X-Orbit-Token` 请求头（调度中心侧也接受 `Authorization: Bearer`），
-> 请求体里的 `accessToken` 字段已移除；`/orbit/admin/callback` 的请求体从单个对象变成数组。
-
 ---
 
 ### 4.2 失败重试
@@ -300,7 +294,7 @@ Cron 到点 / 手动触发
 
 - **两层互不叠加**：只有执行器受理失败才走触发级重试；一旦受理成功，后续失败由执行级重试兜住，
   调度中心不再重复重试（避免同一次失败被两层放大）；
-- **总尝试上限 = retryCount + 1**，范围 `[0,10]`；`retryCount=0` 时行为与旧版一致（失败即终局）；
+- **总尝试上限 = retryCount + 1**，范围 `[0,10]`；`retryCount=0` 时失败即终局；
 - 业务方法可经 `JobContext.getAttempt()` 区分首轮与重试轮次（如重试时降级、跳过已处理分片）；
 - 触发级重试到点后按**库里最新任务定义**执行：等待期间任务被删除/停用则重试中止；
   重试同样接入同名任务串行守卫，上一轮已在途时主动让位；
@@ -349,6 +343,87 @@ public class DingTalkAlertHandler implements OrbitAlertHandler {
 
 ---
 
+### 4.4 引入 Redis（可选集群级能力）
+
+框架默认零外部中间件即可完整运行（admin 单副本 + executor HTTP 回传 + 本地幂等）。
+引入 Redis 后按开关解锁四项集群级能力，**服务端接线全部自动完成，不需要写任何代码**：
+
+| 能力 | 开关（端） | 未引入 Redis 时的兜底行为 |
+|------|-----------|--------------------------|
+| 跨副本执行幂等（同 logId 全集群最多执行一次） | `orbit.executor.execution-idempotency-enabled=true`（executor） | JVM 本地 Caffeine 缓存幂等，仅保护本节点，TTL 封顶 300 秒 |
+| 结果持久化回传（Redis Stream，执行器进程重启不丢） | `orbit.executor.durable-callback-enabled=true`（executor）+ `orbit.admin.durable-callback-enabled=true`（admin） | 纯 HTTP 批量回传 + 退避重试 |
+| 同名任务串行的跨副本互斥（Redis Lease + 自动续租） | `orbit.admin.execution-lease-enabled=true`（admin） | 进程内守卫，仅本副本生效 |
+| 多副本对账分布式锁（QuartzReconciler 单实例执行） | 随 `execution-lease-enabled=true` 自动启用（admin） | 对账器不启用 |
+
+**执行器侧三步走**（`orbit-executor-sample` 模块内有一份完整注释样例，对应「第 1/2/3 步」）：
+
+```xml
+<!-- 第 1 步：显式引入 Redis starter（orbit-executor 将其声明为 optional，不会传递进来） -->
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
+```
+
+```yaml
+# 第 2 步：连接配置（配置前缀为 spring.data.redis.*）
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: 0
+
+# 第 3 步：按需开启能力开关
+orbit:
+  executor:
+    execution-idempotency-enabled: true        # 跨副本执行幂等
+    execution-idempotency-ttl-seconds: 86400   # 幂等 key TTL，需覆盖最大任务耗时 + 回传窗口
+    durable-callback-enabled: true             # 结果先写 Redis Stream
+    callback-stream-key: orbit:callback:stream # 与 admin 侧一致
+```
+
+**调度中心侧**（`orbit-admin` 自带 Redis starter，无需加依赖）：
+
+```yaml
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+orbit:
+  admin:
+    execution-lease-enabled: true              # Redis Lease 跨副本串行互斥
+    durable-callback-enabled: true             # 消费 Stream 落库
+    callback-stream-key: orbit:callback:stream # 与 executor 侧一致
+    callback-stream-group: orbit-admin
+```
+
+**接线与验证**：
+
+- **自动选型**：executor SDK 按「classpath 有无 Redis + 容器有无 `StringRedisTemplate`」自动装配 —
+  有则启用 Redis 实现，无则降级 JVM 本地实现；admin 侧 Lease 开启时若缺少 Redis 会**启动即失败**（配置错误尽早暴露），
+  非 Lease 路径的 Redis 故障则快速失败拒绝派发，绝不静默降级为多副本重复执行。
+- **启动日志确认模式**：executor 打 `execution idempotency mode: redis (cross-replica)` / `callback mode: durable redis stream...`，
+  admin 打 `serial dispatch guard mode: redis lease (cross-replica)`；看到 `local jvm fallback` 说明 Redis 没接进来。
+- **健康探针**：admin 默认单副本模式关闭 Redis 健康指标（`management.health.redis.enabled=false`，
+  避免本地无 Redis 时 `/actuator/health` 误报 DOWN）；cluster profile 已显式开启。
+- **Stream 创建**：消费组（`callback-stream-group`）由 admin 首次启动时自动创建，Stream key 两端必须一致。
+- **K8s 完整配置范例**：`deploy/k8s/01-configmap.yaml` 的 `admin.yml` / `executor.yml`（含 Secret 注入方式）。
+
+Redis 键位一览（便于运维巡检与监控）：
+
+| 键 | 前缀/名称 | 用途 | TTL |
+|----|-----------|------|-----|
+| 执行 Lease | `orbit:execution:lease:{jobName}`、`orbit:execution:lease-log:{logId}` | 同名任务跨副本互斥，logId 所有权校验 | `execution-lease-ttl-ms`（自动续租） |
+| 幂等键 | `orbit:executor:execution:{logId}` | 同 logId 全集群最多执行一次 | `execution-idempotency-ttl-seconds` |
+| 回传 Stream | `orbit:callback:stream`（消费组 `orbit-admin`） | 执行结果持久化回传 | Stream（消费后 ACK 删除） |
+| 对账锁 | `orbit:quartz:reconcile:lock` | 多副本对账单实例执行（随机令牌释放） | 50 秒 |
+
+---
+
 ## 5. 云原生部署
 
 **默认（单副本）**：调度中心使用内存 JobStore（`job-store-type: memory`）+ H2 文件库，开箱即用。
@@ -363,6 +438,7 @@ public class DingTalkAlertHandler implements OrbitAlertHandler {
 
 需要高可用 / 水平扩容时启用 Quartz JDBC JobStore 集群，由 `QRTZ_LOCKS` 行锁保证
 **同一个 trigger 只被一个副本触发**（`SELECT * FROM QRTZ_LOCKS ... FOR UPDATE`），并附带故障自动接管。
+cluster profile 同时会开启 Redis Lease / Stream 回传等对账与互斥能力（开关说明与接入流程见 §4.4）。
 
 四项前置条件，缺一不可：
 
@@ -381,17 +457,6 @@ psql -U postgres -d orbit_admin -f deploy/sql/schema-postgresql.sql
 # 3. 启动（可多副本）
 java -jar orbit-admin.jar --spring.profiles.active=cluster
 ```
-
-> **已有部署升级（新增失败重试字段后）**：`orbit_job` 新增三列，旧库请手工执行
->（建表脚本已包含这三列，仅存量库需要）：
->
-> ```sql
-> ALTER TABLE orbit_job ADD COLUMN IF NOT EXISTS retry_count            INT DEFAULT 0;
-> ALTER TABLE orbit_job ADD COLUMN IF NOT EXISTS retry_interval_seconds INT DEFAULT 10;
-> ALTER TABLE orbit_job ADD COLUMN IF NOT EXISTS serial_execution       BOOLEAN;
-> ```
->
-> 未升级前新字段读侧落到安全默认值（不重试 / 10 秒 / 跟随全局串行），不影响存量任务运行。
 
 GaussDB 请把 `ORBIT_DB_URL` / `ORBIT_DB_DRIVER` 换成 openGauss 驱动，并将
 `ORBIT_QUARTZ_DELEGATE` 设为 `org.quartz.impl.jdbcjobstore.GaussDBDelegate`
@@ -476,13 +541,13 @@ spring:
 | `connect-timeout-ms` | 3000 | 调执行器连接超时 |
 | `max-timeout-seconds` | 3600 | 单任务执行超时上限：随触发下发给执行器做超时强制，同时是僵尸 RUNNING 回收阈值基准 |
 | `trigger-timeout-seconds` | 10 | 触发请求的 HTTP 读超时。触发是「受理即返回」，只需覆盖网络往返与入队，不随 `max-timeout-seconds` 放大 |
-| `registry-cache-ttl-ms` | 3000 | 注册表本地缓存 TTL：调度热路径免查库；写操作立即失效；0 = 关闭 |
+| `registry-cache-ttl-ms` | 3000 | 注册表本地缓存 TTL（Caffeine 单条快照缓存）：调度热路径免查库；写操作立即失效；0 = 关闭 |
 | `log-retention-days` | 30 | 执行日志保留天数：后台分批删除更早日志；0 = 关闭 |
 | `log-reap-interval-ms` | 60000 | 僵尸 RUNNING 日志回收频率（阈值 = max-timeout + 5 分钟宽限） |
 | `log-cleanup-interval-ms` | 3600000 | 日志保留期清理频率 |
 | `dispatch-threads` | 64 | 定时触发线程数。线程只在一次触发往返期间被占用，可远大于 `org.quartz.threadPool.threadCount`，两者独立 |
 | `dispatch-queue-capacity` | 256 | 触发排队上限：满则新触发快速失败并写一条 FAILED 日志（`scheduler saturated`）；`0` = 不排队 |
-| `dispatch-serial-per-job` | true | 同名任务串行：上一轮**执行结果未回传**时本次到点跳过（只计数，见 `/overview` 的 `dispatchSkipped`）。cluster 模式下升级为 Redis Lease 跨副本互斥 |
+| `dispatch-serial-per-job` | true | 同名任务串行：上一轮**执行结果未回传**时本次到点跳过（只计数，见 `/overview` 的 `dispatchSkipped`）。cluster 模式下改用 Redis Lease 获得跨副本互斥（见 §4.4） |
 | `dispatch-virtual-threads` | false | 触发通道改用 JDK 21 虚拟线程：有界并发/排队/拒绝语义不变，仅线程实现更轻；底层 HTTP 客户端已为虚拟线程友好实现，高频 Cron 场景可开启 |
 | `executor-address-allow-pattern` | 空 | 执行器注册地址白名单（Java 正则，需整串匹配）。空 = 不启用，仅做基础校验（http/https、必须有 host、禁保留地址含 DNS 解析后复查）。生产建议显式配置，见第 8 节 SSRF 说明 |
 | `execution-lease-enabled` | false | 集群级执行 Lease（Redis）：同一 Job 跨副本同时只允许一个有效派发占用；cluster profile 强制开启 |
@@ -517,8 +582,7 @@ spring:
 | `access-token` | 空 | 令牌，随 `X-Orbit-Token` 请求头发出（双向常量时间比对） |
 | `callback-retry-times` | 3 | 结果回传失败的重试次数（不含首次）。回传失败会让日志停在 RUNNING 直到被回收 |
 | `callback-retry-interval-ms` | 2000 | 回传重试的退避间隔 |
-| `callback-queue-capacity` | 1000 | 待回传队列容量（保留兼容配置；实际使用无界队列避免主动丢结果） |
-| `execution-idempotency-enabled` | false | 执行幂等：同 logId 在 TTL 内最多进入一次执行线程池（防 HTTP 超时重试重复执行）。有 Redis 时跨副本生效，Redis 不可用直接拒绝触发；无 Redis 时自动降级为 JVM 本地实现（仅保护本节点，TTL 上限 300 秒，见 `ExecutionIdempotency` 类注释） |
+| `execution-idempotency-enabled` | false | 执行幂等：同 logId 在 TTL 内最多进入一次执行线程池（防 HTTP 超时重试重复执行）。有 Redis 时跨副本生效，Redis 不可用直接拒绝触发；无 Redis 时自动降级为 JVM 本地 Caffeine 缓存（仅保护本节点，TTL 上限 300 秒 + 容量 65536 自动淘汰，见 `ExecutionIdempotency` 类注释）。接入流程见 §4.4 |
 | `execution-idempotency-ttl-seconds` | 86400 | 幂等 key 保留时间，应覆盖最大任务耗时及回传重试窗口；本地兜底模式按 300 秒封顶 |
 | `durable-callback-enabled` | false | 结果先写 Redis Stream（跨进程重启不丢），写入失败自动降级 HTTP 回传；与 admin 侧同名开关配合使用 |
 | `callback-stream-key` | orbit:callback:stream | 执行器写入的 Stream key，与 admin 侧一致 |
@@ -563,9 +627,9 @@ spring:
 | 2 | **手动触发不再返回执行结果**：`POST /jobs/{name}/trigger` 只返回受理回执 | 需要结果请轮询 `/orbit/admin/logs?jobName=...`，或对接 `/callback` 之后的日志 |
 | 2b | **回传丢失会把成功的任务记成失败**：执行器跑完但回传重试耗尽（或执行器在完成与回传之间崩溃）时，日志会被孤儿回收判为 FAILED | 业务侧要保证幂等；`callback-retry-times` 调大、并保证执行器能访问 `admin-addresses` 中的至少一个地址 |
 | 3 | **注册地址校验的 DNS 解析与 TOCTOU 窗口**（见 `ExecutorAddressValidator` 类注释） | 注册时会拒绝解析到保留地址（如 `169.254.169.254`）的域名；校验结果（含拒绝）缓存 60 秒以消除心跳路径的每轮 DNS 解析，代价是域名重新指向最多延迟一个缓存周期被发现；彻底封堵请配置 `orbit.admin.executor-address-allow-pattern` 白名单 |
-| 4 | **执行器 SDK 面向 Spring Boot 3.5.x + Servlet 容器（`jakarta.*`）**：自动装配走 `META-INF/spring/...AutoConfiguration.imports`，`/orbit/executor/run` 只在 Servlet Web 环境装配 | Spring Boot 2.7 业务应用请使用旧版本 SDK；WebFlux 应用暂不能直接接入。另注意 Boot 3.4+ 起 Redis 配置前缀为 `spring.data.redis.*` |
+| 4 | **执行器 SDK 面向 Spring Boot 3.5.x + Servlet 容器（`jakarta.*`）**：自动装配走 `META-INF/spring/...AutoConfiguration.imports`，`/orbit/executor/run` 只在 Servlet Web 环境装配 | 业务应用需运行在 Spring Boot 3.x；WebFlux 应用暂不能直接接入。Redis 配置前缀为 `spring.data.redis.*`（接入流程见 §4.4） |
 | 5 | **同名任务串行守卫的默认实现是进程内的**：`dispatch-serial-per-job` 未开启 Redis Lease 时，在途登记簿只在本副本内存里，且调度中心重启即清空 | cluster 模式请开启 `orbit.admin.execution-lease-enabled=true`（Redis Lease，跨副本互斥 + 自动续租）；单机模式下多副本不重叠依赖 Quartz 集群行锁（同一 trigger 只被一个副本触发），但它不保证「上一轮已结束」。任务不幂等时请开启 Lease 或自行加分布式锁 |
-| 5b | **执行幂等的本地兜底只保护本节点**：无 Redis 时同 logId 去重仅在单进程内生效；failover 遇模糊错误（connection reset / read timeout）换节点重试时，跨节点双执行在未开启 Redis 幂等的部署下理论上仍可能 | 任务不幂等时请补充 Redis 依赖并开启 `orbit.executor.execution-idempotency-enabled=true`（跨副本 SET NX + TTL），或依赖业务侧自身的幂等设计 |
+| 5b | **执行幂等的本地兜底只保护本节点**：无 Redis 时同 logId 去重仅在单进程内生效；failover 遇模糊错误（connection reset / read timeout）换节点重试时，跨节点双执行在未开启 Redis 幂等的部署下理论上仍可能 | 任务不幂等时请补充 Redis 依赖并开启 `orbit.executor.execution-idempotency-enabled=true`（跨副本 SET NX + TTL，接入流程见 §4.4），或依赖业务侧自身的幂等设计 |
 | 6 | **默认单副本内存 JobStore** | 多副本必须启用 cluster profile + 真实数据库，否则同一个 Cron 会被每个副本各触发一次（见第 5 节） |
 | 7 | **失败重试不跨进程持久化**：触发级重试队列在调度中心内存里，执行级重试链在执行器进程内 | 任一侧重启都会丢弃未到期的重试：调度中心重启丢触发级重试（该任务等到下一轮 Cron）；执行器重启丢执行级重试且回传不会到达，日志由孤儿回收判为 FAILED。对重启敏感的任务把 `retryIntervalSeconds` 控制在部署窗口内，或依赖下一轮 Cron 自然接续 |
 | 8 | **告警是 at-most-once 的尽力而为语义**：事件入 256 容量有界队列，队列满直接丢弃；处理器异常只计数不重试 | 告警绝不阻塞调度主链路，代价是极端拥塞时可能少报。接入强一致告警渠道（如值班系统）请自行在 `OrbitAlertHandler` 实现内落盘重试；`/overview` 的 `alertDropped` 持续增长说明渠道处理能力不足 |

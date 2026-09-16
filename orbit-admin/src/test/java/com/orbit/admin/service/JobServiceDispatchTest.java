@@ -526,7 +526,7 @@ class JobServiceDispatchTest {
         row.setHandler("dailyReport");
         when(jobStore.findLogByLogId("log-fail")).thenReturn(Optional.of(row));
 
-        // 回传不带任务上下文（模拟旧版执行器）：调度中心按 logId 反查补齐
+        // 回传不带任务上下文（模拟字段缺失）：调度中心按 logId 反查补齐
         TriggerResult cb = TriggerResult.fail("log-fail", 1L, "http://n:8081", 10L, "boom");
         assertTrue(jobService.handleCallback(cb));
 

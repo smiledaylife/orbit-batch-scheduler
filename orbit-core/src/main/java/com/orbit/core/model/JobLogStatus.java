@@ -5,7 +5,7 @@ package com.orbit.core.model;
  *
  * 集中定义调度中心各处使用的日志状态字符串（"RUNNING" / "SUCCESS" / "FAILED"），
  * 保证日志状态值在写入、更新、查询与 API 响应之间始终一致。
- * 常量值为协议的一部分，保持字符串形式以兼容既有 JSON 协议与历史数据。
+ * 常量值即 JSON 线协议与存储层取值，各端必须保持字符串一致。
  */
 public final class JobLogStatus {
 

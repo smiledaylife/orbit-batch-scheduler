@@ -45,8 +45,8 @@ public class AdminProperties {
     /**
      * 触发通道是否改用 JDK 21 虚拟线程执行派发。
      * 虚拟线程内存占用远低于平台线程，且触发本身是短 IO 调用（HTTP 客户端已换用
-     * vthread 友好的 JDK HttpClient），适合高频 Cron 场景；默认关闭以保持与历史版本
-     * 完全一致的线程模型。有界并发语义不变：dispatch-threads 仍是在途触发的并发上限。
+     * vthread 友好的 JDK HttpClient），适合高频 Cron 场景；默认关闭（平台线程模型）。
+     * 有界并发语义不变：dispatch-threads 仍是在途触发的并发上限。
      */
     private boolean dispatchVirtualThreads = false;
 

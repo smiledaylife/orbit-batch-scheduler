@@ -3,6 +3,8 @@ package com.orbit.admin.dispatch;
 import com.orbit.admin.config.AdminProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -27,6 +29,10 @@ import java.util.concurrent.atomic.AtomicLong;
  *       Job 可以执行。Lua 脚本保证占用、释放、续租的原子性，并以 logId 做所有权校验，
  *       防止旧一轮的迟到回调误释放新一轮执行的 Lease。Redis 故障时快速失败拒绝派发，
  *       绝不降级为本地锁 —— 否则故障期间多副本会重复执行同一任务。
+ *
+ * 容器装配固定走 {@link #OutstandingDispatches(ObjectProvider, AdminProperties)}
+ * （{@code @Autowired} 消除多构造器歧义：orbit-admin 依赖 Redis starter，
+ * StringRedisTemplate 默认存在；Lease 关闭时该模板仅闲置不建连）。
  */
 @Component
 public class OutstandingDispatches {
@@ -104,22 +110,47 @@ public class OutstandingDispatches {
     /**
      * 创建单机模式登记簿：纯 JVM 内存守卫，不访问 Redis。
      *
-     * 适用于本地开发、单副本部署或未开启集群 Lease 的场景；
-     * 该模式下跨副本互斥依赖 Quartz 集群行锁。
+     * 供测试与手动装配使用；容器装配固定走
+     * {@link #OutstandingDispatches(ObjectProvider, AdminProperties)}。
      */
     public OutstandingDispatches() {
         this(null, new AdminProperties());
     }
 
     /**
-     * 创建完整登记簿。
+     * 容器装配入口：注入配置与（可能存在的）Redis 客户端。
      *
-     * @param redis      Redis 客户端，集群 Lease 模式必需；可为 null（此时必须保持 Lease 关闭）
+     * {@code @Autowired} 显式选定本构造器：类上同时保留了无参便捷构造器，
+     * 不标注时 Spring 对多构造器组件会回退到无参构造器，execution-lease-*
+     * 配置与 Redis 客户端将永远注入不进来，Lease 模式静默失效。
+     * 开启 Lease 但容器没有 StringRedisTemplate 时启动即失败（配置错误应尽早暴露）。
+     *
+     * @param redis      Redis 客户端提供者，集群 Lease 模式必需
      * @param properties 调度中心配置，提供 execution-lease-* 参数
      */
-    public OutstandingDispatches(StringRedisTemplate redis, AdminProperties properties) {
+    @Autowired
+    public OutstandingDispatches(ObjectProvider<StringRedisTemplate> redis, AdminProperties properties) {
+        this(resolveRedis(redis, properties), properties);
+        log.info("[orbit-admin] serial dispatch guard mode: {}",
+                properties.isExecutionLeaseEnabled() ? "redis lease (cross-replica)" : "local jvm (single replica)");
+    }
+
+    /** 规范构造器：字段赋值的唯一入口 */
+    private OutstandingDispatches(StringRedisTemplate redis, AdminProperties properties) {
         this.redis = redis;
         this.properties = properties;
+    }
+
+    /** 解析 Redis 客户端：Lease 开启时必须存在，否则启动失败并给出可操作的错误信息 */
+    private static StringRedisTemplate resolveRedis(ObjectProvider<StringRedisTemplate> redis,
+                                                    AdminProperties properties) {
+        StringRedisTemplate template = redis.getIfAvailable();
+        if (properties.isExecutionLeaseEnabled() && template == null) {
+            throw new IllegalStateException(
+                    "orbit.admin.execution-lease-enabled=true requires a StringRedisTemplate bean; "
+                            + "check spring.data.redis.* configuration");
+        }
+        return template;
     }
 
     /**

@@ -46,12 +46,6 @@ public class ExecutorProperties {
     private int callbackRetryTimes = 3;
     /** callback 重试之间的退避间隔（毫秒）。 */
     private long callbackRetryIntervalMs = 2000;
-    /**
-     * 兼容保留配置；callback 实际使用无界队列避免因容量限制主动丢结果。
-     * @deprecated 无界队列策略下该配置不再生效，仅为老配置文件兼容保留；见 {@link com.orbit.executor.client.CallbackClient}。
-     */
-    @Deprecated
-    private int callbackQueueCapacity = 1000;
 
     /** Redis 执行幂等保护开关：开启后同 logId 在 TTL 内最多进入一次执行线程池。 */
     private boolean executionIdempotencyEnabled = false;
@@ -90,12 +84,6 @@ public class ExecutorProperties {
     public void setCallbackRetryTimes(int callbackRetryTimes) { this.callbackRetryTimes = callbackRetryTimes; }
     public long getCallbackRetryIntervalMs() { return callbackRetryIntervalMs; }
     public void setCallbackRetryIntervalMs(long callbackRetryIntervalMs) { this.callbackRetryIntervalMs = callbackRetryIntervalMs; }
-    /** @deprecated 兼容保留，不再生效 */
-    @Deprecated
-    public int getCallbackQueueCapacity() { return callbackQueueCapacity; }
-    /** @deprecated 兼容保留，不再生效 */
-    @Deprecated
-    public void setCallbackQueueCapacity(int callbackQueueCapacity) { this.callbackQueueCapacity = callbackQueueCapacity; }
     public boolean isExecutionIdempotencyEnabled() { return executionIdempotencyEnabled; }
     public void setExecutionIdempotencyEnabled(boolean value) { this.executionIdempotencyEnabled = value; }
     public long getExecutionIdempotencyTtlSeconds() { return executionIdempotencyTtlSeconds; }

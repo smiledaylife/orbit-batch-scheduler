@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 执行器注册表「本地缓存」行为测试：
+ * 执行器注册表「本地缓存」行为测试（Caffeine 单条快照缓存）：
  * 验证 TTL 缓存生效（读路径不重复查库由行为等价性保证），
  * 以及写操作（注册 / 摘除）对缓存的立即失效——这是缓存正确性的关键。
  */

@@ -42,13 +42,14 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
-        <!-- 全模块统一 JDK 21 基线（Spring Boot 3.x 最低要求 JDK 17，项目为新项目无历史包袱） -->
+        <!-- 全模块统一 JDK 21 基线（Spring Boot 3.5 要求 JDK 17+，本框架基线 JDK 21） -->
         <java.release>21</java.release>
         <spring-boot.version>3.5.12</spring-boot.version>
 
         <!--
           依赖版本统一管理。其余 Spring 生态依赖（Jackson、Tomcat、H2、PostgreSQL 驱动、
           spring-boot-starter-* 等）均由 spring-boot-dependencies BOM 收敛，不在此重复声明。
+          Caffeine 单节点缓存同样由 BOM 托管版本，模块内直接声明依赖即可。
         -->
         <quartz.version>2.5.2</quartz.version>
         <!--

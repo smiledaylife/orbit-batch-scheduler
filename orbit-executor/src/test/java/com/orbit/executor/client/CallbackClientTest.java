@@ -66,7 +66,6 @@ class CallbackClientTest {
 
     private static ExecutorProperties props() {
         ExecutorProperties p = new ExecutorProperties();
-        p.setCallbackQueueCapacity(100);
         p.setCallbackRetryTimes(1);
         p.setCallbackRetryIntervalMs(20L);
         return p;

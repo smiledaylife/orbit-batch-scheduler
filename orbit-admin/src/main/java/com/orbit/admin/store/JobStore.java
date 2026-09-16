@@ -45,7 +45,7 @@ public class JobStore {
 
     /** 默认超时（秒） */
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
-    /** 默认重试间隔（秒）：历史行该列为 NULL 或新任务未显式设置时使用 */
+    /** 默认重试间隔（秒）：该列为 NULL（未显式设置）时使用 */
     private static final int DEFAULT_RETRY_INTERVAL_SECONDS = 10;
     /** 每页最大记录数 */
     private static final int MAX_PAGE_SIZE = 200;
@@ -473,7 +473,7 @@ public class JobStore {
      * 按日志 ID 查询单条调度日志。
      *
      * 主要供告警事件回退取任务上下文：执行器回传只携带 logId 与结果，
-     * 当回传未回填任务名等字段（旧版执行器或字段丢失）时，用本方法补齐
+     * 当回传未回填任务名等字段（字段丢失）时，用本方法补齐
      * 告警事件所需的 jobName / appName / handler。
      *
      * @param logId 日志追踪 ID
@@ -525,7 +525,7 @@ public class JobStore {
         j.setParams(parseMap(po.getParams()));
         j.setTimeoutSeconds(po.getTimeoutSeconds() == null ? DEFAULT_TIMEOUT_SECONDS : po.getTimeoutSeconds());
         j.setRouteStrategy(po.getRouteStrategy() == null ? "ROUND" : po.getRouteStrategy());
-        // 重试字段：历史行该列为 NULL，落到安全默认值（不重试 / 10 秒间隔）
+        // 重试字段：该列为 NULL 时落到安全默认值（不重试 / 10 秒间隔）
         j.setRetryCount(po.getRetryCount() == null ? 0 : po.getRetryCount());
         j.setRetryIntervalSeconds(po.getRetryIntervalSeconds() == null
                 ? DEFAULT_RETRY_INTERVAL_SECONDS : po.getRetryIntervalSeconds());
