@@ -3,6 +3,7 @@ package com.orbit.executor.client;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
+import com.github.benmanes.caffeine.cache.RemovalListener;
 import com.orbit.executor.config.ExecutorProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,10 +67,20 @@ public class ExecutionIdempotency {
      */
     public ExecutionIdempotency(ExecutorProperties properties) {
         this.properties = properties;
-        this.localReservations = Caffeine.newBuilder()
+        this.localReservations = buildLocalCache(effectiveTtlMs(), this::warnOnceOnEviction);
+    }
+
+    /**
+     * 构建本地幂等缓存：maximumSize 提供容量淘汰（Window TinyLFU），
+     * expireAfterWrite 提供 TTL；监听器的实参类型显式声明为 {@code RemovalListener<String, Boolean>}，
+     * 与缓存键值类型一致，避免依赖 builder 泛型收窄的类型推断。
+     */
+    private static Cache<String, Boolean> buildLocalCache(long ttlMs,
+                                                          RemovalListener<String, Boolean> listener) {
+        return Caffeine.newBuilder()
                 .maximumSize(LOCAL_MAX_ENTRIES)
-                .expireAfterWrite(effectiveTtlMs(), TimeUnit.MILLISECONDS)
-                .removalListener(this::warnOnceOnEviction)
+                .expireAfterWrite(ttlMs, TimeUnit.MILLISECONDS)
+                .removalListener(listener)
                 .build();
     }
 
