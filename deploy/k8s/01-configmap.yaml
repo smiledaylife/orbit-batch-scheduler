@@ -23,7 +23,7 @@ data:
           test-while-idle: true
           time-between-eviction-runs-millis: 60000
           min-evictable-idle-time-millis: 300000
-      # Spring Boot 3 起 Redis 配置前缀为 spring.data.redis.*
+      # Redis 客户端配置（配置前缀为 spring.data.redis.*）
       data:
         redis:
           host: ${ORBIT_REDIS_HOST}
@@ -68,7 +68,7 @@ data:
     server:
       port: 8081
     spring:
-      # Spring Boot 3 起 Redis 配置前缀为 spring.data.redis.*
+      # Redis 客户端配置（配置前缀为 spring.data.redis.*）
       data:
         redis:
           host: ${SPRING_REDIS_HOST}

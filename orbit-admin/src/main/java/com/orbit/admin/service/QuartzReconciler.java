@@ -100,7 +100,7 @@ public class QuartzReconciler {
                 dbNames.add(job.getJobName());
             }
 
-            // 删除 Quartz 中已经不存在于 DB 的任务，防止历史任务定义继续触发。
+            // 删除 Quartz 中已经不存在于 DB 的任务，防止已删除的任务定义继续触发。
             int removed = 0;
             for (JobKey key : scheduler.getJobKeys(GroupMatcher.jobGroupEquals(properties.getGroup()))) {
                 if (!dbNames.contains(key.getName())) {

@@ -202,7 +202,7 @@ public class JobService {
                 skipped++;
                 log.debug("[orbit-admin] job {} already scheduled by another node", job.getJobName());
             } catch (Exception e) {
-                // 单个任务装载失败（例如历史遗留的非法 cron）不应阻断其余任务
+                // 单个任务装载失败（例如非法 cron）不应阻断其余任务
                 log.error("[orbit-admin] init schedule failed for job={}", job.getJobName(), e);
             }
         }
@@ -441,7 +441,7 @@ public class JobService {
      *
      * 与定时触发共用同名任务串行守卫（{@code orbit.admin.dispatch-serial-per-job=true} 时）：
      * 上一轮执行尚未收敛（结果未回传）时，手动触发被拒绝并返回明确原因，
-     * 而不是与在跑实例并行执行；守卫关闭时行为与之前一致（总是派发）。
+     * 而不是与在跑实例并行执行；守卫关闭时总是派发。
      *
      * 本方法仍是同步的：调用方需要立刻知道派发结果。
      *

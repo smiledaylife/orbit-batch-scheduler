@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.orbit.admin.config.AdminProperties;
 import com.orbit.admin.store.ColumnLimits;
 import com.orbit.admin.store.mapper.OrbitExecutorRegistryMapper;
@@ -27,6 +29,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -39,6 +42,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * 性能设计：读路径（调度派发 / API 查询 / 在线计数）经短 TTL 本地缓存提供，
  * 由 {@code orbit.admin.registry-cache-ttl-ms} 控制（默认 3 秒，0 = 关闭）。
+ * 缓存基于 Caffeine 单条快照缓存（{@code maximumSize(1)} + {@code expireAfterWrite}），
+ * 同刻并发重建由 Caffeine 的 per-key 原子加载收敛为单飞（single-flight），无需手写锁；
  * 写操作（注册 / 摘除 / 超时剔除）在变更数据库的同时立即失效本进程缓存；
  * 多副本间的一致性由 TTL 上界保证，命中已下线节点的派发由 failover 兜底。
  */
@@ -50,6 +55,9 @@ public class ExecutorRegistry {
     /** handlers 列的 JSON 反序列化目标类型 */
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<List<String>>() {
     };
+
+    /** Caffeine 快照缓存的唯一 key：缓存内容始终是「全部在线节点」的一份快照 */
+    private static final String SNAPSHOT_KEY = "ALL";
 
     /** 调度中心配置：提供心跳超时与缓存 TTL */
     private final AdminProperties properties;
@@ -65,26 +73,15 @@ public class ExecutorRegistry {
      */
     private final ConcurrentHashMap<String, AtomicInteger> roundRobin = new ConcurrentHashMap<String, AtomicInteger>();
 
-    /** 地址比较器（null 视为最大，防御历史脏数据导致的 NPE） */
+    /** 地址比较器（null 视为最大，防御空地址行导致排序不确定） */
     private static final Comparator<ExecutorNode> BY_ADDRESS =
             Comparator.comparing(ExecutorNode::getAddress, Comparator.nullsLast(String::compareTo));
 
     /**
-     * 注册表本地缓存（不可变快照）。JDK 21 record：两个只读组件、无行为，
-     * volatile 单引用替换，读无锁。
+     * 注册表本地快照缓存（value 为按地址升序、已过滤失联节点的不可变列表）。
+     * TTL 与容量淘汰由 Caffeine 治理；{@code registry-cache-ttl-ms} 为 0 时不构建（每次直查库）。
      */
-    private record RegistrySnapshot(
-            /** 快照失效时刻（epoch 毫秒），到点后下一次读会重建 */
-            long expiresAtMs,
-            /** 快照内容：按地址升序、已过滤失联节点的不可变列表 */
-            List<ExecutorNode> nodes) {
-    }
-
-    /** 当前生效的缓存快照；null 表示需要重建 */
-    private volatile RegistrySnapshot cache;
-
-    /** 缓存重建锁：防止过期瞬间的并发重建风暴 */
-    private final Object cacheLock = new Object();
+    private final Cache<String, List<ExecutorNode>> snapshotCache;
 
     /**
      * @param properties 调度中心配置，提供心跳超时与缓存 TTL
@@ -93,6 +90,10 @@ public class ExecutorRegistry {
     public ExecutorRegistry(AdminProperties properties, OrbitExecutorRegistryMapper mapper) {
         this.properties = properties;
         this.mapper = mapper;
+        long ttl = properties.getRegistryCacheTtlMs();
+        this.snapshotCache = ttl > 0
+                ? Caffeine.newBuilder().expireAfterWrite(ttl, TimeUnit.MILLISECONDS).maximumSize(1).build()
+                : null;
     }
 
     /**
@@ -179,7 +180,7 @@ public class ExecutorRegistry {
 
     /** 查询全部在线执行器节点（经 TTL 缓存）。返回列表为防御性副本，调用方可安全修改。 */
     public List<ExecutorNode> listAll() {
-        return new ArrayList<ExecutorNode>(snapshot().nodes());
+        return new ArrayList<ExecutorNode>(snapshot());
     }
 
     /**
@@ -190,7 +191,7 @@ public class ExecutorRegistry {
             return new ArrayList<ExecutorNode>();
         }
         String target = appName.trim();
-        List<ExecutorNode> all = snapshot().nodes();
+        List<ExecutorNode> all = snapshot();
         List<ExecutorNode> matched = new ArrayList<ExecutorNode>(all.size());
         for (ExecutorNode n : all) {
             if (target.equals(n.getAppName())) {
@@ -202,8 +203,8 @@ public class ExecutorRegistry {
 
 
     /**
-     * 在已查出的候选列表上按路由策略选点。
-     * 新增该方法使 {@code dispatch} 能以一次数据库（或缓存）查询完成「取候选 + 选起点」。
+     * 在已查出的候选列表上按路由策略选点，
+     * 使 {@code dispatch} 能以一次数据库（或缓存）查询完成「取候选 + 选起点」。
      *
      * @param candidates 候选节点列表（非空时生效）
      * @param appName    应用名（仅作为轮询游标 key）
@@ -219,7 +220,7 @@ public class ExecutorRegistry {
      *
      * JDK 21 箭头 switch（JEP 441）分发路由策略：
      * case 标签直接引用 {@link RouteStrategy} 常量（编译期常量），
-     * ROUND 作为 default 分支兜底未知策略（兼容库里已有的历史数据）。
+     * ROUND 作为 default 分支兜底未知策略值。
      *
      * CONSISTENT_HASH 以 {@code hashKey}（通常为任务名）对虚拟节点环做哈希：
      * 同一任务在同一候选集合下总是命中同一节点；节点增减时只有少数任务换点。
@@ -330,34 +331,21 @@ public class ExecutorRegistry {
      * 在线执行器节点数（经 TTL 缓存，避免 overview/探针高频 count 查询）。
      */
     public int onlineCount() {
-        return snapshot().nodes().size();
+        return snapshot().size();
     }
 
     // ============================ 缓存内部实现 ============================
 
     /**
-     * 读取当前有效快照：命中且未过期直接返回；否则（加锁）重建。
-     * 重建采用全量查询 + 内存过滤，列表规模为在线节点数（通常几十到几百），成本可忽略。
+     * 读取当前有效快照：缓存开启时经 Caffeine 单飞加载（命中且未过期直接返回，
+     * 过期瞬间的并发重建由 per-key 原子加载收敛为一次查库）；缓存关闭时每次直查数据库。
+     * 快照采用全量查询 + 内存过滤，列表规模为在线节点数（通常几十到几百），成本可忽略。
      */
-    private RegistrySnapshot snapshot() {
-        long ttl = properties.getRegistryCacheTtlMs();
-        RegistrySnapshot c = cache;
-        if (ttl <= 0) {
-            // 缓存关闭：每次直查数据库
-            return loadSnapshot(0);
+    private List<ExecutorNode> snapshot() {
+        if (snapshotCache == null) {
+            return loadSnapshot();
         }
-        if (c != null && c.expiresAtMs() > System.currentTimeMillis()) {
-            return c;
-        }
-        synchronized (cacheLock) {
-            c = cache;
-            if (c != null && c.expiresAtMs() > System.currentTimeMillis()) {
-                return c;
-            }
-            c = loadSnapshot(ttl);
-            cache = c;
-            return c;
-        }
+        return snapshotCache.get(SNAPSHOT_KEY, k -> loadSnapshot());
     }
 
     /**
@@ -365,10 +353,8 @@ public class ExecutorRegistry {
      *
      * 排序只在内存做一次：BY_ADDRESS 对 null 地址有确定语义，而各数据库 ASC 的 NULL 位置并不一致，
      * 交给 SQL 排反而要额外约束；在线节点数量级为几十到几百，内存排序成本可忽略。
-     *
-     * @param ttl 缓存有效期（毫秒）；小于等于 0 表示不做缓存复用
      */
-    private RegistrySnapshot loadSnapshot(long ttl) {
+    private List<ExecutorNode> loadSnapshot() {
         List<OrbitExecutorRegistryPO> rows = mapper.selectList(
                 new LambdaQueryWrapper<OrbitExecutorRegistryPO>()
                         .ge(OrbitExecutorRegistryPO::getLastHeartbeat, aliveSince()));
@@ -377,15 +363,16 @@ public class ExecutorRegistry {
             nodes.add(toNode(po));
         }
         Collections.sort(nodes, BY_ADDRESS);
-        long expiresAt = ttl <= 0 ? 0 : System.currentTimeMillis() + ttl;
-        return new RegistrySnapshot(expiresAt, Collections.unmodifiableList(nodes));
+        return Collections.unmodifiableList(nodes);
     }
 
     /**
      * 立即失效本地缓存（写路径调用）。
      */
     private void invalidateCache() {
-        cache = null;
+        if (snapshotCache != null) {
+            snapshotCache.invalidate(SNAPSHOT_KEY);
+        }
     }
 
     /**
@@ -460,7 +447,7 @@ public class ExecutorRegistry {
     /**
      * 解析 handlers 列的 JSON 数组。
      *
-     * 空值、空串与非法 JSON 都返回空列表而不是抛异常：注册表里可能有历史脏数据，
+     * 空值、空串与非法 JSON 都返回空列表而不是抛异常：
      * 一个坏节点不应该让整次路由查询失败。
      *
      * @param raw handlers 列原始字符串

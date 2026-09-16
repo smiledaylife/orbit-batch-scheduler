@@ -46,6 +46,15 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
             <optional>true</optional>
         </dependency>
+        <!--
+          Caffeine 单节点缓存：执行幂等的 JVM 本地兜底实现（logId 去重）。
+          expireAfterWrite 提供 TTL、maximumSize 提供容量淘汰，
+          替代手工清扫的 ConcurrentHashMap；版本由 spring-boot-dependencies BOM 托管。
+        -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-configuration-processor</artifactId>

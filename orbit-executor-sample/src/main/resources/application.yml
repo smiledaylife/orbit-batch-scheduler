@@ -11,6 +11,21 @@ spring:
     virtual:
       enabled: true
 
+  # ---- 引入 Redis（可选集群级能力，三步走，详见 README「4.4 引入 Redis」）----
+  # 第 1 步：在本模块 pom.xml 取消 spring-boot-starter-data-redis 的注释
+  #         （orbit-executor 将其声明为 optional，不会传递进来必须由业务侧显式引入）；
+  # 第 2 步：配置下面的连接信息；第 3 步：开启 orbit.executor 下的两个 Redis 开关。
+  # 不引入 Redis 也能完整运行：SDK 自动降级为 JVM 本地幂等 + 纯 HTTP 回传，
+  # 也不会激活 Redis 健康探针。
+  # data:
+  #   redis:
+  #     host: 127.0.0.1
+  #     port: 6379
+  #     password: ""
+  #     database: 0
+  #     timeout: 2s
+  #     connect-timeout: 2s
+
 orbit:
   executor:
     enabled: true
@@ -38,9 +53,17 @@ orbit:
     # 对应日志将由调度中心的孤儿回收兜底判失败
     callback-retry-times: 3
     callback-retry-interval-ms: 2000
-    # 兼容保留配置：实际实现使用无界待回传队列，不会因容量限制主动丢结果
-    #（背压靠 Redis Stream 持久化 / 调度中心孤儿回收兜底，见 CallbackClient 类注释）
-    callback-queue-capacity: 1000
+
+    # ---- 引入 Redis（第 3 步）：两项可选集群级能力，需先完成上面注释里的第 1、2 步 ----
+    # 执行幂等：同 logId 在 TTL 内整个执行器集群最多进入一次执行线程池（跨副本 SET NX + TTL）；
+    # 未引入 Redis 时自动降级为 JVM 本地实现（仅保护本节点，TTL 上限 300 秒）。
+    # execution-idempotency-enabled: true
+    # execution-idempotency-ttl-seconds: 86400
+    # 持久化回传：执行结果先写 Redis Stream（执行器进程重启不丢），
+    # 由 admin 侧消费组异步落库（admin 需同步开启 durable-callback-enabled）；
+    # Redis 不可用时自动降级回 HTTP 回传。
+    # durable-callback-enabled: true
+    # callback-stream-key: orbit:callback:stream
 
 management:
   endpoints:

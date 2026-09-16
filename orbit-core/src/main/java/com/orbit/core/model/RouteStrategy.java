@@ -5,7 +5,7 @@ package com.orbit.core.model;
  *
  * 集中定义路由策略取值（ROUND / RANDOM / FIRST），
  * 供调度中心入参校验与路由分发统一引用，避免魔法字符串漂移。
- * 常量值为协议的一部分，保持字符串形式以兼容既有 JSON 协议与历史数据。
+ * 常量值即 JSON 线协议取值，两端必须保持字符串一致。
  */
 public final class RouteStrategy {
 

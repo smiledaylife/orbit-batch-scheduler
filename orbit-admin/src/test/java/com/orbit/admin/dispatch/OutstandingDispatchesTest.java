@@ -16,11 +16,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@link OutstandingDispatches} 单元测试。
  *
  * 重点回归：logId 预登记语义。
- * 历史缺陷：logId 在「拿到受理回执之后」才登记（bind），而执行器可能毫秒级
- * 跑完任务并回传 —— 回传线程先到时 release 查不到映射而空过，随后 bind 把
- * 槽位永久占用：该任务从此不再被 Cron 触发，且孤儿回收只扫 RUNNING 日志，
- * 无法兜底。修复后 logId 在派发前随 {@code tryAcquire} 一次性登记，
- * 回传必然晚于登记，不存在竞态窗口。
+ * logId 必须在派发前随 {@code tryAcquire} 一次性登记，而非拿到受理回执后再登记：
+ * 执行器可能毫秒级跑完任务并回传，回传与登记竞态时 release 会查不到映射而空过，
+ * 随后登记把槽位永久占用 —— 该任务从此不再被 Cron 触发，且孤儿回收只扫
+ * RUNNING 日志，无法兜底。预登记让回传必然晚于登记，不存在竞态窗口。
  */
 class OutstandingDispatchesTest {
 

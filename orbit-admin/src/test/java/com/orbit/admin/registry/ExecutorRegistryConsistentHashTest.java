@@ -1,5 +1,6 @@
 package com.orbit.admin.registry;
 
+import com.orbit.admin.config.AdminProperties;
 import com.orbit.core.model.ExecutorNode;
 import com.orbit.core.model.RouteStrategy;
 import org.junit.jupiter.api.Test;
@@ -22,7 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ExecutorRegistryConsistentHashTest {
 
-    private final ExecutorRegistry registry = new ExecutorRegistry(null, null);
+    // route() 是纯函数式选点：不触库（mapper 传 null），仅需承载缓存 TTL 的配置对象
+    private final ExecutorRegistry registry = new ExecutorRegistry(new AdminProperties(), null);
 
     private static ExecutorNode node(String address) {
         ExecutorNode n = new ExecutorNode();
@@ -111,7 +113,7 @@ class ExecutorRegistryConsistentHashTest {
         assertEquals(candidates.get(1), b);
     }
 
-    /** 未知策略仍由 ROUND 兜底（历史数据兼容），显式传 CONSISTENT_HASH 常量可路由。 */
+    /** 未知策略仍由 ROUND 兜底，显式传 CONSISTENT_HASH 常量可路由。 */
     @Test
     void unknownStrategyStillFallsBackToRound() {
         List<ExecutorNode> candidates = Arrays.asList(

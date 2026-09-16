@@ -1,13 +1,13 @@
 package com.orbit.admin.registry;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.orbit.core.protocol.OrbitProtocol;
 
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -22,6 +22,10 @@ import java.util.regex.PatternSyntaxException;
  * 的稳态压力；DNS 抖动还会让心跳间歇性失败。因此校验结果（含拒绝原因）按
  * {@value #CACHE_TTL_MS} 毫秒缓存 —— 收益与代价的折中：域名到保留地址的恶意切换
  * 最多延迟一个 TTL 周期被发现，而正常执行器的 DNS 查询频率下降一个数量级。
+ *
+ * 缓存基于 Caffeine：{@code expireAfterWrite} 统一治理 TTL 过期，
+ * {@code maximumSize} 以 Window TinyLFU 策略做容量淘汰，对「热点地址反复出现」
+ * 的心跳校验场景友好；容量与 TTL 均有界，无需手工清扫与手工淘汰。
  */
 public final class ExecutorAddressValidator {
 
@@ -31,25 +35,25 @@ public final class ExecutorAddressValidator {
     /** 校验结果缓存时长（毫秒） */
     private static final long CACHE_TTL_MS = 60_000L;
 
-    /** 缓存容量上限：执行器地址数量有限，超限说明出现异常流量，先清扫再半量淘汰 */
+    /** 缓存容量上限：执行器地址数量有限，超限部分由 Caffeine 按访问热度淘汰 */
     private static final int CACHE_MAX_ENTRIES = 512;
 
     /**
      * 校验结果缓存条目：成功存规范化地址，失败存异常。
-     * JDK 21 record：三个只读组件天然不可变，配合 volatile 快照写法避免加锁。
+     * JDK 21 record：两个只读组件天然不可变，可直接被多线程共享。
      */
     private record CachedResult(
-            /** 缓存失效时刻（epoch 毫秒） */
-            long expiresAtMs,
             /** 成功时的规范化地址；失败时为 null */
             String normalized,
             /** 失败时的拒绝原因；成功时为 null */
             IllegalArgumentException error) {
     }
 
-    /** 校验结果缓存：key = rawAddress + '|' + allowPattern */
-    private static final ConcurrentHashMap<String, CachedResult> CACHE =
-            new ConcurrentHashMap<String, CachedResult>();
+    /** 校验结果缓存：key = rawAddress + '|' + allowPattern；TTL 与容量淘汰由 Caffeine 统一治理 */
+    private static final Cache<String, CachedResult> CACHE = Caffeine.newBuilder()
+            .maximumSize(CACHE_MAX_ENTRIES)
+            .expireAfterWrite(CACHE_TTL_MS, TimeUnit.MILLISECONDS)
+            .build();
 
     private ExecutorAddressValidator() {
     }
@@ -78,10 +82,10 @@ public final class ExecutorAddressValidator {
             throw new IllegalArgumentException("address required");
         }
         String key = rawAddress.trim() + "|" + (allowPattern == null ? "" : allowPattern.trim());
-        long now = System.currentTimeMillis();
 
-        CachedResult cached = CACHE.get(key);
-        if (cached != null && cached.expiresAtMs() > now) {
+        // getIfPresent 对过期条目按未命中处理，负缓存（拒绝原因）同样被 TTL 治理
+        CachedResult cached = CACHE.getIfPresent(key);
+        if (cached != null) {
             if (cached.error() != null) {
                 throw cached.error();
             }
@@ -92,40 +96,11 @@ public final class ExecutorAddressValidator {
         try {
             normalized = doValidateAndNormalize(rawAddress, allowPattern);
         } catch (IllegalArgumentException e) {
-            putCache(key, new CachedResult(now + CACHE_TTL_MS, null, e));
+            CACHE.put(key, new CachedResult(null, e));
             throw e;
         }
-        putCache(key, new CachedResult(now + CACHE_TTL_MS, normalized, null));
+        CACHE.put(key, new CachedResult(normalized, null));
         return normalized;
-    }
-
-    /** 写缓存并按需清扫/淘汰，保证容量有界 */
-    private static void putCache(String key, CachedResult result) {
-        CACHE.put(key, result);
-        if (CACHE.size() <= CACHE_MAX_ENTRIES) {
-            return;
-        }
-        long now = System.currentTimeMillis();
-        Iterator<Map.Entry<String, CachedResult>> it = CACHE.entrySet().iterator();
-        while (it.hasNext()) {
-            if (it.next().getValue().expiresAtMs() <= now) {
-                it.remove();
-            }
-        }
-        // 清扫后仍超限（地址数量真的大）：无差别淘汰一半，校验开销退化为一次性 DNS
-        while (CACHE.size() > CACHE_MAX_ENTRIES) {
-            int half = CACHE.size() / 2;
-            it = CACHE.entrySet().iterator();
-            int removed = 0;
-            while (it.hasNext() && removed < half) {
-                it.next();
-                it.remove();
-                removed++;
-            }
-            if (removed == 0) {
-                break;
-            }
-        }
     }
 
     /** 实际校验链（无缓存版本），步骤见 {@link #validateAndNormalize} */

@@ -19,7 +19,7 @@ spring:
       time-between-eviction-runs-millis: 60000
       min-evictable-idle-time-millis: 300000
 
-  # Spring Boot 3 起 Redis 配置前缀从 spring.redis.* 迁移到 spring.data.redis.*
+  # Redis 客户端配置（配置前缀为 spring.data.redis.*）
   data:
     redis:
       # Redis 用于集群执行 Lease、callback Stream 和 Quartz 对账分布式锁。
@@ -77,3 +77,8 @@ management:
       # Kubernetes readiness/liveness 使用 Spring Boot health groups。
       probes:
         enabled: true
+  health:
+    # cluster 模式强依赖 Redis（Lease / callback Stream / 对账锁），恢复 Redis 健康探针：
+    # Redis 断连时 readiness 探针应及时反映，便于 K8s 摘除不健康副本。
+    redis:
+      enabled: true

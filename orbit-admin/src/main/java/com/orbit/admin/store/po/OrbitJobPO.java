@@ -54,10 +54,10 @@ public class OrbitJobPO implements Serializable {
     /** 路由策略：ROUND / RANDOM / FIRST / CONSISTENT_HASH */
     private String routeStrategy;
 
-    /** 失败重试次数（不含首次执行）；可空表示历史行，读侧默认 0 */
+    /** 失败重试次数（不含首次执行）；可空，读侧默认 0 */
     private Integer retryCount;
 
-    /** 失败重试间隔（秒）；可空表示历史行，读侧默认 10 */
+    /** 失败重试间隔（秒）；可空，读侧默认 10 */
     private Integer retryIntervalSeconds;
 
     /**
