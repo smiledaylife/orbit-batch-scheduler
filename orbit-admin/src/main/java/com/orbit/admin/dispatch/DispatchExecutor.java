@@ -121,7 +121,7 @@ public class DispatchExecutor implements DisposableBean {
         // 这样执行器最早可能的回传（请求发出后毫秒级）一定能查到映射。
         final String logId = newLogId();
 
-        if (guard && !outstanding.tryAcquire(jobName, logId)) {
+        if (guard && !outstanding.tryAcquire(jobName, logId, job.getTimeoutSeconds())) {
             // 只计数 + DEBUG 日志，不写调度日志：一个 1 秒 Cron 配 1 小时 Handler
             // 会每秒产生一条「被跳过」记录，足以刷爆日志表。
             log.debug("[orbit-admin] skip fire, previous run of {} still awaiting callback", jobName);
@@ -183,6 +183,7 @@ public class DispatchExecutor implements DisposableBean {
         m.put("dispatchRejected", rejectedCount.get());
         m.put("dispatchSkipped", outstanding.skipped());
         m.put("dispatchOutstanding", outstanding.outstanding());
+        m.put("dispatchLeaseForcedExpirations", outstanding.leaseForcedExpirations());
         return m;
     }
 

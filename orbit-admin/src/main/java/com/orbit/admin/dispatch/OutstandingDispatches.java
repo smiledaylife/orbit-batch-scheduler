@@ -76,9 +76,12 @@ public class OutstandingDispatches {
     /**
      * 原子续租：job 与 logId 两条映射都仍属于本 logId 时，重置两者 TTL。
      * 长任务靠周期续租维持占用，避免执行期间 Lease 先行过期导致重复派发。
+     * 注意反向键 {@code lease-log:{logId}} 的值是 jobName，必须与 ARGV[3] 比对；
+     * 若误比 logId，续租将永远失败、长任务的 Lease 会在首个 TTL 后过期。
+     * ARGV 依次为 logId、lease TTL 毫秒、jobName。
      */
     private static final DefaultRedisScript<Long> RENEW_SCRIPT = new DefaultRedisScript<Long>("""
-            if redis.call('get', KEYS[1]) == ARGV[1] and redis.call('get', KEYS[2]) == ARGV[1] then
+            if redis.call('get', KEYS[1]) == ARGV[1] and redis.call('get', KEYS[2]) == ARGV[3] then
                 redis.call('pexpire', KEYS[1], ARGV[2]);
                 redis.call('pexpire', KEYS[2], ARGV[2]);
                 return 1;
@@ -86,11 +89,26 @@ public class OutstandingDispatches {
             return 0;
             """, Long.class);
 
+    /**
+     * Lease 绝对持有上限之外的回传宽限（毫秒）。
+     * 执行器看门狗会在 timeoutSeconds 到期时中断任务并回传，额外放宽 5 分钟
+     * 覆盖回传排队/重试窗口（与 AdminScheduleTasks 的孤儿回收宽限口径一致）。
+     */
+    static final long LEASE_CALLBACK_GRACE_MS = 5 * 60 * 1000L;
+
     /** 在途登记正向映射：jobName -> 占用中的 logId */
     private final ConcurrentHashMap<String, String> logIdByJob = new ConcurrentHashMap<String, String>();
 
     /** 在途登记反向映射：logId -> jobName，回调按 logId 释放时定位任务 */
     private final ConcurrentHashMap<String, String> jobByLogId = new ConcurrentHashMap<String, String>();
+
+    /**
+     * Lease 绝对截止时刻：logId -> epoch millis。
+     * 续租只能把 TTL 往后推、不能无限期持有：超过该时刻仍未收到回传，
+     * 说明执行结果已不可能正常到达（执行器回传链路断裂等），必须强制释放，
+     * 否则该任务会被串行守卫永久跳过。截止时刻 = 任务超时 + 回传宽限。
+     */
+    private final ConcurrentHashMap<String, Long> leaseDeadlineByLogId = new ConcurrentHashMap<String, Long>();
 
     /** 因「上一轮未收敛」而被跳过的触发次数，经 /overview 的 dispatchSkipped 暴露 */
     private final AtomicLong skippedCount = new AtomicLong();
@@ -100,6 +118,9 @@ public class OutstandingDispatches {
 
     /** Redis Lease 续租失败累计次数 */
     private final AtomicLong leaseRenewFailures = new AtomicLong();
+
+    /** 因超过绝对持有上限被强制释放的 Lease 累计次数（回传丢失的信号） */
+    private final AtomicLong leaseForcedExpirations = new AtomicLong();
 
     /** Redis 客户端；仅集群 Lease 模式使用，单机便捷构造下为 null */
     private final StringRedisTemplate redis;
@@ -167,6 +188,40 @@ public class OutstandingDispatches {
      * @return true=占用成功可以派发；false=上一轮尚未收敛，本次触发应跳过
      */
     public boolean tryAcquire(String jobName, String logId) {
+        return tryAcquire(jobName, logId, properties.getMaxTimeoutSeconds());
+    }
+
+    /**
+     * 尝试占用任务槽位，并按本次执行的超时设定 Lease 的绝对持有上限。
+     * 上限 = {@code timeoutSeconds} + {@link #LEASE_CALLBACK_GRACE_MS} 回传宽限；
+     * {@code timeoutSeconds <= 0} 时退回全局 {@code max-timeout-seconds}。
+     * 续租不得越过该上限（见 {@link #renewLeases()}），从根上杜绝
+     * 「回传丢失 → Lease 被无限续期 → 任务再也无法触发」。
+     *
+     * @param jobName        任务名，null 视为不启用守卫
+     * @param logId          本次派发预先生成的日志 ID
+     * @param timeoutSeconds 本次执行的超时秒数（随触发请求下发给执行器）
+     * @return true=占用成功可以派发；false=上一轮尚未收敛，本次触发应跳过
+     */
+    public boolean tryAcquire(String jobName, String logId, int timeoutSeconds) {
+        long maxHoldMs = leaseMaxHoldMs(timeoutSeconds);
+        return tryAcquire(jobName, logId, maxHoldMs, System.currentTimeMillis());
+    }
+
+    /** 计算 Lease 绝对持有上限（毫秒）：任务超时 + 回传宽限，乘法溢出时饱和到长整型上限 */
+    private long leaseMaxHoldMs(int timeoutSeconds) {
+        long seconds = timeoutSeconds > 0 ? timeoutSeconds : Math.max(1L, properties.getMaxTimeoutSeconds());
+        long timeoutMs = seconds > (Long.MAX_VALUE - LEASE_CALLBACK_GRACE_MS) / 1000L
+                ? Long.MAX_VALUE - LEASE_CALLBACK_GRACE_MS
+                : seconds * 1000L;
+        return timeoutMs + LEASE_CALLBACK_GRACE_MS;
+    }
+
+    /**
+     * 占用实现（显式持有上限与当前时刻，供测试注入已到期的 Lease）。
+     * 语义与 {@link #tryAcquire(String, String)} 一致，仅多登记绝对截止时刻。
+     */
+    boolean tryAcquire(String jobName, String logId, long maxHoldMs, long nowMs) {
         if (jobName == null) {
             return true;
         }
@@ -196,6 +251,9 @@ public class OutstandingDispatches {
         // 同步本地映射：集群模式用于续租任务清单与 Redis 故障时的兜底清理
         logIdByJob.put(jobName, logId);
         jobByLogId.put(logId, jobName);
+        // 登记绝对截止时刻：now + maxHoldMs 溢出时饱和，避免截止时刻回绕成过去
+        long deadline = maxHoldMs > Long.MAX_VALUE - nowMs ? Long.MAX_VALUE : nowMs + Math.max(0L, maxHoldMs);
+        leaseDeadlineByLogId.put(logId, deadline);
         return true;
     }
 
@@ -232,10 +290,12 @@ public class OutstandingDispatches {
                     logIdByJob.remove(localJob, logId);
                 }
                 jobByLogId.remove(logId);
+                leaseDeadlineByLogId.remove(logId);
                 return false;
             }
         }
         String jobName = jobByLogId.remove(logId);
+        leaseDeadlineByLogId.remove(logId);
         if (jobName == null) {
             return false;
         }
@@ -263,16 +323,39 @@ public class OutstandingDispatches {
      */
     @Scheduled(fixedDelayString = "${orbit.admin.execution-lease-renew-interval-ms:30000}")
     public void renewLeases() {
-        if (!properties.isExecutionLeaseEnabled() || logIdByJob.isEmpty()) {
+        if (logIdByJob.isEmpty()) {
             return;
         }
+        long now = System.currentTimeMillis();
         for (Map.Entry<String, String> entry : logIdByJob.entrySet()) {
             String jobName = entry.getKey();
             String logId = entry.getValue();
+            // 绝对上限优先于续租：已超过「任务超时 + 回传宽限」仍未收到回传，
+            // 说明结果回传链路已经断裂（例如执行器与 Redis 断连、回传耗尽），
+            // 继续续租只会把串行守卫无限期占死、任务永远无法再触发。
+            // 强制释放（所有权校验保证不误伤新一轮占用），下一轮 Cron 即可接续；
+            // 迟到的真实回传仍会被回传层的 RUNNING 条件更新安全收敛/忽略。
+            Long deadline = leaseDeadlineByLogId.get(logId);
+            if (deadline != null && now >= deadline) {
+                leaseForcedExpirations.incrementAndGet();
+                log.warn("[orbit-admin] execution lease exceeded max hold time, force-releasing: "
+                        + "job={}, logId={} (callback never arrived; job will be schedulable again)", jobName, logId);
+                if (!release(logId)) {
+                    // Redis 释放未生效（所有权已变更或 Redis 异常）：至少清本地登记停止续租，
+                    // Redis 侧 Lease 会随 TTL 自然过期，不会再被本 JVM 续命。
+                    removeLocal(jobName, logId);
+                }
+                continue;
+            }
+            if (!properties.isExecutionLeaseEnabled()) {
+                // 单机模式没有 Redis Lease 需要续租；上面的绝对上限检查同样适用，
+                // 保证本地守卫也不会被丢失的回传无限期占死。
+                continue;
+            }
             try {
                 Long renewed = redis.execute(RENEW_SCRIPT,
                         Arrays.asList(jobKey(jobName), logKey(logId)),
-                        logId, String.valueOf(properties.getExecutionLeaseTtlMs()));
+                        logId, String.valueOf(properties.getExecutionLeaseTtlMs()), jobName);
                 if (!Long.valueOf(1L).equals(renewed)) {
                     leaseRenewFailures.incrementAndGet();
                     log.warn("[orbit-admin] execution lease renewal lost: job={}, logId={}", jobName, logId);
@@ -307,6 +390,11 @@ public class OutstandingDispatches {
         return leaseRenewFailures.get();
     }
 
+    /** 累计因超过绝对持有上限被强制释放的 Lease 次数 */
+    public long leaseForcedExpirations() {
+        return leaseForcedExpirations.get();
+    }
+
     /** Redis Lease 正向键：orbit:execution:lease:{jobName} */
     private String jobKey(String jobName) {
         return KEY_PREFIX + jobName;
@@ -317,11 +405,14 @@ public class OutstandingDispatches {
         return LOG_PREFIX + logId;
     }
 
-    /** 清理本 JVM 的双向映射；remove(key, value) 形式避免误删新一轮已登记的映射 */
+    /** 清理本 JVM 的双向映射与截止时刻；remove(key, value) 形式避免误删新一轮已登记的映射 */
     private void removeLocal(String jobName, String logId) {
         if (jobName != null) {
             logIdByJob.remove(jobName, logId);
         }
-        jobByLogId.remove(logId, jobName);
+        if (logId != null) {
+            jobByLogId.remove(logId, jobName);
+            leaseDeadlineByLogId.remove(logId);
+        }
     }
 }

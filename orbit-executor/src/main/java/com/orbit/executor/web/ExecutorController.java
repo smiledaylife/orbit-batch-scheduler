@@ -72,7 +72,20 @@ public class ExecutorController {
         }
 
         // logId 是一次调度执行的幂等主键：HTTP 超时后重试不会再次进入线程池。
-        boolean first = idempotency.tryReserve(request.getLogId());
+        boolean first;
+        try {
+            first = idempotency.tryReserve(request.getLogId());
+        } catch (IllegalStateException e) {
+            // 幂等后端（Redis）不可用：本次请求确定没有受理、更没有执行。
+            // 必须以结构化失败回执（accepted=false）明确告知调度中心，
+            // 而不是抛 500 —— 调度中心据此立即收敛日志并释放串行 Lease；
+            // 若含糊其辞，调度中心只能把日志留在 RUNNING 等回传，
+            // Lease 被持续续租，该任务在租约兜底到期前都无法再次触发。
+            log.warn("[orbit-executor] execution idempotency unavailable, refusing trigger logId={}: {}",
+                    request.getLogId(), e.getMessage());
+            return TriggerResult.fail(request.getLogId(), request.getJobId(), node, 0,
+                    "execution idempotency unavailable; request refused: " + e.getMessage());
+        }
         if (!first) {
             return TriggerResult.accepted(request.getLogId(), request.getJobId(), node,
                     "duplicate request ignored: logId already accepted");
