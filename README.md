@@ -278,6 +278,10 @@ Cron 到点 / 手动触发
   重复回传同样返回成功，避免执行器把「已处理过」误判为失败而无限重试；
 - **兜底**：执行器崩溃或回传彻底丢失时，日志由后台的僵尸回收
   （`log-reap-interval-ms`，阈值 = `max-timeout-seconds` + 5 分钟宽限）判为 FAILED。
+  串行 Lease 本身另有**绝对持有上限**（任务 `timeoutSeconds` + 5 分钟回传宽限）：
+  续租不得越过该上限，到期仍未收到回传即强制释放并计数
+  （`/overview` 的 `dispatchLeaseForcedExpirations`），任务恢复可触发，
+  不会出现「回传丢失 → Lease 被无限续期 → 任务永久无法触发」。
 
 ---
 

@@ -455,7 +455,7 @@ public class JobService {
         boolean guard = isSerialExecution(job);
         // logId 预生成并预登记：与定时触发通道相同，消除「执行器毫秒级回传早于登记」的竞态。
         String logId = newLogId();
-        if (guard && !outstanding.tryAcquire(jobName, logId)) {
+        if (guard && !outstanding.tryAcquire(jobName, logId, job.getTimeoutSeconds())) {
             String msg = "manual trigger rejected: previous run of job '" + jobName
                     + "' is still awaiting callback (orbit.admin.dispatch-serial-per-job=true)";
             log.info("[orbit-admin] {}", msg);
@@ -745,6 +745,14 @@ public class JobService {
                             job.getAppName(), node.getAddress(), failMsg);
                     continue;
                 }
+                if (failMsg != null && failMsg.contains("execution idempotency unavailable")) {
+                    // 执行器因幂等后端（Redis）不可用而明确拒绝：请求确定未被受理，
+                    // 换节点重试是安全的（新节点会重新预占同一 logId），但绝不摘除本节点 ——
+                    // 它可能只是与 Redis 断连，执行能力本身完好，是否下线交由心跳判断。
+                    log.warn("[orbit-admin] executor idempotency backend unavailable, failover without evicting: {} @ {} ({})",
+                            job.getAppName(), node.getAddress(), failMsg);
+                    continue;
+                }
                 if (looksAmbiguous(failMsg)) {
                     // 模糊失败（connection reset / read timeout）：请求可能已被执行器受理。
                     // 换下一个节点重试（可用性优先），但绝不摘除本节点 —— 节点可能仍然健康，
@@ -887,7 +895,7 @@ public class JobService {
             outstanding.release(failedLogId);
             boolean guard = isSerialExecution(current);
             String logId = newLogId();
-            if (guard && !outstanding.tryAcquire(jobName, logId)) {
+            if (guard && !outstanding.tryAcquire(jobName, logId, current.getTimeoutSeconds())) {
                 log.warn("[orbit-admin] trigger retry skipped, a newer run of {} is still in flight "
                         + "(attempt {}/{})", jobName, attempt, maxAttempts);
                 return;

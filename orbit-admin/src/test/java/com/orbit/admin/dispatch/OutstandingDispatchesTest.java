@@ -1,6 +1,11 @@
 package com.orbit.admin.dispatch;
 
+import com.orbit.admin.config.AdminProperties;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -11,6 +16,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * {@link OutstandingDispatches} 单元测试。
@@ -76,6 +86,61 @@ class OutstandingDispatchesTest {
         assertTrue(o.tryAcquire("jobA", "log-2"));
         assertEquals(1, o.outstanding());
         assertTrue(o.release("log-2"));
+    }
+
+    /**
+     * 回归：Lease 续租不得无限期。
+     * 执行器与 Redis 断连导致回传永不到达时，Lease 超过绝对持有上限必须被
+     * 强制释放、停止续租，任务恢复可触发；在此之前该任务会被一直跳过。
+     */
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void expiredLeaseIsForceReleasedInsteadOfRenewedForever() {
+        StringRedisTemplate redis = mock(StringRedisTemplate.class);
+        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+        when(redis.opsForValue()).thenReturn(valueOps);
+        when(valueOps.get(anyString())).thenReturn("jobA");
+        // acquire / renew / release 三个 Lua 脚本一律成功
+        when(redis.execute(any(DefaultRedisScript.class), anyList(), any(), any(), any())).thenReturn(1L);
+        when(redis.execute(any(DefaultRedisScript.class), anyList(), any())).thenReturn(1L);
+
+        OutstandingDispatches o = newLeaseEnabledDispatches(redis);
+        // 注入一个已到期的 Lease（持有上限 0，上限时刻在过去）
+        long past = System.currentTimeMillis() - 1000L;
+        assertTrue(o.tryAcquire("jobA", "log-1", 0L, past));
+        assertEquals(1, o.outstanding());
+
+        o.renewLeases();
+
+        assertEquals(0, o.outstanding(), "expired lease must be force-released, not renewed");
+        assertEquals(1L, o.leaseForcedExpirations());
+        // 槽位已腾空：下一轮触发可以重新占用
+        assertTrue(o.tryAcquire("jobA", "log-2", 60_000L, System.currentTimeMillis()));
+    }
+
+    /**
+     * 回归：续租脚本的反向键所有权校验必须比对 jobName（lease-log 的值），
+     * 误比 logId 会让续租永远失败、长任务 Lease 在首个 TTL 后被误放行重复派发。
+     */
+    @Test
+    void renewScriptComparesReverseKeyAgainstJobName() throws Exception {
+        java.lang.reflect.Field f = OutstandingDispatches.class.getDeclaredField("RENEW_SCRIPT");
+        f.setAccessible(true);
+        DefaultRedisScript<?> script = (DefaultRedisScript<?>) f.get(null);
+        assertTrue(script.getScriptAsString().contains("ARGV[3]"),
+                "renew script must compare lease-log value (jobName) against ARGV[3]");
+    }
+
+    /** 构造 Lease 开启的登记簿（Redis 为 Mock，脚本一律由调用方桩定） */
+    @SuppressWarnings("unchecked")
+    private static OutstandingDispatches newLeaseEnabledDispatches(StringRedisTemplate redis) {
+        AdminProperties properties = new AdminProperties();
+        properties.setExecutionLeaseEnabled(true);
+        properties.setExecutionLeaseTtlMs(120_000L);
+        properties.setExecutionLeaseRenewIntervalMs(30_000L);
+        ObjectProvider<StringRedisTemplate> provider = mock(ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(redis);
+        return new OutstandingDispatches(provider, properties);
     }
 
     @Test
