@@ -51,9 +51,10 @@
 ## application.yml 关键配置（已写）
 - server.port=18081；spring.application.name=dsv2
 - orbit.executor: admin-addresses=http://127.0.0.1:8080, app-name=dsv2, access-token 空, worker-threads 8, queue-capacity 256
-- spring.datasource pweb001db: jdbc:postgresql://20.240.7.7:5433/pweb001db, wbnatpdb / `H3dlUcX4#`
-- spring.data.redis cluster: 20.240.6.53/55/56:6379,6380, password `M8soNtN4#`
-- jasypt.encryptor.password: `385b696c56233253466965662d693732`
+- spring.datasource pweb001db：JDBC URL / 账号 / 密码由 k8s ConfigMap(dsv2-config) + Secret 注入（仓库中不保留任何凭据）
+- spring.data.redis cluster：节点列表与密码由 ConfigMap/Secret 注入
+- jasypt.encryptor.password（SM4 密钥）：仅由 Secret 注入，严禁写入仓库
+- **安全提示**：本文件历史版本曾包含上述明文凭据，已于 2026-10-30 清除；相关数据库/Redis 密码与 SM4 密钥需要轮换。
 - mybatis-plus mapper-locations=classpath:/mapper/*.xml
 - pvc.rootPath=/app/appnatp/transfile/、pvc.backup.path=/app/appnatp/bak/pvc/、plt.localFileDirRoot=/app/appnatp/natp_plt_mgmt/temp/shareFiles/
 
@@ -144,3 +145,15 @@
 - **IDEA 报错根因（已定位）**：IDEA Maven 用 settings-natp0529.xml + D:\maven_natp_20240529，其 mirror `http://repo.com/artifactory/maven-central/`（无 :8999）返回 401，
   依赖靠旧缓存 classpath → BeanCreationException。命令行构建用 settings-dsv2.xml 则正常。建议 IDEA 切到 settings-dsv2.xml。
 - PowerShell 5.1 中 curl=Invoke-WebRequest；用 curl.exe -s；Invoke-RestMethod 管道 JSON 在批量工具下可能被截断（用 webfetch 验证 API 更稳）
+
+## 2026-10-30 代码审查修复记录
+- 修复 `@MapperScan` 包名（com.natpcp.dsv2 → com.natpcp.natpcp.dsv2，原配置导致 Mapper 全部未注册）。
+- `batchMetadataCleanup` 改为 `BatchMetadataCleanupTasklet`，表名按 `spring.batch.jdbc.table-prefix` 拼接（原硬编码 BATCH_* 会误删同库旧版生产表）。
+- 清除本文件中的明文凭据；`KafkaProducerConfig` 不再内置环境地址，补充投递/阻塞超时。
+- `DynamicSqlProvider` 条件值改为 `#{}` 参数绑定（原字符串拼接存在 SQL 注入）。
+- `objectRedisTemplate` 反序列化改为白名单 `BasicPolymorphicTypeValidator`（原 LaissezFaire 存在 gadget 风险）。
+- `ConfigCheck/TableCheck`：新增 `ConnectionInfoValidator`（JDBC URL 白名单、SSH 路径白名单、端口校验），Jedis 改 try-with-resources，SSH/Redis 增加超时，StrictHostKeyChecking 可配置。
+- `AdminJobClient`：RestTemplate 超时、admin-addresses 多地址故障转移。
+- `RedisManager.scanKeys` 不再吞异常返回 null；`VersionNoticeTasklet` 容忍重复/缺失版本记录；`PvcServiceImpl` 关闭 `Files.walk` 流并保留异常 cause。
+- `application.yml` 补充 `spring.batch.*`（含 `isolation-level-for-create: read_committed` 根治 SSI 冲突）与 dsv2 自定义键说明。
+- pom：orbit 版本对齐 1.0.0、移除不存在的 orbit-boot-support 与未使用的 hutool/pagehelper、jacoco 升级 0.8.12（JDK 21）；根 pom 将 dsv2 纳入 reactor 以进入 CI。

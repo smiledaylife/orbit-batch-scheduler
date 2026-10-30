@@ -120,8 +120,7 @@ public class GenericDataAccessService {
             for (String key : keySet) {
                 String newKey = underScoreToCamelCase(key);
                 if (newKey.equals("createTime") || newKey.equals("lastModTime")) {
-                    Timestamp timeStamp = Timestamp.valueOf(stringObjectMap.get(key).toString());
-                    subMap.put(newKey, timeStamp.toLocalDateTime());
+                    subMap.put(newKey, toLocalDateTime(stringObjectMap.get(key)));
                 } else {
                     subMap.put(newKey, stringObjectMap.get(key));
                 }
@@ -131,6 +130,25 @@ public class GenericDataAccessService {
         return newList;
     }
 
+
+    /**
+     * 时间列转 LocalDateTime：兼容 JDBC 返回 Timestamp / LocalDateTime / 字符串，null 原样返回。
+     */
+    private static LocalDateTime toLocalDateTime(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof LocalDateTime) {
+            return (LocalDateTime) value;
+        }
+        if (value instanceof Timestamp) {
+            return ((Timestamp) value).toLocalDateTime();
+        }
+        if (value instanceof java.time.OffsetDateTime) {
+            return ((java.time.OffsetDateTime) value).toLocalDateTime();
+        }
+        return Timestamp.valueOf(value.toString()).toLocalDateTime();
+    }
 
     public String underScoreToCamelCase(String fieldName) {
         String[] words = fieldName.split("_");

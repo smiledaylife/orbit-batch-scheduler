@@ -9,7 +9,7 @@
       版本管理方式：
       · Spring 全家桶版本由 dependencyManagement import spring-boot-dependencies 3.5.12 BOM 收敛；
       · MyBatis-Plus 3.5.7 / MyBatis 3.5.19 等偏离 BOM 的版本在此显式声明；
-      · 第三方开源库（fastjson / hutool / bcprov / jedis / jsch / pagehelper / lombok 等）在 dependencies 中显式锁版本。
+      · 第三方开源库（fastjson / bcprov / jedis / jsch / lombok 等）在 dependencies 中显式锁版本。
       构建基线：JDK 21（maven-compiler-plugin release=21 + -parameters）。
     -->
     <groupId>com.plt</groupId>
@@ -23,8 +23,7 @@
       PyPI 风格说明（AICode Begin 区域）：
       本项目遵循「零外部二方 jar」约束：plt-common-* 与 cpufp 系列依赖类全部以源码形式
       入驻本项目（保持原包名 com.platform.* / com.cpufp.* / com.natpcp.dsv2.common.*），
-      仅依赖开源库（Spring Boot / MyBatis-Plus / fastjson / hutool / bouncycastle / jedis / jsch /
-      pagehelper 等）与 orbit-executor SDK。
+      仅依赖开源库（Spring Boot / MyBatis-Plus / fastjson / bouncycastle / jedis / jsch 等）与 orbit-executor SDK。
     -->
 
     <properties>
@@ -36,17 +35,15 @@
         <spring-boot.version>3.5.14</spring-boot.version>
 
         <!-- Orbit 生态版本（与 orbit-admin / orbit-executor 已构建基线一致） -->
-        <orbit.version>1.0.0-SNAPSHOT</orbit.version>
+        <orbit.version>1.0.0</orbit.version>
         <mybatis-plus.version>3.5.7</mybatis-plus.version>
         <mybatis.version>3.5.19</mybatis.version>
 
         <!-- 第三方开源库版本（非 Spring 生态） -->
         <fastjson.version>1.2.84</fastjson.version>
-        <hutool.version>5.8.21</hutool.version>
         <bcprov.version>1.85</bcprov.version>
         <jedis.version>3.10.0</jedis.version>
         <jsch.version>0.1.55</jsch.version>
-        <pagehelper.version>5.3.3</pagehelper.version>
         <commons-lang3.version>3.18.0</commons-lang3.version>
         <lombok.version>1.18.30</lombok.version>
         <!-- 数据源连接池：Druid（替换 HikariCP），需使用 1.2.25+ 以兼容 Spring Boot 3 / JDK 21 -->
@@ -310,7 +307,8 @@
 
         <!-- Spring Batch：批处理引擎（技术储备，供后续大批量任务使用）。
              依赖 spring-batch-core/spring-batch-infrastructure，版本由 spring-boot-dependencies BOM 收敛；
-            JobRepository 复用主数据源（pweb001db），BATCH_* 元数据表由 spring.batch.jdbc.initialize-schema 自动创建。 -->
+            JobRepository 使用独立批数据源（pbat001db，@BatchDataSource），元数据表前缀 DSV2_BATCH_，
+            initialize-schema=never，表由 DBA 按 sql/batch_schema_postgresql.sql（加前缀）手工创建。 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-batch</artifactId>
@@ -342,12 +340,6 @@
             <version>${fastjson.version}</version>
         </dependency>
 
-        <!-- Hutool：GenericDataAccessService(ObjectUtil) / EncoderUtil(Log) 等 -->
-        <dependency>
-            <groupId>cn.hutool</groupId>
-            <artifactId>hutool-all</artifactId>
-            <version>${hutool.version}</version>
-        </dependency>
 
         <!-- BouncyCastle：EncoderUtil SM4 加解密（连接信息密码/配置项密码） -->
         <dependency>
@@ -370,12 +362,6 @@
             <version>${jsch.version}</version>
         </dependency>
 
-        <!-- PageHelper：PLT 风格分页（GenericDataAccessService 的 Convert.startPage 包装层复用） -->
-        <dependency>
-            <groupId>com.github.pagehelper</groupId>
-            <artifactId>pagehelper</artifactId>
-            <version>${pagehelper.version}</version>
-        </dependency>
 
         <!-- Apache Commons Lang3：StringUtils 工具（versionNotice 任务文案比对） -->
         <dependency>
@@ -397,11 +383,6 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.orbit</groupId>
-            <artifactId>orbit-boot-support</artifactId>
-            <version>${orbit.version}</version>
         </dependency>
     </dependencies>
 
@@ -453,7 +434,7 @@
             <plugin>
                 <groupId>org.jacoco</groupId>
                 <artifactId>jacoco-maven-plugin</artifactId>
-                <version>0.8.10</version>
+                <version>0.8.12</version>
                 <configuration>
                     <skip>false</skip>
                     <outputDirectory>${project.build.directory}/site/jacoco</outputDirectory>

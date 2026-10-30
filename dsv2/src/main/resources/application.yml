@@ -26,3 +26,29 @@ spring:
       reload:
         enabled: true
         strategy: refresh
+  batch:
+    job:
+      enabled: false               # 禁止启动时自动执行 Job，仅由 @OrbitJob handler 显式触发
+    jdbc:
+      initialize-schema: never     # DSV2_BATCH_* 表由 DBA 手工创建；同库旧版 BATCH_* 生产表不可动
+      table-prefix: DSV2_BATCH_    # 元数据表前缀隔离（batchMetadataCleanup 任务同样基于该前缀）
+      # PostgreSQL 上 JobRepository 默认 SERIALIZABLE 会在多任务准点并发时触发 SSI 冲突，
+      # 官方建议改为 READ_COMMITTED（JobInstance 唯一性由 JOB_INST_UN 唯一约束保证）
+      isolation-level-for-create: read_committed
+
+# ---- dsv2 自定义配置（均可被 ConfigMap 覆盖） ----
+dsv2:
+  batch:
+    metadata:
+      retention-days: 180          # batchMetadataCleanup 保留天数
+  ssh:
+    strict-host-key-checking: "no" # ConfigCheck ROCKET_MQ 分支 SSH 主机密钥校验；生产配好 known_hosts 后建议改为 "yes"
+
+# 以下键必须由外部配置提供（无默认值）：
+#   spring.datasource.{url,username,password}            业务库 pweb001db
+#   spring.datasource.batch.{url,username,password}      批元数据库 pbat001db
+#   spring.data.redis.cluster.nodes / spring.data.redis.password
+#   spring.kafka.bootstrap-servers
+#   jasypt.encryptor.password                            SM4 密钥（仅 Secret 注入）
+#   pvc.backup.path / plt.localFileDirRoot
+#   orbit.executor.{admin-addresses,app-name,access-token}

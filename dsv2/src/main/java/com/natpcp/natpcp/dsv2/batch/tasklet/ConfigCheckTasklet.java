@@ -8,8 +8,6 @@
  */
 package com.natpcp.natpcp.dsv2.batch.tasklet;
 
-import ch.qos.logback.classic.Level;
-import ch.qos.logback.classic.LoggerContext;
 import com.alibaba.fastjson.JSON;
 import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.JSch;
@@ -22,9 +20,9 @@ import com.natpcp.natpcp.dsv2.dao.po.NoticePO;
 import com.natpcp.natpcp.dsv2.jobs.bo.ConfigBO;
 import com.natpcp.natpcp.dsv2.jobs.bo.ConfigCheckBO;
 import com.natpcp.natpcp.dsv2.service.NoticeService;
+import com.natpcp.natpcp.dsv2.util.ConnectionInfoValidator;
 import com.natpcp.natpcp.dsv2.util.EncoderUtil;
 import lombok.extern.slf4j.Slf4j;
-import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.scope.context.ChunkContext;
 import org.springframework.batch.core.step.tasklet.Tasklet;
@@ -54,13 +52,25 @@ import java.util.UUID;
 @Slf4j
 public class ConfigCheckTasklet implements Tasklet {
 
+    /** 外部连接（SSH / Redis）超时，避免巡检卡死在不可达的目标上 */
+    private static final int SSH_TIMEOUT_MS = 10_000;
+    private static final int REDIS_TIMEOUT_MS = 5_000;
+
     private final ConnectionInfoMapper connectionInfoMapper;
     private final NoticeService noticeService;
+    private final String strictHostKeyChecking;
 
     public ConfigCheckTasklet(ConnectionInfoMapper connectionInfoMapper,
                               NoticeService noticeService) {
+        this(connectionInfoMapper, noticeService, "no");
+    }
+
+    public ConfigCheckTasklet(ConnectionInfoMapper connectionInfoMapper,
+                              NoticeService noticeService,
+                              String strictHostKeyChecking) {
         this.connectionInfoMapper = connectionInfoMapper;
         this.noticeService = noticeService;
+        this.strictHostKeyChecking = strictHostKeyChecking == null ? "no" : strictHostKeyChecking;
     }
 
     @Override
@@ -80,17 +90,15 @@ public class ConfigCheckTasklet implements Tasklet {
             throw new IllegalArgumentException("连接信息不存在 connectionJobId=" + configCheckBO.getConnectionJobId());
         }
         String password = EncoderUtil.decrypt(connectionInfoPO.getPassword());
-        List<ConfigBO> configs = configCheckBO.getConfigs();
+        List<ConfigBO> configs = configCheckBO.getConfigs() == null
+                ? java.util.Collections.emptyList() : configCheckBO.getConfigs();
         List<String> differentList;
         switch (configEnum) {
             case LOG_LEVEL:
-                LoggerContext loggerContext = (LoggerContext) LoggerFactory.getILoggerFactory();
-                ch.qos.logback.classic.Logger currentLog = loggerContext.getLogger("root");
-                Level level = currentLog.getLevel();
-                break;
             case JVM_MEMORY:
-                break;
             case JVM_THREAD:
+                // 与原 plt-mgmt 实现一致：这三类检测尚未实现。显式记录，避免被误认为"检测通过"。
+                log.warn("配置检测类型 {} 尚未实现，本次跳过（connection={}）", configEnum, connectionInfoPO.getName());
                 break;
             case REDIS:
                 HashMap<String, String> redisConfigMap = getRedisConfigMap(connectionInfoPO, password);
@@ -106,12 +114,11 @@ public class ConfigCheckTasklet implements Tasklet {
                 }
                 break;
             case POSTGRES:
-                Class.forName("org.postgresql.Driver");
-                try (Connection connection = DriverManager.getConnection(connectionInfoPO.getUrl(),
+                try (Connection connection = DriverManager.getConnection(
+                        ConnectionInfoValidator.requireSafeJdbcUrl(connectionInfoPO.getUrl()),
                         connectionInfoPO.getAccount(), password);
-                     Statement statement = connection.createStatement()) {
-                    String sql = "select name,setting from pg_settings";
-                    ResultSet resultSet = statement.executeQuery(sql);
+                     Statement statement = connection.createStatement();
+                     ResultSet resultSet = statement.executeQuery("select name,setting from pg_settings")) {
                     HashMap<String, String> postgresConfigMap = new HashMap<>();
                     while (resultSet.next()) {
                         postgresConfigMap.put(resultSet.getString("name"), resultSet.getString("setting"));
@@ -127,30 +134,34 @@ public class ConfigCheckTasklet implements Tasklet {
                         sendNotice("Postgres配置异常：" + differentList, "Postgres配置异常：", connectionInfoPO);
                     }
                 } catch (Exception e) {
+                    log.warn("{}，数据库连接/检测失败，已发送通知: {}", connectionInfoPO.getName(), e.getMessage(), e);
                     sendNotice("数据库连接失败，请确认配置是否正确", "数据库连接失败", connectionInfoPO);
-                    log.info("{}，数据库连接失败已发送通知", connectionInfoPO.getName());
                 }
                 break;
             case ROCKET_MQ:
                 ChannelExec channelExec = null;
                 Session session = null;
                 try {
+                    // 路径会拼入远程 shell 命令，必须先做白名单校验（防命令注入）
+                    String remotePath = ConnectionInfoValidator.requireSafeAbsolutePath(connectionInfoPO.getPath());
                     JSch jSch = new JSch();
                     session = jSch.getSession(connectionInfoPO.getAccount(), connectionInfoPO.getUrl(),
-                            Integer.parseInt(connectionInfoPO.getPort()));
+                            ConnectionInfoValidator.requirePort(connectionInfoPO.getPort()));
                     session.setPassword(password);
 
                     Properties properties = new Properties();
-                    properties.put("StrictHostKeyChecking", "no");
+                    // 主机密钥校验策略可配置：默认 "no" 与原实现兼容；生产建议配置 known_hosts 后改为 "yes"
+                    properties.put("StrictHostKeyChecking", strictHostKeyChecking);
                     session.setConfig(properties);
+                    session.setTimeout(SSH_TIMEOUT_MS);
 
-                    session.connect();
+                    session.connect(SSH_TIMEOUT_MS);
 
                     channelExec = (ChannelExec) session.openChannel("exec");
                     InputStream in = channelExec.getInputStream();
                     InputStream err = channelExec.getErrStream();
-                    channelExec.setCommand("cat" + " " + connectionInfoPO.getPath());
-                    channelExec.connect();
+                    channelExec.setCommand("cat '" + remotePath + "'");
+                    channelExec.connect(SSH_TIMEOUT_MS);
 
                     String result = getResultByInputStream(in);
                     HashMap<String, String> configMap = new HashMap<>();
@@ -171,13 +182,13 @@ public class ConfigCheckTasklet implements Tasklet {
                         sendNotice("RocketMQ配置异常：" + differentList, "RocketMQ配置异常：", connectionInfoPO);
                     }
                 } catch (Exception e) {
+                    log.warn("{}，RocketMQ连接/检测失败，已发送通知: {}", connectionInfoPO.getName(), e.getMessage(), e);
                     sendNotice("RocketMQ连接失败，请确认配置是否正确", "RocketMQ连接失败", connectionInfoPO);
-                    log.info("{}，RocketMQ连接失败已发送通知", connectionInfoPO.getName());
                 } finally {
-                    if (!ObjectUtils.isEmpty(channelExec)) {
+                    if (channelExec != null) {
                         channelExec.disconnect();
                     }
-                    if (!ObjectUtils.isEmpty(session)) {
+                    if (session != null) {
                         session.disconnect();
                     }
                 }
@@ -219,18 +230,19 @@ public class ConfigCheckTasklet implements Tasklet {
     }
 
     private HashMap<String, String> getRedisConfigMap(ConnectionInfoPO connectionInfoPO, String password) {
-        try {
-            Jedis jedis = new Jedis(connectionInfoPO.getUrl(), Integer.parseInt(connectionInfoPO.getPort()));
+        // try-with-resources：历史实现从不 close()，每次巡检泄露一条 Redis 连接
+        try (Jedis jedis = new Jedis(connectionInfoPO.getUrl(),
+                ConnectionInfoValidator.requirePort(connectionInfoPO.getPort()), REDIS_TIMEOUT_MS)) {
             jedis.auth(password);
-            List<String> x = jedis.configGet("*");
+            List<String> kv = jedis.configGet("*");
             HashMap<String, String> configMap = new HashMap<>();
-            for (int i = 0; i + 1 < x.size(); i += 2) {
-                configMap.put(x.get(i), x.get(i + 1));
+            for (int i = 0; i + 1 < kv.size(); i += 2) {
+                configMap.put(kv.get(i), kv.get(i + 1));
             }
             return configMap;
         } catch (Exception e) {
+            log.warn("{}，redis连接失败，已发送通知: {}", connectionInfoPO.getName(), e.getMessage(), e);
             sendNotice("redis连接失败，请确认配置是否正确", "redis连接失败", connectionInfoPO);
-            log.info("{}，redis连接失败已发送通知", connectionInfoPO.getName());
             throw e;
         }
     }

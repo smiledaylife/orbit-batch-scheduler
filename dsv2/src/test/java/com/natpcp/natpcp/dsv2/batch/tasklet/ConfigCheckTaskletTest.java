@@ -225,6 +225,7 @@ class ConfigCheckTaskletTest {
         bo.setConfig("postgres");
         when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
         ConnectionInfoPO po = po();
+        po.setUrl("jdbc:postgresql://127.0.0.1:5432/db");
         when(connectionInfoMapper.selectById("c1")).thenReturn(po);
         // SQLException 构造内部会调用 DriverManager.getLogWriter，必须在 mockStatic 作用域之外构造
         java.sql.SQLException dbDown = new java.sql.SQLException("db down");
@@ -239,6 +240,52 @@ class ConfigCheckTaskletTest {
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
 verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+        }
+    }
+
+    @DisplayName("execute: POSTGRES 分支 JDBC URL 含危险参数时不建连，直接发通知")
+    @Test
+    void execute_shouldRejectDangerousJdbcUrl_whenPostgres() throws Exception {
+        ConfigCheckBO bo = new ConfigCheckBO();
+        bo.setConnectionJobId("c1");
+        bo.setConfig("postgres");
+        when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
+        ConnectionInfoPO po = po();
+        po.setUrl("jdbc:postgresql://127.0.0.1:5432/db?socketFactory=evil.Factory");
+        when(connectionInfoMapper.selectById("c1")).thenReturn(po);
+
+        try (MockedStatic<EncoderUtil> enc = mockStatic(EncoderUtil.class);
+             MockedStatic<java.sql.DriverManager> dm = mockStatic(java.sql.DriverManager.class)) {
+            enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
+
+            RepeatStatus status = tasklet.execute(contribution, chunkContext);
+
+            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
+            dm.verifyNoInteractions();
+            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+        }
+    }
+
+    @DisplayName("execute: ROCKET_MQ 路径含 shell 元字符时不建连，直接发通知")
+    @Test
+    void execute_shouldRejectUnsafePath_whenRocketMq() throws Exception {
+        ConfigCheckBO bo = new ConfigCheckBO();
+        bo.setConnectionJobId("c1");
+        bo.setConfig("rocketMQ");
+        when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
+        ConnectionInfoPO po = po();
+        po.setPath("/etc/broker.conf; rm -rf /");
+        when(connectionInfoMapper.selectById("c1")).thenReturn(po);
+
+        try (MockedStatic<EncoderUtil> enc = mockStatic(EncoderUtil.class);
+             MockedConstruction<com.jcraft.jsch.JSch> js = mockConstruction(com.jcraft.jsch.JSch.class)) {
+            enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
+
+            RepeatStatus status = tasklet.execute(contribution, chunkContext);
+
+            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
+            assertThat(js.constructed()).isEmpty();
+            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
         }
     }
 

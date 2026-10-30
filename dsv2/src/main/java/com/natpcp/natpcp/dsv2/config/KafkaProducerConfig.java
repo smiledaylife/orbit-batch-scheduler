@@ -22,11 +22,17 @@ import java.util.Properties;
 @Configuration
 public class KafkaProducerConfig {
 
-    /** 默认 Kafka 地址（与本工程 dev 环境地址一致，可被配置覆盖）。 */
-    static final String DEFAULT_BOOTSTRAP_SERVERS = "20.240.137.55:9092";
-
-    @Value("${spring.kafka.bootstrap-servers:" + DEFAULT_BOOTSTRAP_SERVERS + "}")
+    /** Kafka 地址：必须由外部配置（ConfigMap）提供，不在代码中内置任何环境地址。 */
+    @Value("${spring.kafka.bootstrap-servers}")
     private String bootstrapServers;
+
+    /** 单条消息投递总超时（含重试），避免 broker 不可达时阻塞业务线程过久。 */
+    @Value("${spring.kafka.producer.delivery-timeout-ms:15000}")
+    private int deliveryTimeoutMs;
+
+    /** send() 元数据获取/缓冲区满时的最大阻塞时间。 */
+    @Value("${spring.kafka.producer.max-block-ms:5000}")
+    private int maxBlockMs;
 
     /**
      * 单例 Kafka 生产者。kafka-clients 的 Producer 线程安全，进程内全局共享一个即可。
@@ -43,6 +49,9 @@ public class KafkaProducerConfig {
         props.put(ProducerConfig.ACKS_CONFIG, "all");
         props.put(ProducerConfig.RETRIES_CONFIG, 3);
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+        props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, deliveryTimeoutMs);
+        props.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, Math.min(deliveryTimeoutMs, 10000));
+        props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, maxBlockMs);
         return new KafkaProducer<>(props);
     }
 }

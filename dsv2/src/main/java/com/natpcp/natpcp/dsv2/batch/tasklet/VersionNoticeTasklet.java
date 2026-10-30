@@ -34,11 +34,11 @@ import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.data.redis.core.RedisTemplate;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 /**
  * 版本消息通知（Tasklet）。
@@ -84,11 +84,7 @@ public class VersionNoticeTasklet implements Tasklet {
     }
 
     private void checkVersionAndSendNotice() {
-        List<ConfigurationVersionPo> configVersions = genericDataAccessService.
-                queryForObjects(ConfigurationVersionPo.class,
-                        new ConfigurationVersionPo(), null, null);
-        Map<String, String> configVersionsMap = configVersions.stream().collect(
-                Collectors.toMap(ConfigurationVersionPo::getConfigName, ConfigurationVersionPo::getVersion));
+        Map<String, String> configVersionsMap = loadConfigVersions();
         Set<String> instances = redisManager.keysInPrefix(INSTANCE_PREFIX);
         NoticePO po = new NoticePO();
         if (instances != null && !instances.isEmpty()) {
@@ -120,6 +116,31 @@ public class VersionNoticeTasklet implements Tasklet {
         }
     }
 
+    /**
+     * 读取 tb_configuration_version 为 Map。
+     * 容忍 version 为 null（Collectors.toMap 对 null 值抛 NPE）与 config_name 重复（后者覆盖并告警），
+     * 避免一条脏数据让分钟级高频任务持续 FAILED。
+     */
+    private Map<String, String> loadConfigVersions() {
+        List<ConfigurationVersionPo> configVersions = genericDataAccessService.
+                queryForObjects(ConfigurationVersionPo.class,
+                        new ConfigurationVersionPo(), null, null);
+        Map<String, String> map = new HashMap<>();
+        if (configVersions == null) {
+            return map;
+        }
+        for (ConfigurationVersionPo po : configVersions) {
+            if (po == null || po.getConfigName() == null) {
+                continue;
+            }
+            if (map.containsKey(po.getConfigName())) {
+                log.warn("tb_configuration_version 存在重复 config_name={}，以后者为准", po.getConfigName());
+            }
+            map.put(po.getConfigName(), po.getVersion());
+        }
+        return map;
+    }
+
     private void sendNotice(NoticePO po, String instance, String config,
                             String instanceConfigVersion, String configVersion) {
         JSONObject instanceValue = analysisRedisKey(instance);
@@ -148,11 +169,7 @@ public class VersionNoticeTasklet implements Tasklet {
 
     private void checkGatewayForwardVersionAndSendNotice() {
         log.debug("大网关消息通知");
-        List<ConfigurationVersionPo> configVersions = genericDataAccessService.
-                queryForObjects(ConfigurationVersionPo.class,
-                        new ConfigurationVersionPo(), null, null);
-        Map<String, String> configVersionsMap = configVersions.stream().collect(
-                Collectors.toMap(ConfigurationVersionPo::getConfigName, ConfigurationVersionPo::getVersion));
+        Map<String, String> configVersionsMap = loadConfigVersions();
         Set<String> instances = redisManager.scanKeys("*_ng:*");
         if (instances == null || instances.isEmpty()) {
             return;
@@ -175,6 +192,12 @@ public class VersionNoticeTasklet implements Tasklet {
                 String forwardRule = key + "_" + GatewayForwardConstants.RULE_SUFFIX;
                 String forwardObjVersion = configVersionsMap.get(GatewayForwardConstants.FORWARD_OBJ_KEY);
                 String forwardRuleVersion = configVersionsMap.get(forwardRule);
+                if (forwardObjVersion == null || forwardRuleVersion == null) {
+                    log.warn("大网关实例 {} 对应的库内版本缺失（{}={}, {}={}），跳过比对",
+                            instance, GatewayForwardConstants.FORWARD_OBJ_KEY, forwardObjVersion,
+                            forwardRule, forwardRuleVersion);
+                    return;
+                }
 
                 if (!forwardObjVersion.equals(instanceForwardObjVersion)
                         || !forwardRuleVersion.equals(instanceForwardRuleVersion)) {
@@ -235,6 +258,9 @@ public class VersionNoticeTasklet implements Tasklet {
             String splitStr = str.split(SPLIT1)[1];
             if (StringUtils.isNotEmpty(splitStr) && !splitStr.equals("null")) {
                 String[] key = splitStr.split(SPLIT2);
+                if (key.length < 5) {
+                    throw new BizException(PltResponseStatus.PARAMETER_ERROR, "Redis中的版本实例数据异常: " + str);
+                }
                 json.put(SERVICE_ID, key[0]);
                 json.put(VERSION, key[1]);
                 json.put(HOST_ADDRESS, key[2]);

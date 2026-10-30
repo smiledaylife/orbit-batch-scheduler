@@ -33,6 +33,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -70,34 +71,40 @@ public class PvcServiceImpl implements PvcService {
             try {
                 date = LocalDate.parse(key + "01", formatter);
             } catch (Exception e) {
-                log.info("文件夹名不是日期格式{}", key);
-                throw new RuntimeException("文件夹名不是日期格式{" + key + "}");
+                log.warn("文件夹名不是日期格式 {}", key);
+                throw new IllegalArgumentException("文件夹名不是日期格式{" + key + "}", e);
             }
             if (date.isBefore(localDate)) {
                 String zipFileName = key + ".zip";
-                File zipFile = new File(backupPath + zipFileName);
+                File zipFile = new File(backupPath, zipFileName);
+                File backupDir = zipFile.getParentFile();
+                if (backupDir != null && !backupDir.isDirectory() && !backupDir.mkdirs()) {
+                    throw new IllegalStateException("备份目录不存在且无法创建: " + backupDir);
+                }
                 log.info("开始压缩");
                 try (FileOutputStream fos = new FileOutputStream(zipFile);
                      ZipOutputStream zos = new ZipOutputStream(fos)) {
                     for (PvcfileDTO dto : value) {
-                        File fileSource = new File(dto.getFilePath() + dto.getFileName());
+                        File fileSource = new File(dto.getFilePath(), dto.getFileName());
                         compressFolder(fileSource, zos, fileSource.getName());
                         log.info(fileSource.getName() + "压缩完成！");
                     }
                     log.info("完成压缩{}", key);
                 } catch (IOException e) {
-                    log.error(e.getMessage());
-                    throw new RuntimeException(key + "文件夹压缩失败");
+                    log.error("{} 文件夹压缩失败", key, e);
+                    throw new IllegalStateException(key + "文件夹压缩失败", e);
                 }
-                // 删除原文件夹
+                // 删除原文件夹（Files.walk 返回的 Stream 必须关闭，否则泄露目录句柄）
                 for (PvcfileDTO dto : value) {
-                    File fileSource = new File(dto.getFilePath() + dto.getFileName());
-                    Path path = Path.of(fileSource.getPath());
-                    try {
-                        Files.walk(path).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
+                    Path path = new File(dto.getFilePath(), dto.getFileName()).toPath();
+                    try (Stream<Path> walk = Files.walk(path)) {
+                        List<Path> toDelete = walk.sorted(Comparator.reverseOrder()).collect(Collectors.toList());
+                        for (Path p : toDelete) {
+                            Files.delete(p);
+                        }
                     } catch (IOException e) {
-                        log.error(e.getMessage());
-                        throw new RuntimeException(dto.getFilePath() + dto.getFileName() + "文件删除失败");
+                        log.error("{} 文件删除失败", path, e);
+                        throw new IllegalStateException(path + "文件删除失败", e);
                     }
                 }
             }
@@ -117,12 +124,20 @@ public class PvcServiceImpl implements PvcService {
                 LocalDateTime localDateTime = fileTime.toInstant().atZone(ZoneId.systemDefault())
                         .toLocalDateTime().plusMonths(3);
                 if (localDateTime.isBefore(LocalDateTime.now())) {
-                    file.toFile().delete();
+                    // 与原实现语义一致：仅删除文件/空目录（不递归）；但不再静默忽略失败结果
+                    try {
+                        Files.delete(file);
+                        log.info("已清理过期临时文件: {}", file);
+                    } catch (java.nio.file.DirectoryNotEmptyException e) {
+                        log.warn("过期目录非空，跳过删除: {}", file);
+                    } catch (IOException e) {
+                        log.warn("过期临时文件删除失败: {}", file, e);
+                    }
                 }
             }
         } catch (Exception e) {
-            log.error(e.getMessage());
-            throw new RuntimeException("临时文件删除失败");
+            log.error("临时文件删除失败", e);
+            throw new IllegalStateException("临时文件删除失败", e);
         }
     }
 
@@ -145,8 +160,8 @@ public class PvcServiceImpl implements PvcService {
                 }
             }
         } catch (Exception e) {
-            log.error(e.getMessage());
-            throw new RuntimeException("文件名格式错误");
+            log.error("读取 pvc 根目录 {} 失败", pvcRootPath, e);
+            throw new IllegalStateException("读取 pvc 根目录失败: " + pvcRootPath, e);
         }
         return records.stream().collect(Collectors.groupingBy(PvcfileDTO::getDateYM));
     }

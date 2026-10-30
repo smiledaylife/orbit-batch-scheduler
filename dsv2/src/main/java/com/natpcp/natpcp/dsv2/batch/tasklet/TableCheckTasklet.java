@@ -18,6 +18,7 @@ import com.natpcp.natpcp.dsv2.dao.po.NoticePO;
 import com.natpcp.natpcp.dsv2.jobs.AdminJobClient;
 import com.natpcp.natpcp.dsv2.jobs.bo.TableCheckBO;
 import com.natpcp.natpcp.dsv2.service.NoticeService;
+import com.natpcp.natpcp.dsv2.util.ConnectionInfoValidator;
 import com.natpcp.natpcp.dsv2.util.EncoderUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.core.StepContribution;
@@ -71,7 +72,9 @@ public class TableCheckTasklet implements Tasklet {
             throw new IllegalArgumentException("连接信息不存在 connectionJobId=" + tableCheckBO.getConnectionJobId());
         }
         String password = EncoderUtil.decrypt(connectionInfoPO.getPassword());
-        try (Connection connection = DriverManager.getConnection(connectionInfoPO.getUrl(),
+        // JDBC URL 来自库表录入，先做白名单校验（仅 PostgreSQL、禁止 socketFactory 等危险参数）
+        String jdbcUrl = ConnectionInfoValidator.requireSafeJdbcUrl(connectionInfoPO.getUrl());
+        try (Connection connection = DriverManager.getConnection(jdbcUrl,
                 connectionInfoPO.getAccount(), password)) {
             DatabaseMetaData metaData = connection.getMetaData();
             String tableName = tableCheckBO.getTableName();
@@ -114,6 +117,7 @@ public class TableCheckTasklet implements Tasklet {
                     format = nextDateTime.format(dateFormatter);
                     nextTableName = split[0] + format;
                 } catch (Exception e) {
+                    log.warn("分区表 {} 命名规则/日期解析失败: {}", tableName, e.getMessage(), e);
                     sendNotice(connectionInfoPO, "检测分区表" + tableName + "日期格式有误，请确认配置是否正确",
                             "【巡检异常】数据库：" + connectionInfoPO.getName());
                 }
@@ -133,9 +137,9 @@ public class TableCheckTasklet implements Tasklet {
                 }
             }
         } catch (SQLException e) {
+            log.warn("{}，数据库连接/元数据查询失败，已发送通知: {}", connectionInfoPO.getName(), e.getMessage(), e);
             sendNotice(connectionInfoPO, "数据库连接失败，请确认配置是否正确",
                     "【巡检异常】数据库：" + connectionInfoPO.getName());
-            log.info("{}，数据库连接失败已发送通知", connectionInfoPO.getName());
         }
         return RepeatStatus.FINISHED;
     }

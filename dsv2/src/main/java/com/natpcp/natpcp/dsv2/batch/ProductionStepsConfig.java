@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.natpcp.natpcp.dsv2.batch.item.UpdateRedisSyncItem;
 import com.natpcp.natpcp.dsv2.batch.processor.UpdateRedisItemProcessor;
 import com.natpcp.natpcp.dsv2.batch.reader.UpdateRedisItemReader;
+import com.natpcp.natpcp.dsv2.batch.tasklet.BatchMetadataCleanupTasklet;
 import com.natpcp.natpcp.dsv2.batch.tasklet.ClearNoticeTasklet;
 import com.natpcp.natpcp.dsv2.batch.tasklet.ConfigCheckTasklet;
 import com.natpcp.natpcp.dsv2.batch.tasklet.ConfigVersionTasklet;
@@ -39,12 +40,14 @@ import com.natpcp.natpcp.dsv2.service.impl.FunctionServiceImpl;
 import com.natpcp.natpcp.dsv2.service.impl.GenericDataAccessService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.springframework.batch.core.SkipListener;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.batch.BatchProperties;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
@@ -54,7 +57,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
-import java.time.LocalDateTime;
 
 /**
  * 生产任务 Spring Batch Step 配置。
@@ -109,6 +111,25 @@ public class ProductionStepsConfig {
                 .retry(Exception.class)
                 .skipLimit(5)
                 .skip(Exception.class)
+                // 被跳过的 key 意味着该规则表未同步到 Redis，必须显式告警而不是静默 COMPLETED
+                .listener(new SkipListener<UpdateRedisSyncItem, UpdateRedisSyncItem>() {
+                    @Override
+                    public void onSkipInRead(Throwable t) {
+                        log.error("updateRedisInfo 读取阶段跳过", t);
+                    }
+
+                    @Override
+                    public void onSkipInProcess(UpdateRedisSyncItem item, Throwable t) {
+                        log.error("updateRedisInfo 跳过 redisKey={}（DB 查询/序列化失败，该 key 本轮未同步）",
+                                item.getRedisKey(), t);
+                    }
+
+                    @Override
+                    public void onSkipInWrite(UpdateRedisSyncItem item, Throwable t) {
+                        log.error("updateRedisInfo 跳过 redisKey={}（Redis 写入失败，该 key 本轮未同步）",
+                                item.getRedisKey(), t);
+                    }
+                })
                 .build();
     }
 
@@ -197,47 +218,29 @@ public class ProductionStepsConfig {
     public Step configCheckStep(JobRepository jobRepository,
                                 PlatformTransactionManager transactionManager,
                                 ConnectionInfoMapper connectionInfoMapper,
-                                NoticeService noticeService) {
+                                NoticeService noticeService,
+                                @Value("${dsv2.ssh.strict-host-key-checking:no}") String strictHostKeyChecking) {
         return new StepBuilder("configCheckStep", jobRepository)
-                .tasklet(new ConfigCheckTasklet(connectionInfoMapper, noticeService), transactionManager)
+                .tasklet(new ConfigCheckTasklet(connectionInfoMapper, noticeService, strictHostKeyChecking),
+                        transactionManager)
                 .build();
     }
 
     /**
-     * 元数据清理 Step：删除保留期（默认 180 天）之前的 BATCH_* 记录。
-     * 传参用 java.sql.Timestamp（列类型 timestamp without time zone，避免 String 隐式转换失败）。
+     * 元数据清理 Step：删除保留期（默认 180 天）之前的 JobRepository 元数据。
+     * 表名使用 spring.batch.jdbc.table-prefix（生产为 DSV2_BATCH_）拼接，
+     * 绝不能落到同库旧版 Spring Batch 4.x 的 BATCH_* 生产表上。
      */
     @Bean
     public Step batchMetadataCleanupStep(JobRepository jobRepository,
-                                         PlatformTransactionManager transactionManager,
-                                         JdbcTemplate batchJdbcTemplate) {
+                                         @Qualifier("batchTransactionManager") PlatformTransactionManager batchTransactionManager,
+                                         JdbcTemplate batchJdbcTemplate,
+                                         BatchProperties batchProperties,
+                                         @Value("${dsv2.batch.metadata.retention-days:180}") int retentionDays) {
+        String tablePrefix = batchProperties.getJdbc().getTablePrefix();
         return new StepBuilder("batchMetadataCleanupStep", jobRepository)
-                .tasklet((contribution, chunkContext) -> {
-                    int retentionDays = 180;
-                    java.sql.Timestamp cutoff = java.sql.Timestamp.valueOf(LocalDateTime.now().minusDays(retentionDays));
-                    log.info("batchMetadataCleanup 清理 {} 之前的 JobRepository 元数据", cutoff);
-                    // 按外键顺序删除：params/context -> step -> job_execution -> job_instance
-                    int params = batchJdbcTemplate.update(
-                            "DELETE FROM BATCH_JOB_EXECUTION_PARAMS p USING BATCH_JOB_EXECUTION e " +
-                                    "WHERE p.JOB_EXECUTION_ID = e.JOB_EXECUTION_ID AND e.CREATE_TIME < ?", cutoff);
-                    int stepCtx = batchJdbcTemplate.update(
-                            "DELETE FROM BATCH_STEP_EXECUTION_CONTEXT sc USING BATCH_STEP_EXECUTION s " +
-                                    "WHERE sc.STEP_EXECUTION_ID = s.STEP_EXECUTION_ID AND s.CREATE_TIME < ?", cutoff);
-                    int jobCtx = batchJdbcTemplate.update(
-                            "DELETE FROM BATCH_JOB_EXECUTION_CONTEXT c USING BATCH_JOB_EXECUTION e " +
-                                    "WHERE c.JOB_EXECUTION_ID = e.JOB_EXECUTION_ID AND e.CREATE_TIME < ?", cutoff);
-                    int step = batchJdbcTemplate.update(
-                            "DELETE FROM BATCH_STEP_EXECUTION s USING BATCH_JOB_EXECUTION e " +
-                                    "WHERE s.JOB_EXECUTION_ID = e.JOB_EXECUTION_ID AND e.CREATE_TIME < ?", cutoff);
-                    int exec = batchJdbcTemplate.update(
-                            "DELETE FROM BATCH_JOB_EXECUTION WHERE CREATE_TIME < ?", cutoff);
-                    int inst = batchJdbcTemplate.update(
-                            "DELETE FROM BATCH_JOB_INSTANCE i WHERE NOT EXISTS " +
-                                    "(SELECT 1 FROM BATCH_JOB_EXECUTION e WHERE e.JOB_INSTANCE_ID = i.JOB_INSTANCE_ID)");
-                    log.info("batchMetadataCleanup 完成: params={}, stepCtx={}, jobCtx={}, step={}, exec={}, orphanInstance={}",
-                            params, stepCtx, jobCtx, step, exec, inst);
-                    return org.springframework.batch.repeat.RepeatStatus.FINISHED;
-                }, transactionManager)
+                .tasklet(new BatchMetadataCleanupTasklet(batchJdbcTemplate, tablePrefix, retentionDays),
+                        batchTransactionManager)
                 .build();
     }
 }
