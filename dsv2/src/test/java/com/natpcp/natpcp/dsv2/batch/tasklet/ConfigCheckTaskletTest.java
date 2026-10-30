@@ -388,6 +388,8 @@ verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         bo.setConfigs(configs);
         when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
         ConnectionInfoPO po = po();
+        // Postgres 分支要求合法 JDBC URL（ConnectionInfoValidator 白名单校验）
+        po.setUrl("jdbc:postgresql://127.0.0.1:5432/db");
         when(connectionInfoMapper.selectById("c1")).thenReturn(po);
 
         try (MockedStatic<EncoderUtil> enc = mockStatic(EncoderUtil.class);

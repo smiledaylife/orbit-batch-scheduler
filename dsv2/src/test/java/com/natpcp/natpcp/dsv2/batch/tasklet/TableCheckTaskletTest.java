@@ -135,7 +135,7 @@ class TableCheckTaskletTest {
             when(conn.getMetaData()).thenReturn(meta);
             ResultSet rs = mock(ResultSet.class);
 lenient().when(rs.next()).thenReturn(false);
-lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
+            lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
 
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
@@ -165,7 +165,8 @@ verify(noticeService).sendToAdminAndOps(anyString(), anyString());
             when(conn.getMetaData()).thenReturn(meta);
             ResultSet rs = mock(ResultSet.class);
             when(rs.next()).thenReturn(true);
-lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
+            when(rs.getString("TABLE_NAME")).thenReturn("t_exists");
+            lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
 
             tasklet.execute(contribution, chunkContext);
 
@@ -201,7 +202,7 @@ lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
             ResultSet rs = mock(ResultSet.class);
             when(rs.next()).thenReturn(true, false);
             when(rs.getString("TABLE_NAME")).thenReturn("t_part_20261014");
-lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
+            lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
 
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
@@ -235,7 +236,7 @@ lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
             when(conn.getMetaData()).thenReturn(meta);
             ResultSet rs = mock(ResultSet.class);
 lenient().when(rs.next()).thenReturn(false);
-lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
+            lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
 
             tasklet.execute(contribution, chunkContext);
 
