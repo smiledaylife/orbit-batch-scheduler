@@ -9,8 +9,8 @@
  */
 package com.natpcp.natpcp.dsv2.batch.tasklet;
 
-import com.alibaba.fastjson.JSON;
 import com.natpcp.natpcp.dsv2.common.MessageDTO;
+import com.natpcp.natpcp.dsv2.util.JsonUtil;
 import com.natpcp.natpcp.dsv2.common.MonitorCommonTargetErrDTO;
 import com.natpcp.natpcp.dsv2.common.ServiceTool;
 import com.natpcp.natpcp.dsv2.service.PvcService;
@@ -97,7 +97,7 @@ public class PvcFileBackupTasklet implements Tasklet {
                     new MessageDTO<>(MonitorCommonTargetErrDTO.TABLE_NAME, dto);
             // 同步等待投递结果（受 delivery.timeout.ms 约束），避免 "已推送" 日志成为假阳性
             RecordMetadata metadata = kafkaProducer
-                    .send(new ProducerRecord<>(monitorTopic, JSON.toJSONString(message)))
+                    .send(new ProducerRecord<>(monitorTopic, JsonUtil.toJson(message)))
                     .get(SEND_WAIT_SECONDS, TimeUnit.SECONDS);
             log.info("监控消息已推送 Kafka topic={}, partition={}, offset={}, targetCode={}",
                     monitorTopic, metadata.partition(), metadata.offset(), targetCode);

@@ -9,7 +9,7 @@
       版本管理方式：
       · Spring 全家桶版本由 dependencyManagement import spring-boot-dependencies 3.5.12 BOM 收敛；
       · MyBatis-Plus 3.5.7 / MyBatis 3.5.19 等偏离 BOM 的版本在此显式声明；
-      · 第三方开源库（fastjson / bcprov / jedis / jsch / lombok 等）在 dependencies 中显式锁版本。
+      · 第三方开源库（bcprov / jedis / jsch / lombok 等）在 dependencies 中显式锁版本；JSON 统一使用 Spring Boot 管理的 Jackson。
       构建基线：JDK 21（maven-compiler-plugin release=21 + -parameters）。
     -->
     <groupId>com.plt</groupId>
@@ -23,7 +23,7 @@
       PyPI 风格说明（AICode Begin 区域）：
       本项目遵循「零外部二方 jar」约束：plt-common-* 与 cpufp 系列依赖类全部以源码形式
       入驻本项目（保持原包名 com.platform.* / com.cpufp.* / com.natpcp.dsv2.common.*），
-      仅依赖开源库（Spring Boot / MyBatis-Plus / fastjson / bouncycastle / jedis / jsch 等）与 orbit-executor SDK。
+      仅依赖开源库（Spring Boot / MyBatis-Plus / Jackson / bouncycastle / jedis / jsch 等）与 orbit-executor SDK。
     -->
 
     <properties>
@@ -40,10 +40,10 @@
         <mybatis.version>3.5.19</mybatis.version>
 
         <!-- 第三方开源库版本（非 Spring 生态） -->
-        <fastjson.version>1.2.84</fastjson.version>
         <bcprov.version>1.85</bcprov.version>
         <jedis.version>3.10.0</jedis.version>
-        <jsch.version>0.1.55</jsch.version>
+        <!-- com.jcraft:jsch 0.1.55 自 2018 年停更（仅支持过时算法）；改用维护中的 fork com.github.mwiede:jsch，包名不变 -->
+        <jsch.version>2.28.8</jsch.version>
         <commons-lang3.version>3.18.0</commons-lang3.version>
         <lombok.version>1.18.30</lombok.version>
         <!-- 数据源连接池：Druid（替换 HikariCP），需使用 1.2.25+ 以兼容 Spring Boot 3 / JDK 21 -->
@@ -334,12 +334,6 @@
         </dependency>
 
         <!-- JSON：TableCheckBO / ConfigCheckBO 参数解析、Notice 内容组装 -->
-        <dependency>
-            <groupId>com.alibaba</groupId>
-            <artifactId>fastjson</artifactId>
-            <version>${fastjson.version}</version>
-        </dependency>
-
 
         <!-- BouncyCastle：EncoderUtil SM4 加解密（连接信息密码/配置项密码） -->
         <dependency>
@@ -357,7 +351,7 @@
 
         <!-- JSch：ConfigCheck ROCKET_MQ 分支（SSH 读取服务器配置） -->
         <dependency>
-            <groupId>com.jcraft</groupId>
+            <groupId>com.github.mwiede</groupId>
             <artifactId>jsch</artifactId>
             <version>${jsch.version}</version>
         </dependency>

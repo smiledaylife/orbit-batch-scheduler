@@ -1,11 +1,10 @@
 package com.natpcp.natpcp.dsv2.batch.tasklet;
 
-import com.alibaba.fastjson.JSON;
+import com.natpcp.natpcp.dsv2.util.JsonUtil;
 import com.natpcp.natpcp.dsv2.batch.tasklet.ConfigCheckTasklet;
 import com.natpcp.natpcp.dsv2.batch.util.JobParamsHelper;
 import com.natpcp.natpcp.dsv2.dao.mapper.ConnectionInfoMapper;
 import com.natpcp.natpcp.dsv2.dao.po.ConnectionInfoPO;
-import com.natpcp.natpcp.dsv2.dao.po.NoticePO;
 import com.natpcp.natpcp.dsv2.jobs.bo.ConfigBO;
 import com.natpcp.natpcp.dsv2.jobs.bo.ConfigCheckBO;
 import com.natpcp.natpcp.dsv2.service.NoticeService;
@@ -72,7 +71,7 @@ class ConfigCheckTaskletTest {
 
     private Map<String, Object> jobParamsWith(ConfigCheckBO bo) {
         Map<String, Object> params = new HashMap<>();
-        params.put(JobParamsHelper.KEY_JOB_PARAMS, JSON.toJSONString(bo));
+        params.put(JobParamsHelper.KEY_JOB_PARAMS, JsonUtil.toJson(bo));
         return params;
     }
 
@@ -164,7 +163,7 @@ class ConfigCheckTaskletTest {
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -196,7 +195,7 @@ class ConfigCheckTaskletTest {
 
             tasklet.execute(contribution, chunkContext);
 
-            verify(noticeService, never()).insert(any(NoticePO.class));
+            verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -239,7 +238,7 @@ class ConfigCheckTaskletTest {
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -262,7 +261,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
             dm.verifyNoInteractions();
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -285,7 +284,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
             assertThat(js.constructed()).isEmpty();
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -315,7 +314,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -374,7 +373,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
                     .isInstanceOf(RuntimeException.class)
                     .hasMessageContaining("redis down");
             // 失败时发送 redis 连接失败通知（2 条：0101/0104）
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -408,7 +407,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
 
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-            verify(noticeService, org.mockito.Mockito.never()).insert(any(NoticePO.class));
+            verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -445,7 +444,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
             enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 }

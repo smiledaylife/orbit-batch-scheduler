@@ -10,7 +10,11 @@
  *   - updateRedisSyncStep 为 chunk（4）+ faultTolerant（retry 3 / skip 5），
  *     其余为单步 Tasklet；
  *   - updateRedisItemReader 必须保留 @StepScope：周期性触发时由 Spring Batch
- *     每次重建 Reader 实例，避免单例 Reader 迭代器耗尽后读到 0 条数据。
+ *     每次重建 Reader 实例，避免单例 Reader 迭代器耗尽后读到 0 条数据；
+ *   - 事务管理器：所有 Step 统一使用容器内的 PlatformTransactionManager（即 BATCH_* 元数据
+ *     所在数据源的 DataSourceTransactionManager）。各 Tasklet 的业务写入要么在同一数据源
+ *     （tb_notice 等），要么是 Redis / Kafka / SSH 等非事务资源，因此不单独为业务库配置
+ *     第二个事务管理器；若未来业务表迁至独立数据源，需为相应 Step 显式指定其事务管理器。
  */
 package com.natpcp.natpcp.dsv2.batch;
 
@@ -76,7 +80,7 @@ public class ProductionStepsConfig {
     /**
      * chunk 模式 Reader（@StepScope）：每次 Step 执行时由 Spring Batch 创建新的 Reader 实例，
      * 避免容器级单例 Reader 的迭代器在首次执行后被耗尽、后续执行读到 0 条数据的问题。
-     * prompt: 必须保留 @StepScope——updateRedisInfo 周期性触发，靠 scope 重建 iterator。
+     * 注意：必须保留 @StepScope——updateRedisInfo 周期性触发，靠 scope 重建 iterator。
      */
     @Bean
     @StepScope

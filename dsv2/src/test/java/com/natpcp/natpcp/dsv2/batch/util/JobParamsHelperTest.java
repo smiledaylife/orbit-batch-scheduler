@@ -1,6 +1,6 @@
 package com.natpcp.natpcp.dsv2.batch.util;
 
-import com.alibaba.fastjson.JSON;
+import com.natpcp.natpcp.dsv2.util.JsonUtil;
 import com.natpcp.natpcp.dsv2.batch.util.JobParamsHelper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -46,7 +46,7 @@ class JobParamsHelperTest {
         origin.put("name", "tableA");
         origin.put("count", 3);
         JobParameters jp = new JobParametersBuilder()
-                .addString(JobParamsHelper.KEY_JOB_PARAMS, JSON.toJSONString(origin))
+                .addString(JobParamsHelper.KEY_JOB_PARAMS, JsonUtil.toJson(origin))
                 .toJobParameters();
         Map<String, Object> result = JobParamsHelper.getParams(jp);
         assertThat(result).containsEntry("name", "tableA").containsEntry("count", 3);

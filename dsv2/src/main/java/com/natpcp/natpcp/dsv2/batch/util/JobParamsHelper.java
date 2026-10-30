@@ -8,7 +8,7 @@
  */
 package com.natpcp.natpcp.dsv2.batch.util;
 
-import com.alibaba.fastjson.JSON;
+import com.natpcp.natpcp.dsv2.util.JsonUtil;
 import org.springframework.batch.core.JobParameters;
 
 import java.util.Collections;
@@ -25,56 +25,35 @@ public final class JobParamsHelper {
     }
 
     /**
-     * 从 JobParameters 中读取 orbit 下发的业务参数 Map（无参任务返回空 Map）。
+     * 从 JobParameters 中读取 orbit 下发的业务参数 Map（无参任务 / 非法 JSON 返回空 Map）。
      */
     public static Map<String, Object> getParams(JobParameters jobParameters) {
         if (jobParameters == null) {
             return Collections.emptyMap();
         }
-        String json = jobParameters.getString(KEY_JOB_PARAMS);
-        if (json == null || json.trim().isEmpty()) {
-            return Collections.emptyMap();
-        }
-        try {
-            Map<String, Object> map = JSON.parseObject(json);
-            return map == null ? Collections.emptyMap() : map;
-        } catch (Exception e) {
-            return Collections.emptyMap();
-        }
+        return JsonUtil.toMap(jobParameters.getString(KEY_JOB_PARAMS));
     }
 
     /**
      * 从 Spring Batch 5 StepContext 的 Map 形式 JobParameters 中读取业务参数。
-     * StepContext.getJobParameters() 返回 Map<String,Object>；钥匙为标准键 jobParams。
+     * StepContext.getJobParameters() 返回 Map&lt;String,Object&gt;，键为标准键 jobParams。
      */
     public static Map<String, Object> getParamsMap(Map<String, Object> jobParameters) {
         if (jobParameters == null || jobParameters.isEmpty()) {
             return Collections.emptyMap();
         }
         Object value = jobParameters.get(KEY_JOB_PARAMS);
-        if (value == null) {
-            return Collections.emptyMap();
-        }
-        String json = value.toString();
-        if (json.trim().isEmpty()) {
-            return Collections.emptyMap();
-        }
-        try {
-            Map<String, Object> map = JSON.parseObject(json);
-            return map == null ? Collections.emptyMap() : map;
-        } catch (Exception e) {
-            return Collections.emptyMap();
-        }
+        return value == null ? Collections.emptyMap() : JsonUtil.toMap(value.toString());
     }
 
     /**
-     * 将业务参数 Map 序列化为 JobParameters。
+     * 将业务参数 Map 序列化为 JobParameters 字符串值（空参数固定为 "{}"）。
      */
     public static String toJson(Map<String, Object> params) {
         if (params == null || params.isEmpty()) {
             return "{}";
         }
-        return JSON.toJSONString(params);
+        return JsonUtil.toJson(params);
     }
 }
 /*

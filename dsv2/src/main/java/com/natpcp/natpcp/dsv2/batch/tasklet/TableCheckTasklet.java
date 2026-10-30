@@ -1,25 +1,27 @@
 /*
  * AICode Begin
- * TableCheckTasklet：TableCheck 任务 Tasklet（表检测）。
+ * TableCheckTasklet：TableCheck 任务（外部数据库表巡检）。
  *
- * 语义与原文 TableCheckJob.execute() 一致，参数来源改为 JobParameters（jobParams JSON）：
- *   - connectionJobId 经 ConnectionInfo（加密密码）连外部库
- *   - 检测表是否存在 / 分区表按时间规则提前检测
- *   - 回写最新表名到调度中心（AdminJobClient.updateJobParam）
+ * 迁移自 plt-mgmt TableCheckJob，业务语义保持不变：
+ *   1. 任务参数（TableCheckBO，由调度中心下发、经 JobParameters.jobParams 传入）指定连接信息 id 与表名；
+ *   2. 用 tb_connection_info 中的 JDBC URL / 账号 / 加密密码直连目标库；
+ *   3. onlyExist=false：仅检测表是否存在；
+ *      onlyExist=true/null：按命名规则（前缀+日期格式）与建表周期推算"下一张分区表"，
+ *      若其建表日期已进入 4 天预警窗口则检测是否已存在，存在时把最新表名回写调度中心；
+ *   4. 任一检测失败发送巡检异常通知（系统管理员 + 运维员）。
  */
 package com.natpcp.natpcp.dsv2.batch.tasklet;
 
-import com.alibaba.fastjson.JSON;
 import com.natpcp.natpcp.dsv2.batch.util.JobParamsHelper;
 import com.natpcp.natpcp.dsv2.constant.TimeUnitEnum;
 import com.natpcp.natpcp.dsv2.dao.mapper.ConnectionInfoMapper;
 import com.natpcp.natpcp.dsv2.dao.po.ConnectionInfoPO;
-import com.natpcp.natpcp.dsv2.dao.po.NoticePO;
 import com.natpcp.natpcp.dsv2.jobs.AdminJobClient;
 import com.natpcp.natpcp.dsv2.jobs.bo.TableCheckBO;
 import com.natpcp.natpcp.dsv2.service.NoticeService;
 import com.natpcp.natpcp.dsv2.util.ConnectionInfoValidator;
 import com.natpcp.natpcp.dsv2.util.EncoderUtil;
+import com.natpcp.natpcp.dsv2.util.JsonUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.scope.context.ChunkContext;
@@ -37,13 +39,20 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * 表检测（Tasklet）。
  */
 @Slf4j
 public class TableCheckTasklet implements Tasklet {
+
+    /** 分区表预警窗口：下一张分区表建表日期距今不足该天数时开始检测 */
+    private static final int PARTITION_WARN_DAYS = 4;
+
+    /** 回写到调度中心任务参数中的键 */
+    private static final String PARAM_LATEST_TABLE_NAME = "latestTableName";
+
+    private static final String NOTICE_TITLE_PREFIX = "【巡检异常】数据库：";
 
     private final ConnectionInfoMapper connectionInfoMapper;
     private final NoticeService noticeService;
@@ -59,154 +68,170 @@ public class TableCheckTasklet implements Tasklet {
 
     @Override
     public RepeatStatus execute(StepContribution contribution, ChunkContext chunkContext) throws Exception {
-        // Spring Batch 5: StepContext.getJobParameters() 返回 Map<String,Object>（key=jobParams）
         Map<String, Object> jobParameters = chunkContext.getStepContext().getJobParameters();
         Map<String, Object> params = JobParamsHelper.getParamsMap(jobParameters);
         log.info("TableCheck 参数：{}", params);
-        TableCheckBO tableCheckBO = resolveTableCheckBO(params);
-        if (tableCheckBO == null) {
+
+        TableCheckBO bo = params.isEmpty() ? null : JsonUtil.convert(params, TableCheckBO.class);
+        if (bo == null || bo.getConnectionJobId() == null) {
             throw new IllegalArgumentException("表检测任务参数缺失或格式错误，请检查任务参数配置");
         }
-        ConnectionInfoPO connectionInfoPO = connectionInfoMapper.selectById(tableCheckBO.getConnectionJobId());
-        if (connectionInfoPO == null) {
-            throw new IllegalArgumentException("连接信息不存在 connectionJobId=" + tableCheckBO.getConnectionJobId());
+        ConnectionInfoPO conn = connectionInfoMapper.selectById(bo.getConnectionJobId());
+        if (conn == null) {
+            throw new IllegalArgumentException("连接信息不存在 connectionJobId=" + bo.getConnectionJobId());
         }
-        String password = EncoderUtil.decrypt(connectionInfoPO.getPassword());
+        if (bo.getTableName() == null) {
+            throw new IllegalArgumentException("表检测任务参数缺少 tableName，请检查任务参数配置");
+        }
+
         // JDBC URL 来自库表录入，先做白名单校验（仅 PostgreSQL、禁止 socketFactory 等危险参数）
-        String jdbcUrl = ConnectionInfoValidator.requireSafeJdbcUrl(connectionInfoPO.getUrl());
-        try (Connection connection = DriverManager.getConnection(jdbcUrl,
-                connectionInfoPO.getAccount(), password)) {
+        String jdbcUrl = ConnectionInfoValidator.requireSafeJdbcUrl(conn.getUrl());
+        String password = EncoderUtil.decrypt(conn.getPassword());
+        try (Connection connection = DriverManager.getConnection(jdbcUrl, conn.getAccount(), password)) {
             DatabaseMetaData metaData = connection.getMetaData();
-            String tableName = tableCheckBO.getTableName();
-            if (Boolean.FALSE.equals(tableCheckBO.getOnlyExist())) {
-                try (ResultSet table = metaData.getTables(null, null, tableName, null)) {
-                    if (!table.next()) {
-                        sendNotice(connectionInfoPO, "检测表" + tableName + "不存在，请确认配置是否正确",
-                                "【巡检异常】数据库：" + connectionInfoPO.getName());
-                    }
-                }
+            if (Boolean.FALSE.equals(bo.getOnlyExist())) {
+                checkTableExists(metaData, conn, bo.getTableName());
             } else {
-                String nextTableName = null;
-                LocalDate now = LocalDate.now();
-                LocalDate nextDateTime = null;
-                String format = null;
-                try {
-                    String latestTableName = tableCheckBO.getLatestTableName();
-                    String newNameRule = tableCheckBO.getNewNameRule();
-                    String[] split = newNameRule.split("\\+");
-                    String pattern = split[1];
-                    DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern(pattern);
-                    String latestDateStr = latestTableName.substring(split[0].length());
-
-                    LocalDate latestDate = getLocalDate(pattern, dateTimeFormatter, latestDateStr);
-                    TimeUnitEnum byUnit = TimeUnitEnum.getByUnit(tableCheckBO.getCreatePeriodUnit());
-                    Integer createPeriod = tableCheckBO.getCreatePeriod();
-                    if (byUnit == null) {
-                        throw new IllegalArgumentException("非法的时间单位: " + tableCheckBO.getCreatePeriodUnit());
-                    }
-                    nextDateTime = getLocalDate(latestDate, byUnit, createPeriod);
-
-                    if (nextDateTime == null) {
-                        throw new IllegalArgumentException("下次表生成日期计算为空");
-                    }
-                    String datePattern = pattern;
-                    if (pattern.contains("HH")) {
-                        datePattern = pattern.split("HH")[0];
-                    }
-                    DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern(datePattern);
-                    format = nextDateTime.format(dateFormatter);
-                    nextTableName = split[0] + format;
-                } catch (Exception e) {
-                    log.warn("分区表 {} 命名规则/日期解析失败: {}", tableName, e.getMessage(), e);
-                    sendNotice(connectionInfoPO, "检测分区表" + tableName + "日期格式有误，请确认配置是否正确",
-                            "【巡检异常】数据库：" + connectionInfoPO.getName());
-                }
-                if (nextDateTime != null && now.plusDays(4).isAfter(nextDateTime)) {
-                    try (ResultSet table = metaData.getTables(null, null, nextTableName, null)) {
-                        if (!table.next()) {
-                            sendNotice(connectionInfoPO, "检测分区表" + tableName + "不存在" + format + "日期，请确认配置是否正确",
-                                    "【巡检异常】数据库：" + connectionInfoPO.getName());
-                        } else {
-                            final String table_name = table.getString("TABLE_NAME");
-                            tableCheckBO.setLatestTableName(table_name);
-                            Object handlerName = chunkContext.getStepContext().getJobParameters().get("handlerName");
-                            adminJobClient.updateJobParam(String.valueOf(handlerName), "latestTableName", table_name);
-                            log.info("最新表名更新：{}", table_name);
-                        }
-                    }
-                }
+                checkNextPartitionTable(metaData, conn, bo, String.valueOf(jobParameters.get("handlerName")));
             }
         } catch (SQLException e) {
-            log.warn("{}，数据库连接/元数据查询失败，已发送通知: {}", connectionInfoPO.getName(), e.getMessage(), e);
-            sendNotice(connectionInfoPO, "数据库连接失败，请确认配置是否正确",
-                    "【巡检异常】数据库：" + connectionInfoPO.getName());
+            log.warn("{}，数据库连接/元数据查询失败，已发送通知: {}", conn.getName(), e.getMessage(), e);
+            notify(conn, "数据库连接失败，请确认配置是否正确");
         }
         return RepeatStatus.FINISHED;
     }
 
-    private TableCheckBO resolveTableCheckBO(Map<String, Object> params) {
-        if (params == null || params.isEmpty()) {
-            return null;
+    // ---------------------------------------------------------------- 检测分支
+
+    /** 普通表：仅检测存在性 */
+    private void checkTableExists(DatabaseMetaData metaData, ConnectionInfoPO conn, String tableName)
+            throws SQLException {
+        if (findTable(metaData, tableName) == null) {
+            notify(conn, "检测表" + tableName + "不存在，请确认配置是否正确");
         }
-        return JSON.parseObject(JSON.toJSONString(params), TableCheckBO.class);
     }
 
-    private void sendNotice(ConnectionInfoPO connectionInfoPO, String content, String title) {
-        NoticePO noticePo = new NoticePO();
-        noticePo.setId(UUID.randomUUID().toString());
-        noticePo.setBusinessId("");
-        noticePo.setContent(content);
-        noticePo.setStatus("0");
-        noticePo.setTitle(title);
-        noticePo.setReceiveTellerNo("");
-        noticePo.setReceiveRole("0101");
-        noticePo.setTellerName("");
-        noticePo.setCreateTime(LocalDateTime.now());
-        noticeService.insert(noticePo);
-        noticePo.setId(UUID.randomUUID().toString());
-        noticePo.setReceiveRole("0104");
-        noticeService.insert(noticePo);
-    }
-
-    private static LocalDate getLocalDate(LocalDate latestDate, TimeUnitEnum byUnit, Integer createPeriod) {
-        LocalDate nextDateTime = null;
-        switch (byUnit) {
-            case DAY:
-                nextDateTime = latestDate.plusDays(createPeriod);
-                break;
-            case WEEK:
-                nextDateTime = latestDate.plusWeeks(createPeriod).with(DayOfWeek.MONDAY);
-                break;
-            case MONTH:
-                nextDateTime = latestDate.plusMonths(createPeriod).withDayOfMonth(1);
-                break;
-            case YEAR:
-                nextDateTime = latestDate.plusYears(createPeriod).withDayOfYear(1);
-                break;
-            default:
-        }
-        return nextDateTime;
-    }
-
-    private static LocalDate getLocalDate(String pattern, DateTimeFormatter dateTimeFormatter, String latestDateStr) {
-        LocalDate latestDate;
+    /**
+     * 分区表：根据最新已存在表名推算下一张表，进入预警窗口后检测其是否已创建。
+     * 推算失败（命名规则/日期格式错误）发通知后结束，不中断任务。
+     */
+    private void checkNextPartitionTable(DatabaseMetaData metaData, ConnectionInfoPO conn,
+                                         TableCheckBO bo, String handlerName) throws SQLException {
+        NextPartition next;
         try {
-            latestDate = LocalDateTime.parse(latestDateStr, dateTimeFormatter).toLocalDate();
-        } catch (DateTimeException e) {
-            try {
-                latestDate = LocalDate.parse(latestDateStr, dateTimeFormatter);
-            } catch (DateTimeException e1) {
-                int year = Integer.parseInt(latestDateStr.substring(pattern.indexOf("y"),
-                        pattern.lastIndexOf("y") + 1));
-                if (pattern.contains("y") && pattern.contains("M")) {
-                    int month = Integer.parseInt(latestDateStr.substring(pattern.indexOf("M"), pattern.lastIndexOf("M") + 1));
-                    latestDate = LocalDate.of(year, month, 1);
-                } else {
-                    latestDate = LocalDate.of(year, 1, 1);
-                }
-            }
+            next = resolveNextPartition(bo);
+        } catch (RuntimeException e) {
+            log.warn("分区表 {} 命名规则/日期解析失败: {}", bo.getTableName(), e.getMessage(), e);
+            notify(conn, "检测分区表" + bo.getTableName() + "日期格式有误，请确认配置是否正确");
+            return;
         }
-        return latestDate;
+        if (!LocalDate.now().plusDays(PARTITION_WARN_DAYS).isAfter(next.date)) {
+            log.info("分区表 {} 下一张表 {} 尚未进入预警窗口", bo.getTableName(), next.tableName);
+            return;
+        }
+        String actualTableName = findTable(metaData, next.tableName);
+        if (actualTableName == null) {
+            notify(conn, "检测分区表" + bo.getTableName() + "不存在" + next.dateText + "日期，请确认配置是否正确");
+            return;
+        }
+        // 以数据库元数据返回的真实表名（大小写）回写
+        adminJobClient.updateJobParam(handlerName, PARAM_LATEST_TABLE_NAME, actualTableName);
+        log.info("最新表名更新：{}", actualTableName);
+    }
+
+    // ---------------------------------------------------------------- 分区表推算
+
+    /** 下一张分区表的推算结果 */
+    private static final class NextPartition {
+        final String tableName;
+        final LocalDate date;
+        final String dateText;
+
+        NextPartition(String tableName, LocalDate date, String dateText) {
+            this.tableName = tableName;
+            this.date = date;
+            this.dateText = dateText;
+        }
+    }
+
+    /**
+     * 命名规则形如 {@code prefix_+yyyyMM}：'+' 前为前缀，后为日期格式。
+     * 最新表名去掉前缀即为最新日期，按周期单位推进得到下一张表日期。
+     */
+    private static NextPartition resolveNextPartition(TableCheckBO bo) {
+        String[] rule = bo.getNewNameRule().split("\\+", 2);
+        if (rule.length != 2) {
+            throw new IllegalArgumentException("命名规则缺少 '+' 分隔的日期格式: " + bo.getNewNameRule());
+        }
+        String prefix = rule[0];
+        String pattern = rule[1];
+        String latestDateText = bo.getLatestTableName().substring(prefix.length());
+        LocalDate latestDate = parseLatestDate(pattern, latestDateText);
+
+        TimeUnitEnum unit = TimeUnitEnum.getByUnit(bo.getCreatePeriodUnit());
+        if (unit == null) {
+            throw new IllegalArgumentException("非法的时间单位: " + bo.getCreatePeriodUnit());
+        }
+        LocalDate nextDate = advance(latestDate, unit, bo.getCreatePeriod());
+        if (nextDate == null) {
+            throw new IllegalArgumentException("不支持的建表周期单位: " + unit);
+        }
+        // 表名中的日期只取到"日"级（规则含时分时截掉 HH 及其后部分）
+        String datePattern = pattern.contains("HH") ? pattern.split("HH")[0] : pattern;
+        String dateText = nextDate.format(DateTimeFormatter.ofPattern(datePattern));
+        return new NextPartition(prefix + dateText, nextDate, dateText);
+    }
+
+    private static LocalDate advance(LocalDate from, TimeUnitEnum unit, int period) {
+        switch (unit) {
+            case DAY:
+                return from.plusDays(period);
+            case WEEK:
+                return from.plusWeeks(period).with(DayOfWeek.MONDAY);
+            case MONTH:
+                return from.plusMonths(period).withDayOfMonth(1);
+            case YEAR:
+                return from.plusYears(period).withDayOfYear(1);
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * 解析最新表名中的日期：依次尝试 LocalDateTime、LocalDate；
+     * 格式只有年/年月（如 yyyyMM）时退化为手工截取年、月。
+     */
+    private static LocalDate parseLatestDate(String pattern, String dateText) {
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern(pattern);
+        try {
+            return LocalDateTime.parse(dateText, formatter).toLocalDate();
+        } catch (DateTimeException ignore) {
+            // 继续尝试
+        }
+        try {
+            return LocalDate.parse(dateText, formatter);
+        } catch (DateTimeException ignore) {
+            // 继续尝试
+        }
+        int year = Integer.parseInt(dateText.substring(pattern.indexOf('y'), pattern.lastIndexOf('y') + 1));
+        if (pattern.contains("M")) {
+            int month = Integer.parseInt(dateText.substring(pattern.indexOf('M'), pattern.lastIndexOf('M') + 1));
+            return LocalDate.of(year, month, 1);
+        }
+        return LocalDate.of(year, 1, 1);
+    }
+
+    // ---------------------------------------------------------------- 工具
+
+    /** 按名称查表，返回数据库元数据中的真实表名；不存在返回 null */
+    private static String findTable(DatabaseMetaData metaData, String tableName) throws SQLException {
+        try (ResultSet rs = metaData.getTables(null, null, tableName, null)) {
+            return rs.next() ? rs.getString("TABLE_NAME") : null;
+        }
+    }
+
+    private void notify(ConnectionInfoPO conn, String content) {
+        noticeService.sendToAdminAndOps(NOTICE_TITLE_PREFIX + conn.getName(), content);
     }
 }
 /*

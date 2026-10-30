@@ -157,3 +157,17 @@
 - `RedisManager.scanKeys` 不再吞异常返回 null；`VersionNoticeTasklet` 容忍重复/缺失版本记录；`PvcServiceImpl` 关闭 `Files.walk` 流并保留异常 cause。
 - `application.yml` 补充 `spring.batch.*`（含 `isolation-level-for-create: read_committed` 根治 SSI 冲突）与 dsv2 自定义键说明。
 - pom：orbit 版本对齐 1.0.0、移除不存在的 orbit-boot-support 与未使用的 hutool/pagehelper、jacoco 升级 0.8.12（JDK 21）；根 pom 将 dsv2 纳入 reactor 以进入 CI。
+
+### 2026-10-30 第二轮：可读性重构与依赖治理
+
+- JSON 统一为 Jackson：新增 `util/JsonUtil`（toJson / fromJson / toMap / parseMap / convert），
+  `JobParamsHelper`、`ConfigCheckTasklet`、`TableCheckTasklet`、`VersionNoticeTasklet`、
+  `PvcFileBackupTasklet` 及相关测试全部改用；`pom.xml` 移除 fastjson 1.2.84（EOL）。
+- 通知发送去重：新增 `NoticeService.sendToAdminAndOps(title, content)`（0101 系统管理员 + 0104 运维员），
+  替换三个 Tasklet 中各自复制的 "new NoticePO + insert ×2" 代码；`NoticeServiceImplTest` 增加用例。
+- `ConfigCheckTasklet` / `TableCheckTasklet` / `VersionNoticeTasklet` 重写为按职责拆分的小方法
+  （checkRedis/checkPostgres/checkRocketMq、resolveNextPartition、InstanceKey.parse 等），业务语义与通知文案不变；
+  `VersionNoticeTasklet` 库内版本改为只查询一次。
+- jsch：`com.jcraft:jsch 0.1.55`（2018 年停更）→ `com.github.mwiede:jsch 2.28.8`（包名不变，直接替换）。
+- `ProductionStepsConfig` 头部补充 Step 事务管理器选型说明；清理 "prompt:" / "用户决定" 等残留注释。
+- CI：`maven.yml` 构建失败时把 `[ERROR]` / 失败用例摘要输出为 annotation + Step Summary，并上传完整 `build.log` 产物。

@@ -32,6 +32,16 @@ public interface NoticeService {
     void insert(List<NoticePO> noticePOList);
 
     /**
+     * 向系统管理员（角色 0101）与运维员（角色 0104）各发送一条巡检/告警通知。
+     *
+     * <p>所有定时任务的告警通知均走此方法，统一 id 生成、状态、角色等字段填充。</p>
+     *
+     * @param title   通知标题
+     * @param content 通知内容
+     */
+    void sendToAdminAndOps(String title, String content);
+
+    /**
      * 定时删除通知记录。
      *
      * @param localDate 删除 create_time 早于该日期的历史通知
