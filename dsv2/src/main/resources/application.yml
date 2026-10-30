@@ -17,15 +17,6 @@ spring:
   threads:
     virtual:
       enabled: true
-  cloud:
-    kubernetes:
-      config:
-        enabled: true
-        name: dsv2-config
-        namespace: default
-      reload:
-        enabled: true
-        strategy: refresh
   batch:
     job:
       enabled: false               # 禁止启动时自动执行 Job，仅由 @OrbitJob handler 显式触发
@@ -36,7 +27,7 @@ spring:
       # 官方建议改为 READ_COMMITTED（JobInstance 唯一性由 JOB_INST_UN 唯一约束保证）
       isolation-level-for-create: read_committed
 
-# ---- dsv2 自定义配置（均可被 ConfigMap 覆盖） ----
+# ---- dsv2 自定义配置（均可被环境变量覆盖，如 DSV2_BATCH_METADATA_RETENTION_DAYS） ----
 dsv2:
   batch:
     metadata:
@@ -44,6 +35,9 @@ dsv2:
   ssh:
     strict-host-key-checking: "no" # ConfigCheck ROCKET_MQ 分支 SSH 主机密钥校验；生产配好 known_hosts 后建议改为 "yes"
 
+# 外部配置注入方式：K8s 原生 envFrom（ConfigMap → 普通配置，Secret → 凭据），
+# 不使用 spring-cloud-kubernetes（无该依赖；改配置后滚动重启 Pod 生效）。
+# Spring Boot 宽松绑定：spring.datasource.url ← SPRING_DATASOURCE_URL，以此类推。
 # 以下键必须由外部配置提供（无默认值）：
 #   spring.datasource.{url,username,password}            业务库 pweb001db
 #   spring.datasource.batch.{url,username,password}      批元数据库 pbat001db

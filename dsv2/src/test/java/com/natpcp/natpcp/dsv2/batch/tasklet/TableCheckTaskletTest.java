@@ -272,6 +272,64 @@ lenient().when(rs.next()).thenReturn(false);
 verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
+    @DisplayName("normalizeIdentifier: 数据库存小写（PostgreSQL）-> 转小写")
+    @Test
+    void normalizeIdentifier_shouldLowerCase_whenDbStoresLowerCase() throws Exception {
+        DatabaseMetaData meta = mock(DatabaseMetaData.class);
+        when(meta.storesLowerCaseIdentifiers()).thenReturn(true);
+        assertThat(TableCheckTasklet.normalizeIdentifier(meta, "T_Order")).isEqualTo("t_order");
+    }
+
+    @DisplayName("normalizeIdentifier: 数据库存大写（Oracle）-> 转大写")
+    @Test
+    void normalizeIdentifier_shouldUpperCase_whenDbStoresUpperCase() throws Exception {
+        DatabaseMetaData meta = mock(DatabaseMetaData.class);
+        when(meta.storesLowerCaseIdentifiers()).thenReturn(false);
+        when(meta.storesUpperCaseIdentifiers()).thenReturn(true);
+        assertThat(TableCheckTasklet.normalizeIdentifier(meta, "t_order")).isEqualTo("T_ORDER");
+    }
+
+    @DisplayName("normalizeIdentifier: 数据库保持原样（MySQL）-> 不变")
+    @Test
+    void normalizeIdentifier_shouldKeep_whenDbStoresMixedCase() throws Exception {
+        DatabaseMetaData meta = mock(DatabaseMetaData.class);
+        when(meta.storesLowerCaseIdentifiers()).thenReturn(false);
+        when(meta.storesUpperCaseIdentifiers()).thenReturn(false);
+        assertThat(TableCheckTasklet.normalizeIdentifier(meta, "T_Order")).isEqualTo("T_Order");
+    }
+
+    @DisplayName("execute: 参数大小写与库内不一致（PostgreSQL 小写存储）-> 归一化后命中，不发通知")
+    @Test
+    void execute_shouldFindTable_whenCaseDiffersButDbStoresLowerCase() throws Exception {
+        TableCheckBO bo = new TableCheckBO();
+        bo.setConnectionJobId("conn1");
+        bo.setTableName("T_Exists");
+        bo.setOnlyExist(false);
+        when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
+        when(connectionInfoMapper.selectById("conn1")).thenReturn(po());
+
+        try (MockedStatic<EncoderUtil> enc = mockStatic(EncoderUtil.class);
+             MockedStatic<DriverManager> dm = mockStatic(DriverManager.class)) {
+            enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
+            Connection conn = mock(Connection.class);
+            DatabaseMetaData meta = mock(DatabaseMetaData.class);
+            dm.when(() -> DriverManager.getConnection(anyString(), anyString(), anyString())).thenReturn(conn);
+            when(conn.getMetaData()).thenReturn(meta);
+            when(meta.storesLowerCaseIdentifiers()).thenReturn(true);
+            ResultSet hit = mock(ResultSet.class);
+            when(hit.next()).thenReturn(true);
+            when(hit.getString("TABLE_NAME")).thenReturn("t_exists");
+            ResultSet miss = mock(ResultSet.class);
+            lenient().when(miss.next()).thenReturn(false);
+            when(meta.getTables(any(), any(), org.mockito.ArgumentMatchers.eq("t_exists"), any())).thenReturn(hit);
+            lenient().when(meta.getTables(any(), any(), org.mockito.ArgumentMatchers.eq("T_Exists"), any()))
+                    .thenReturn(miss);
+
+            tasklet.execute(contribution, chunkContext);
+
+            verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
+        }
+    }
 }
 /*
  * AICode End

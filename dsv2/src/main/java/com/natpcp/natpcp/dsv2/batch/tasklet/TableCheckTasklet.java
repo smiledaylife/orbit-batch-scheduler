@@ -38,6 +38,7 @@ import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -223,8 +224,34 @@ public class TableCheckTasklet implements Tasklet {
 
     // ---------------------------------------------------------------- 工具
 
-    /** 按名称查表，返回数据库元数据中的真实表名；不存在返回 null */
+    /**
+     * 按名称查表，返回数据库元数据中的真实表名；不存在返回 null。
+     * <p>
+     * {@link DatabaseMetaData#getTables} 对表名大小写敏感，而各数据库对未加引号标识符的存储习惯不同
+     * （PostgreSQL 转小写、Oracle 转大写、MySQL 保持原样）。为避免运维填参大小写与库内不一致导致误报，
+     * 先按数据库声明的存储习惯归一化表名；若仍未命中，再以原始写法兜底查询一次。
+     */
     private static String findTable(DatabaseMetaData metaData, String tableName) throws SQLException {
+        String normalized = normalizeIdentifier(metaData, tableName);
+        String found = queryTable(metaData, normalized);
+        if (found == null && !normalized.equals(tableName)) {
+            found = queryTable(metaData, tableName);
+        }
+        return found;
+    }
+
+    /** 依据 storesLowerCaseIdentifiers / storesUpperCaseIdentifiers 归一化未加引号标识符的大小写 */
+    static String normalizeIdentifier(DatabaseMetaData metaData, String identifier) throws SQLException {
+        if (metaData.storesLowerCaseIdentifiers()) {
+            return identifier.toLowerCase(Locale.ROOT);
+        }
+        if (metaData.storesUpperCaseIdentifiers()) {
+            return identifier.toUpperCase(Locale.ROOT);
+        }
+        return identifier;
+    }
+
+    private static String queryTable(DatabaseMetaData metaData, String tableName) throws SQLException {
         try (ResultSet rs = metaData.getTables(null, null, tableName, null)) {
             return rs.next() ? rs.getString("TABLE_NAME") : null;
         }
