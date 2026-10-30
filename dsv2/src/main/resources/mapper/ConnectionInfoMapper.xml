@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- AICode Begin: ConnectionInfoMapper.xml 精简版（仅保留 selectById / queryByName） -->
+<mapper namespace="com.natpcp.natpcp.dsv2.dao.mapper.ConnectionInfoMapper">
+
+    <select id="selectById" resultType="com.natpcp.natpcp.dsv2.dao.po.ConnectionInfoPO">
+        select id, config, name, account, password, url, port, path
+        from tb_connection_info
+        where del_status = '0' and id=#{id}
+    </select>
+    <select id="queryByName" resultType="com.natpcp.natpcp.dsv2.dao.po.ConnectionInfoPO">
+        select id, config, name, account, password, url, port, path
+        from tb_connection_info
+        where del_status = '0' and name=#{name}
+    </select>
+</mapper>
+<!-- AICode End -->

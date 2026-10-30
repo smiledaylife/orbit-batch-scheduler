@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.natpcp.natpcp.dsv2.dao.mapper.FunctionMapper">
+  <select id="getUrls" resultType="java.lang.String">
+    select distinct func_action from tb_pmctl_auth_function
+    where func_action !='' and func_action is not null and del_status=1
+  </select>
+</mapper>

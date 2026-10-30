@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.natpcp.natpcp.dsv2.dao.mapper.NoticeMapper">
+
+    <resultMap id="noticePOMap" type="com.natpcp.natpcp.dsv2.dao.po.NoticePO">
+            <result property="id" column="id" jdbcType="VARCHAR"/>
+            <result property="title" column="title" jdbcType="VARCHAR"/>
+            <result property="content" column="content" jdbcType="VARCHAR"/>
+            <result property="receiveTellerNo" column="receive_teller_no" jdbcType="VARCHAR"/>
+            <result property="status" column="status" jdbcType="VARCHAR"/>
+            <result property="businessId" column="business_id" jdbcType="VARCHAR"/>
+            <result property="createTellerNo" column="create_teller_no" jdbcType="VARCHAR"/>
+            <result property="createTime" column="create_time" jdbcType="TIMESTAMP"/>
+            <result property="lastModTellerNo" column="last_mod_teller_no" jdbcType="VARCHAR"/>
+            <result property="lastModTime" column="last_mod_time" jdbcType="TIMESTAMP"/>
+            <result property="tellerName" column="teller_name" jdbcType="VARCHAR"/>
+            <result property="receiveRole" column="receive_role" jdbcType="VARCHAR"/>
+    </resultMap>
+
+    <sql id="notice_Column_List">
+        id,title,content,
+        receive_teller_no,status,business_id,
+        create_teller_no,create_time,last_mod_teller_no,
+        last_mod_time,receive_role
+    </sql>
+
+    <select id="listNoticePO" resultMap="noticePOMap">
+        select tpan.*,
+      (select role_name from tb_pmctl_auth_role tpaad where tpaad.role_code = tpan.receive_role) teller_name
+      from tb_pmctl_auth_notice tpan
+
+        where tpan.receive_role = #{receiveRole}
+        <if test="status != null and status !=''">
+          and tpan.status =  #{status}
+        </if>
+        order by tpan.create_time desc
+    </select>
+
+    <select id="listNoticePOByNumber"  resultMap="noticePOMap">
+      select
+      <include refid="notice_Column_List" />
+      from tb_pmctl_auth_notice
+      where status = '0' and
+        receive_role = #{receiveRole}
+      order by create_time desc  limit #{number}
+    </select>
+
+
+  <select id="numberUnReadNotice" resultType="java.lang.Integer">
+
+    select count(*)
+    from tb_pmctl_auth_notice
+    where status = '0' and
+        receive_role = #{receiveRole}
+  </select>
+
+    <update id="updateSetStatus" >
+        update tb_pmctl_auth_notice
+           set status='1'
+        where id=#{id}
+    </update>
+
+    <insert id="insert" keyColumn="id" keyProperty="id" parameterType="com.natpcp.natpcp.dsv2.dao.po.NoticePO" useGeneratedKeys="true">
+        insert into tb_pmctl_auth_notice
+        ( id,title,content
+        ,receive_teller_no,status,business_id
+        ,create_teller_no,create_time,last_mod_teller_no
+        ,last_mod_time,receive_role )
+        values (#{id,jdbcType=VARCHAR},#{title,jdbcType=VARCHAR},#{content,jdbcType=VARCHAR}
+        ,#{receiveTellerNo,jdbcType=VARCHAR},#{status,jdbcType=BIT},#{businessId,jdbcType=VARCHAR}
+        ,#{createTellerNo,jdbcType=VARCHAR},#{createTime,jdbcType=TIMESTAMP},#{lastModTellerNo,jdbcType=VARCHAR}
+        ,#{lastModTime,jdbcType=TIMESTAMP},#{receiveRole ,jdbcType=VARCHAR})
+    </insert>
+
+    <update id="oneClickReadNotice" >
+        update tb_pmctl_auth_notice  set status = '1'  where status = '0' and receive_role = #{receiveRole}
+    </update>
+
+    <delete id="clearNotice" >
+        delete from tb_pmctl_auth_notice where create_time <![CDATA[ <= ]]> #{localDate}
+    </delete>
+
+</mapper>

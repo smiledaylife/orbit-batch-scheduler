@@ -1,0 +1,479 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+      ds-V2：plt-mgmt 定时任务迁移执行器（不继承任何父 POM，完全自包含）。
+      版本管理方式：
+      · Spring 全家桶版本由 dependencyManagement import spring-boot-dependencies 3.5.12 BOM 收敛；
+      · MyBatis-Plus 3.5.7 / MyBatis 3.5.19 等偏离 BOM 的版本在此显式声明；
+      · 第三方开源库（fastjson / hutool / bcprov / jedis / jsch / pagehelper / lombok 等）在 dependencies 中显式锁版本。
+      构建基线：JDK 21（maven-compiler-plugin release=21 + -parameters）。
+    -->
+    <groupId>com.plt</groupId>
+    <artifactId>dsv2</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>DS-V2 :: plt-mgmt Jobs Executor</name>
+    <description>plt-mgmt 7 个定时任务迁移执行器：基于 orbit-executor SDK 注册为执行器</description>
+
+    <!--
+      PyPI 风格说明（AICode Begin 区域）：
+      本项目遵循「零外部二方 jar」约束：plt-common-* 与 cpufp 系列依赖类全部以源码形式
+      入驻本项目（保持原包名 com.platform.* / com.cpufp.* / com.natpcp.dsv2.common.*），
+      仅依赖开源库（Spring Boot / MyBatis-Plus / fastjson / hutool / bouncycastle / jedis / jsch /
+      pagehelper 等）与 orbit-executor SDK。
+    -->
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <!-- 构建基线 -->
+        <java.release>21</java.release>
+        <spring-boot.version>3.5.14</spring-boot.version>
+
+        <!-- Orbit 生态版本（与 orbit-admin / orbit-executor 已构建基线一致） -->
+        <orbit.version>1.0.0-SNAPSHOT</orbit.version>
+        <mybatis-plus.version>3.5.7</mybatis-plus.version>
+        <mybatis.version>3.5.19</mybatis.version>
+
+        <!-- 第三方开源库版本（非 Spring 生态） -->
+        <fastjson.version>1.2.84</fastjson.version>
+        <hutool.version>5.8.21</hutool.version>
+        <bcprov.version>1.85</bcprov.version>
+        <jedis.version>3.10.0</jedis.version>
+        <jsch.version>0.1.55</jsch.version>
+        <pagehelper.version>5.3.3</pagehelper.version>
+        <commons-lang3.version>3.18.0</commons-lang3.version>
+        <lombok.version>1.18.30</lombok.version>
+        <!-- 数据源连接池：Druid（替换 HikariCP），需使用 1.2.25+ 以兼容 Spring Boot 3 / JDK 21 -->
+        <druid.version>1.2.25</druid.version>
+        <!-- Spring Boot 3.5 默认 postgresql 为 42.7.x，升级至 42.7.12 修复安全漏洞 -->
+        <postgresql.version>42.7.12</postgresql.version>
+        <org.springframework.version>6.2.19</org.springframework.version>
+        <tomcat.version>10.1.56</tomcat.version>
+        <netty.version>4.1.137.Final</netty.version>
+        <logback.version>1.5.38</logback.version>
+        <kafka-clients.version>3.1.2</kafka-clients.version>
+        <micrometer.version>1.17.1</micrometer.version>
+        <log4j.version>2.25.5</log4j.version>
+        <org.springframework.retry.version>2.0.13</org.springframework.retry.version>
+
+        <!-- 构建插件版本 -->
+        <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
+        <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- ================================================================
+                 代码卫士漏洞修复：显式版本锁定（位于 BOM import 之前，第一声明优先）
+                 Spring Framework 6.2.17 -> 6.2.19（超危/高危组件批量修复）
+                 ================================================================ -->
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-core</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-beans</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-context</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-aop</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-expression</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-web</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-webmvc</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-jcl</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-tx</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-oxm</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-jdbc</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-context-support</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-test</artifactId>
+                <version>${org.springframework.version}</version>
+            </dependency>
+
+            <!-- Tomcat Embed 10.1.52 -> 10.1.56（超危组件） -->
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-core</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-el</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-websocket</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
+
+            <!-- Netty 4.1.131 -> 4.1.137.Final（超危组件，全家统一升级） -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-handler</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-common</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-buffer</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-transport</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-resolver</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec-http</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-transport-native-unix-common</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+            <!-- netty-codec-http 保留：最易被 HTTP 类库传递引入，锁定版本防止家族分叉 -->
+
+            <!-- Logback 1.5.32 -> 1.5.38（高危组件） -->
+            <dependency>
+                <groupId>ch.qos.logback</groupId>
+                <artifactId>logback-core</artifactId>
+                <version>${logback.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>ch.qos.logback</groupId>
+                <artifactId>logback-classic</artifactId>
+                <version>${logback.version}</version>
+            </dependency>
+
+            <!-- micrometer 1.15.10 -> 1.17.1（高危组件，核心+配套模块） -->
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-core</artifactId>
+                <version>${micrometer.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-observation</artifactId>
+                <version>${micrometer.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.micrometer</groupId>
+                <artifactId>micrometer-commons</artifactId>
+                <version>${micrometer.version}</version>
+            </dependency>
+
+            <!-- log4j-api 2.24.3 -> 2.25.5（中危组件，顺带） -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-api</artifactId>
+                <version>${log4j.version}</version>
+            </dependency>
+
+            <!-- spring-retry 2.0.12 -> 2.0.13（中危组件，顺带） -->
+            <dependency>
+                <groupId>org.springframework.retry</groupId>
+                <artifactId>spring-retry</artifactId>
+                <version>${org.springframework.retry.version}</version>
+            </dependency>
+
+            <!-- Spring 全家桶版本收敛（等价于继承 spring-boot-starter-parent 的版本管理部分） -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- 以下为偏离 BOM / BOM 未覆盖的版本，显式声明锁定 -->
+            <dependency>
+                <groupId>org.mybatis</groupId>
+                <artifactId>mybatis</artifactId>
+                <version>${mybatis.version}</version>
+            </dependency>
+            <!-- Spring Boot 3 必须使用 mybatis-plus-spring-boot3-starter（版本号与 Boot 2 线相同，artifact 不同） -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <!-- Druid 连接池（替换 HikariCP，BOM 未覆盖，显式锁定版本） -->
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>druid</artifactId>
+                <version>${druid.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- orbit-executor SDK：@OrbitJob 扫描、向调度中心注册、接收触发执行 -->
+        <dependency>
+            <groupId>com.orbit</groupId>
+            <artifactId>orbit-executor</artifactId>
+            <version>${orbit.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.orbit</groupId>
+            <artifactId>orbit-core</artifactId>
+            <version>${orbit.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <!-- Web 容器：executor 需要 HTTP 端口接收 Admin 派发（调度中心通过 URL 回调执行） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Redis：RedisManager / RedisTemplate 使用（gatewayRedis 集群） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- Kafka：监控消息手动推送（monitor_common_bus 主题，无监控 agent 时替代上报）。
+             使用轻量 kafka-clients 原生 Producer（本地仓库自备 3.1.2，不依赖 spring-kafka）。 -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>${kafka-clients.version}</version>
+        </dependency>
+
+        <!-- Spring Batch：批处理引擎（技术储备，供后续大批量任务使用）。
+             依赖 spring-batch-core/spring-batch-infrastructure，版本由 spring-boot-dependencies BOM 收敛；
+            JobRepository 复用主数据源（pweb001db），BATCH_* 元数据表由 spring.batch.jdbc.initialize-schema 自动创建。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-batch</artifactId>
+        </dependency>
+
+        <!-- Druid 数据源连接池（替换 HikariCP，主/批双数据源均使用） -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>druid</artifactId>
+        </dependency>
+
+        <!-- MyBatis-Plus：NoticeMapper / ConfigurationVersionServiceMapper extends BaseMapper -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+        </dependency>
+
+        <!-- 数据库驱动：pweb001db / pbat001db / TableCheck / ConfigCheck 直连检测 -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>${postgresql.version}</version>
+        </dependency>
+
+        <!-- JSON：TableCheckBO / ConfigCheckBO 参数解析、Notice 内容组装 -->
+        <dependency>
+            <groupId>com.alibaba</groupId>
+            <artifactId>fastjson</artifactId>
+            <version>${fastjson.version}</version>
+        </dependency>
+
+        <!-- Hutool：GenericDataAccessService(ObjectUtil) / EncoderUtil(Log) 等 -->
+        <dependency>
+            <groupId>cn.hutool</groupId>
+            <artifactId>hutool-all</artifactId>
+            <version>${hutool.version}</version>
+        </dependency>
+
+        <!-- BouncyCastle：EncoderUtil SM4 加解密（连接信息密码/配置项密码） -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>${bcprov.version}</version>
+        </dependency>
+
+        <!-- Jedis：ConfigCheck REDIS 分支（redis config get * 检测） -->
+        <dependency>
+            <groupId>redis.clients</groupId>
+            <artifactId>jedis</artifactId>
+            <version>${jedis.version}</version>
+        </dependency>
+
+        <!-- JSch：ConfigCheck ROCKET_MQ 分支（SSH 读取服务器配置） -->
+        <dependency>
+            <groupId>com.jcraft</groupId>
+            <artifactId>jsch</artifactId>
+            <version>${jsch.version}</version>
+        </dependency>
+
+        <!-- PageHelper：PLT 风格分页（GenericDataAccessService 的 Convert.startPage 包装层复用） -->
+        <dependency>
+            <groupId>com.github.pagehelper</groupId>
+            <artifactId>pagehelper</artifactId>
+            <version>${pagehelper.version}</version>
+        </dependency>
+
+        <!-- Apache Commons Lang3：StringUtils 工具（versionNotice 任务文案比对） -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+            <version>${commons-lang3.version}</version>
+        </dependency>
+
+        <!-- Lombok：编译期注解（JDK 21 需 1.18.30+，本地 natp_soma 已有 1.18.30） -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${lombok.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- 测试基线 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.orbit</groupId>
+            <artifactId>orbit-boot-support</artifactId>
+            <version>${orbit.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${maven-compiler-plugin.version}</version>
+                    <configuration>
+                        <release>${java.release}</release>
+                        <!-- Spring Framework 6.1 起不再从字节码局部变量表推断参数名，
+                             @RequestParam/@PathVariable 等注解依赖 -parameters 保留参数名 -->
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${maven-surefire-plugin.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <version>${spring-boot.version}</version>
+                    <executions>
+                        <execution>
+                            <id>repackage</id>
+                            <goals>
+                                <goal>repackage</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
+        <plugins>
+            <!-- compiler / spring-boot-maven-plugin 直接启用（不再依赖父 POM pluginManagement 下发） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.10</version>
+                <configuration>
+                    <skip>false</skip>
+                    <outputDirectory>${project.build.directory}/site/jacoco</outputDirectory>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>jacoco-initialize</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>prepare-package</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

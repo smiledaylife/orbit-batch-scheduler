@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  日志配置（方案B优化版）
+  说明：
+  1. 不依赖任何自定义类（无 com.cpufp.platform.* 引用），启动无需额外源码入驻。
+  2. 不使用 <if> 条件标签，因此不需要 Janino 依赖；环境差异化改用 Spring Boot 的 <springProfile>。
+  3. 保留滚动策略、级别过滤、异步输出及平台 MDC 字段（compose_rule_id / global_trace_id / sub_trace_id）。
+-->
+<configuration debug="false" scanPeriod="30 seconds" scan="true">
+  <springProperty scope="context" name="APP_NAME" source="spring.application.name"/>
+  <springProperty scope="context" name="SYS_NO" source="framework.sysNo"/>
+  <springProperty scope="context" name="SUB_SYS_NO" source="framework.subSysNo"/>
+  <springProperty scope="context" name="MAX_HISTORY_USE" source="logback.maxHistory"
+                  defaultValue="180"/>
+  <springProperty scope="context" name="framework.runEnv" source="framework.runEnv" defaultValue="k8s"/>
+  <springProperty scope="context" name="DATA_CENTER"    source="framework.dataCenter" defaultValue="H"/>
+
+  <springProperty scope="context" name="TOTAL_SIZE_CAP_USE" source="logback.size.totalSizeCap"
+                  defaultValue="20GB"/>
+  <springProperty scope="context" name="MAX_FILE_SIZE_USE" source="logback.size.MaxFileSize"
+                  defaultValue="100MB"/>
+  <springProperty scope="context" name="rootLoggerLevel" source="logback.rootLoggerLevel"
+                  defaultValue="INFO"/>
+  <springProperty scope="context" name="logPath" source="logback.logPath"
+                  defaultValue="./logs"/>
+
+  <!-- 设置变量（日志存放位置） -->
+  <property name="LOG_HOME" value="${logPath}"/>
+  <property scope="context" name="POD_NAME" value="${pod.name:-podname}"/>
+
+  <!-- 日志输出格式（仅标准转换字，%ip/%port/%dataCenter/%processId 为平台自定义，已移除） -->
+  <property name="LOG_PATTERN"
+            value="%d{yyyyMMdd-HH:mm:ss.SSS}|%level|${DATA_CENTER}|%X{compose_rule_id}|%X{global_trace_id}|%X{sub_trace_id}|%thread|%c|%M:%L|MSG=%msg%n"/>
+  <!-- 输出到日志文件（校验中日志） -->
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <File>${LOG_HOME}/app-${APP_NAME}-${SYS_NO}${SUB_SYS_NO}-${framework.runEnv}-${POD_NAME}.log</File>
+    <!-- 根据时间来制定滚动策略 %d(表示日期)每天生成一个日志文件-->
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <FileNamePattern>
+        ${LOG_HOME}/app-${APP_NAME}-${SYS_NO}${SUB_SYS_NO}.%d{yyyy-MM-dd}-${framework.runEnv}-${POD_NAME}.%i.log.gz
+      </FileNamePattern>
+      <maxHistory>${MAX_HISTORY_USE}</maxHistory>
+      <totalSizeCap>${TOTAL_SIZE_CAP_USE}</totalSizeCap>
+      <timeBasedFileNamingAndTriggeringPolicy
+              class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
+        <MaxFileSize>${MAX_FILE_SIZE_USE}</MaxFileSize>
+      </timeBasedFileNamingAndTriggeringPolicy>
+    </rollingPolicy>
+    <!-- 日志输出格式 -->
+    <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+      <pattern>${LOG_PATTERN}</pattern>
+    </encoder>
+    <prudent>false</prudent>
+  </appender>
+
+  <!-- 控制台输出 -->
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+      <!--格式化输出：%d表示日期，%thread表示线程名，%level：日志级别，%msg：日志消息，%n是换行符 -->
+      <pattern>
+        %d{yyyyMMdd-HH:mm:ss.SSS}|%level|${DATA_CENTER}|%X{compose_rule_id}|%X{global_trace_id}|%X{sub_trace_id}|%thread|%c|%M:%L|MSG=%msg%n
+      </pattern>
+    </encoder>
+  </appender>
+
+  <!-- 异步封装 -->
+  <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>512</queueSize>
+    <discardingThreshold>0</discardingThreshold>
+    <neverBlock>false</neverBlock>
+    <includeCallerData>true</includeCallerData>
+    <appender-ref ref="FILE"/>
+  </appender>
+  <appender name="ASYNC_STDOUT" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>512</queueSize>
+    <discardingThreshold>0</discardingThreshold>
+    <neverBlock>false</neverBlock>
+    <includeCallerData>true</includeCallerData>
+    <appender-ref ref="STDOUT"/>
+  </appender>
+
+  <root level="${rootLoggerLevel}">
+    <!-- 兜底：任何环境下均输出文件日志 -->
+    <appender-ref ref="ASYNC_FILE"/>
+    <!-- 开发/测试环境：额外输出控制台 -->
+    <springProfile name="dev,test,t1,t2,t4,sit1,sit2,local,default">
+      <appender-ref ref="ASYNC_STDOUT"/>
+    </springProfile>
+  </root>
+
+</configuration>

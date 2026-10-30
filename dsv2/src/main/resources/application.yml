@@ -1,0 +1,28 @@
+# ============================================================
+# DS-V2 执行器配置（plt-mgmt 定时任务迁移）
+# 基线：JDK 21 + Spring Boot 3.5 + orbit-executor SDK
+# 说明：
+#   - 迁移后由 orbit-admin（调度中心）统一触发，本工程不再自带 @Scheduled 线程池；
+#   - 数据源指向 plt-mgmt 管理端库（pweb001db），表 tb_pmctl_auth_notice /
+#     tb_pmctl_auth_function / tb_connection_info / tb_configuration_version 等；
+#   - Redis 使用 gatewayRedis 集群（与 plt-mgmt 一致）。
+# ============================================================
+server:
+  port: 8020
+  shutdown: graceful
+
+spring:
+  application:
+    name: dsv2
+  threads:
+    virtual:
+      enabled: true
+  cloud:
+    kubernetes:
+      config:
+        enabled: true
+        name: dsv2-config
+        namespace: default
+      reload:
+        enabled: true
+        strategy: refresh
