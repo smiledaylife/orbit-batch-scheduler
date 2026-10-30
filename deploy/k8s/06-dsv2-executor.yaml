@@ -1,0 +1,116 @@
+# DS-V2 执行器（plt-mgmt 定时任务迁移）部署示例。
+#
+# 配置注入方式与 orbit-executor 保持一致：K8s 原生 envFrom，
+#   - ConfigMap dsv2-config  → 非敏感配置（JDBC URL、Redis 节点、Kafka 地址、路径等）
+#   - Secret    dsv2-secret  → 凭据（数据库密码、Redis 密码、SM4 密钥、调度 access-token）
+# dsv2 不依赖 spring-cloud-kubernetes；Spring Boot 宽松绑定把 SPRING_DATASOURCE_URL 等环境变量
+# 映射为 spring.datasource.url。修改 ConfigMap/Secret 后需滚动重启 Deployment 生效。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsv2-config
+  namespace: orbit-system
+data:
+  # 业务库 pweb001db
+  SPRING_DATASOURCE_URL: jdbc:postgresql://pweb001db.example:5432/pweb001db
+  SPRING_DATASOURCE_USERNAME: pweb001
+  # 批元数据库 pbat001db（DSV2_BATCH_* 表）
+  SPRING_DATASOURCE_BATCH_URL: jdbc:postgresql://pbat001db.example:5432/pbat001db
+  SPRING_DATASOURCE_BATCH_USERNAME: pbat001
+  SPRING_DATA_REDIS_CLUSTER_NODES: redis-0.example:6379,redis-1.example:6379,redis-2.example:6379
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka.example:9092
+  PVC_BACKUP_PATH: /data/backup
+  PLT_LOCALFILEDIRROOT: /data/files
+  ORBIT_EXECUTOR_ADMIN_ADDRESSES: http://orbit-admin:8080
+  ORBIT_EXECUTOR_APP_NAME: dsv2
+  DSV2_BATCH_METADATA_RETENTION_DAYS: "180"
+  # 生产配好 known_hosts 后改为 "yes"
+  DSV2_SSH_STRICT_HOST_KEY_CHECKING: "no"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dsv2-secret
+  namespace: orbit-system
+type: Opaque
+stringData:
+  # 所有值均为示例。生产环境请通过 Secret 管理系统或 GitOps secret 注入，禁止提交真实凭据。
+  SPRING_DATASOURCE_PASSWORD: CHANGE_ME
+  SPRING_DATASOURCE_BATCH_PASSWORD: CHANGE_ME
+  SPRING_DATA_REDIS_PASSWORD: CHANGE_ME
+  JASYPT_ENCRYPTOR_PASSWORD: CHANGE_ME_SM4_KEY
+  ORBIT_EXECUTOR_ACCESS_TOKEN: CHANGE_ME
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsv2
+  namespace: orbit-system
+spec:
+  selector:
+    app: dsv2
+  ports:
+    - name: http
+      port: 8020
+      targetPort: 8020
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dsv2
+  namespace: orbit-system
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: dsv2
+  template:
+    metadata:
+      labels:
+        app: dsv2
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: dsv2
+          image: dsv2:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8020
+          envFrom:
+            - configMapRef:
+                name: dsv2-config
+            - secretRef:
+                name: dsv2-secret
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8020
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8020
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi

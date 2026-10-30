@@ -36,6 +36,8 @@
         <module>orbit-admin</module>
         <module>orbit-executor</module>
         <module>orbit-executor-sample</module>
+        <!-- dsv2：plt-mgmt 定时任务执行器（自包含 POM，不继承本父 POM，仅纳入 reactor 以便 CI 编译与测试） -->
+        <module>dsv2</module>
     </modules>
 
     <properties>

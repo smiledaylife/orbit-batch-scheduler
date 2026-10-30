@@ -4,7 +4,6 @@ import com.natpcp.natpcp.dsv2.batch.tasklet.VersionNoticeTasklet;
 import com.natpcp.natpcp.dsv2.common.BizException;
 import com.natpcp.natpcp.dsv2.constant.GatewayForwardConstants;
 import com.natpcp.natpcp.dsv2.dao.po.ConfigurationVersionPo;
-import com.natpcp.natpcp.dsv2.dao.po.NoticePO;
 import com.natpcp.natpcp.dsv2.redis.manager.RedisManager;
 import com.natpcp.natpcp.dsv2.service.NoticeService;
 import com.natpcp.natpcp.dsv2.service.impl.GenericDataAccessService;
@@ -30,6 +29,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -99,7 +99,7 @@ class VersionNoticeTaskletTest {
         RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
         assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-        verify(noticeService, never()).insert(any(NoticePO.class));
+        verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
     }
 
     @DisplayName("execute: instance version same -> no notice")
@@ -114,7 +114,7 @@ class VersionNoticeTaskletTest {
 
         tasklet.execute(contribution, chunkContext);
 
-        verify(noticeService, never()).insert(any(NoticePO.class));
+        verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
     }
 
     @DisplayName("execute: instance version diff -> notice sent")
@@ -131,7 +131,7 @@ class VersionNoticeTaskletTest {
 
         tasklet.execute(contribution, chunkContext);
         // sendNotice 内 insert 两次（0101/0104 角色）
-        verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+        verify(noticeService).sendToAdminAndOps(anyString(), anyString());
     }
 
     @DisplayName("execute: instance value not json -> BizException")
@@ -161,7 +161,7 @@ class VersionNoticeTaskletTest {
 
         tasklet.execute(contribution, chunkContext);
 
-        verify(noticeService, never()).insert(any(NoticePO.class));
+        verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
     }
 
     @DisplayName("execute: ng version diff -> notice")
@@ -178,7 +178,7 @@ class VersionNoticeTaskletTest {
         tasklet.execute(contribution, chunkContext);
 
         // sendNotice 内 insert 两次
-        verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+        verify(noticeService).sendToAdminAndOps(anyString(), anyString());
     }
 
     @DisplayName("execute: ng value empty -> skip")
@@ -193,7 +193,7 @@ class VersionNoticeTaskletTest {
 
         tasklet.execute(contribution, chunkContext);
 
-        verify(noticeService, never()).insert(any(NoticePO.class));
+        verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
     }
 }
 /*

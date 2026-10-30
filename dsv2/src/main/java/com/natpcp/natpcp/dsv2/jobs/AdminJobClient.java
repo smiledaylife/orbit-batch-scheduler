@@ -11,13 +11,16 @@
  *   3. PUT /orbit/admin/jobs/{name} 回写（body 为 JobInfo，params 为合并后的 Map）。
  *
  * 认证：与 SDK 一致，access-token 非空时携带 X-Orbit-Token 头（见 AdminAuthInterceptor）。
+ * 可用性：
+ *   - admin-addresses 与 SDK AdminClient 一致支持逗号分隔多地址，按顺序故障转移；
+ *   - RestTemplate 显式设置连接/读取超时，避免调度中心无响应时把 Tasklet（及其事务）挂死。
  */
 package com.natpcp.natpcp.dsv2.jobs;
 
-import com.orbit.core.model.JobInfo;
-import com.orbit.executor.config.ExecutorProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.orbit.core.model.JobInfo;
+import com.orbit.executor.config.ExecutorProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
@@ -25,10 +28,13 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -39,12 +45,22 @@ import java.util.Map;
 public class AdminJobClient {
 
     private static final String TOKEN_HEADER = "X-Orbit-Token";
+    private static final String JOBS_PATH = "/orbit/admin/jobs/";
+    private static final int CONNECT_TIMEOUT_MS = 3_000;
+    private static final int READ_TIMEOUT_MS = 10_000;
 
     @Autowired
     private ExecutorProperties executorProperties;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate = buildRestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    private static RestTemplate buildRestTemplate() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        factory.setReadTimeout(READ_TIMEOUT_MS);
+        return new RestTemplate(factory);
+    }
 
     /**
      * 回写任务的 params[key]=value。
@@ -55,17 +71,20 @@ public class AdminJobClient {
      * @throws IllegalStateException 回写失败（日志保留原始异常链路）
      */
     public void updateJobParam(String jobName, String key, Object value) {
-        String baseUrl = trimTrailingSlash(executorProperties.getAdminAddresses());
-        final String detailUrl = baseUrl + "/orbit/admin/jobs/" + jobName;
-        final String updateUrl = baseUrl + "/orbit/admin/jobs/" + jobName;
-
+        List<String> bases = resolveBases(executorProperties.getAdminAddresses());
+        if (bases.isEmpty()) {
+            throw new IllegalStateException("orbit.executor.admin-addresses 未配置，无法回写任务 jobName=" + jobName);
+        }
         HttpHeaders headers = buildHeaders();
 
-        // 1. 获取任务当前详情
+        // 1. 获取任务当前详情（多地址故障转移）
         JobInfo job;
         try {
-            ResponseEntity<Map> detailResp = restTemplate.exchange(detailUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
-            job = extractJobInfo(detailResp.getBody());
+            job = withFailover(bases, base -> {
+                ResponseEntity<Map> detailResp = restTemplate.exchange(base + JOBS_PATH + jobName,
+                        HttpMethod.GET, new HttpEntity<>(headers), Map.class);
+                return extractJobInfo(detailResp.getBody());
+            });
         } catch (Exception e) {
             throw new IllegalStateException("查询任务详情失败 jobName=" + jobName, e);
         }
@@ -82,16 +101,41 @@ public class AdminJobClient {
         job.setParams(params);
 
         // 3. 回写
+        final JobInfo body = job;
+        ResponseEntity<Map> resp;
         try {
-            HttpEntity<JobInfo> entity = new HttpEntity<>(job, headers);
-            ResponseEntity<Map> resp = restTemplate.exchange(updateUrl, HttpMethod.PUT, entity, Map.class);
-            if (!resp.getStatusCode().is2xxSuccessful()) {
-                throw new IllegalStateException("任务回写失败 jobName=" + jobName + ", status=" + resp.getStatusCode());
-            }
-            log.info("任务参数回写成功 jobName={}, key={}, value={}", jobName, key, value);
+            resp = withFailover(bases, base -> restTemplate.exchange(base + JOBS_PATH + jobName,
+                    HttpMethod.PUT, new HttpEntity<>(body, headers), Map.class));
         } catch (Exception e) {
             throw new IllegalStateException("任务回写失败 jobName=" + jobName, e);
         }
+        if (resp == null || !resp.getStatusCode().is2xxSuccessful()) {
+            throw new IllegalStateException("任务回写失败 jobName=" + jobName
+                    + ", status=" + (resp == null ? "null" : resp.getStatusCode()));
+        }
+        log.info("任务参数回写成功 jobName={}, key={}, value={}", jobName, key, value);
+    }
+
+    /** 单地址调用 */
+    @FunctionalInterface
+    private interface AdminCall<T> {
+        T call(String base) throws Exception;
+    }
+
+    /**
+     * 依次尝试各 admin 地址，首个成功即返回；全部失败抛出最后一次异常。
+     */
+    private <T> T withFailover(List<String> bases, AdminCall<T> call) throws Exception {
+        Exception last = null;
+        for (String base : bases) {
+            try {
+                return call.call(base);
+            } catch (Exception e) {
+                last = e;
+                log.warn("调用调度中心 {} 失败，尝试下一个地址: {}", base, e.getMessage());
+            }
+        }
+        throw last == null ? new IllegalStateException("no admin address") : last;
     }
 
     /**
@@ -129,15 +173,25 @@ public class AdminJobClient {
         return headers;
     }
 
-    private String trimTrailingSlash(String url) {
-        if (url == null) {
-            return "";
+    /**
+     * 解析 admin-addresses（逗号分隔，去空白、去尾斜杠），与 SDK AdminClient 保持一致。
+     */
+    static List<String> resolveBases(String adminAddresses) {
+        List<String> bases = new ArrayList<>();
+        if (adminAddresses == null) {
+            return bases;
         }
-        String trimmed = url;
-        while (trimmed.endsWith("/")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        for (String raw : adminAddresses.split(",")) {
+            String base = raw.trim();
+            if (base.isEmpty()) {
+                continue;
+            }
+            while (base.endsWith("/")) {
+                base = base.substring(0, base.length() - 1);
+            }
+            bases.add(base);
         }
-        return trimmed;
+        return bases;
     }
 }
 /*

@@ -49,7 +49,7 @@ class RedisManagerTest {
     void setUp() {
         redisManager = new RedisManager();
         ReflectionTestUtils.setField(redisManager, "redisTemplate", redisTemplate);
-        ReflectionTestUtils.setField(redisManager, "CACHE_KEY_CONNECTOR", ":");
+        ReflectionTestUtils.setField(redisManager, "cacheKeyConnector", ":");
     }
 
     @DisplayName("buildCacheKey: 前缀+连接符+key")
@@ -184,11 +184,24 @@ class RedisManagerTest {
         assertThat(result).isNotNull().isEmpty();
     }
 
-    @DisplayName("scanKeys: 集群连接异常返回 null")
+    @DisplayName("scanKeys: 未配置连接工厂时抛出异常（不得静默返回 null）")
     @Test
-    void scanKeys_shouldReturnNull_whenConnectionFails() {
+    void scanKeys_shouldThrow_whenConnectionFactoryMissing() {
         when(redisTemplate.getConnectionFactory()).thenReturn(null);
-        assertThat(redisManager.scanKeys("x:*")).isNull();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> redisManager.scanKeys("x:*"))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @DisplayName("scanKeys: 集群连接异常向上抛出")
+    @Test
+    void scanKeys_shouldPropagate_whenClusterConnectionFails() {
+        org.springframework.data.redis.connection.RedisConnectionFactory factory =
+                org.mockito.Mockito.mock(org.springframework.data.redis.connection.RedisConnectionFactory.class);
+        when(redisTemplate.getConnectionFactory()).thenReturn(factory);
+        when(factory.getClusterConnection()).thenThrow(new IllegalStateException("not cluster"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> redisManager.scanKeys("x:*"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not cluster");
     }
 
     @DisplayName("incrementByNumber: 委托 increment")

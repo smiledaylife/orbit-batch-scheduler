@@ -2,7 +2,7 @@
  * AICode Begin
  * ProductionJobsConfig：7 个生产任务 + 1 个元数据清理任务 的 Spring Batch Job 定义。
  *
- * 背景：用户决定将 dsv2 的 7 个 @OrbitJob 定时任务全部纳入 Spring Batch 统一治理，
+ * 背景：dsv2 的 7 个 @OrbitJob 定时任务全部纳入 Spring Batch 统一治理，
  *       获取：Job/Step 状态落库（ BATCH_*）、重启恢复、skip/retry 策略。
  *       本类仅保留 Job 装配（StartStep 常量 + Job 名称常量），
  *       Step 级装配已拆分至 ProductionStepsConfig。

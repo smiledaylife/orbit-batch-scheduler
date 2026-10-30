@@ -187,6 +187,32 @@ class AdminJobClientTest {
 
         adminJobClient.updateJobParam("tableCheck", "k", "v");
     }
+
+    @Test
+    @DisplayName("updateJobParam: 多地址时首地址失败自动切换到下一地址")
+    void updateJobParam_shouldFailoverToNextAdminAddress() {
+        executorProperties.setAdminAddresses("http://admin-a:8080, http://admin-b:8080/");
+        when(restTemplate.exchange(eq("http://admin-a:8080/orbit/admin/jobs/tableCheck"),
+                eq(HttpMethod.GET), any(HttpEntity.class), eq(Map.class)))
+                .thenThrow(new RuntimeException("conn refused"));
+        when(restTemplate.exchange(eq("http://admin-b:8080/orbit/admin/jobs/tableCheck"),
+                eq(HttpMethod.GET), any(HttpEntity.class), eq(Map.class)))
+                .thenReturn(detailResp());
+        when(restTemplate.exchange(eq("http://admin-a:8080/orbit/admin/jobs/tableCheck"),
+                eq(HttpMethod.PUT), any(HttpEntity.class), eq(Map.class)))
+                .thenReturn(detailResp());
+
+        adminJobClient.updateJobParam("tableCheck", "k", "v");
+    }
+
+    @Test
+    @DisplayName("resolveBases: 逗号分隔、去空白、去尾斜杠")
+    void resolveBases_shouldSplitAndTrim() {
+        org.assertj.core.api.Assertions.assertThat(
+                        AdminJobClient.resolveBases(" http://a:1/ ,, http://b:2// "))
+                .containsExactly("http://a:1", "http://b:2");
+        org.assertj.core.api.Assertions.assertThat(AdminJobClient.resolveBases(null)).isEmpty();
+    }
 }
 /*
  * AICode End

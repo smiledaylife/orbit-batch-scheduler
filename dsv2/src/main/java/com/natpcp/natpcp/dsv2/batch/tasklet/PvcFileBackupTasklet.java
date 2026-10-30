@@ -9,14 +9,15 @@
  */
 package com.natpcp.natpcp.dsv2.batch.tasklet;
 
-import com.alibaba.fastjson.JSON;
 import com.natpcp.natpcp.dsv2.common.MessageDTO;
+import com.natpcp.natpcp.dsv2.util.JsonUtil;
 import com.natpcp.natpcp.dsv2.common.MonitorCommonTargetErrDTO;
 import com.natpcp.natpcp.dsv2.common.ServiceTool;
 import com.natpcp.natpcp.dsv2.service.PvcService;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.springframework.batch.core.StepContribution;
 import org.springframework.batch.core.scope.context.ChunkContext;
 import org.springframework.batch.core.step.tasklet.Tasklet;
@@ -26,6 +27,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * pvc 文件备份与清理（Tasklet）。
@@ -35,6 +37,9 @@ public class PvcFileBackupTasklet implements Tasklet {
 
     /** 监控目标名称（与旧 MonitorUtil 上报一致）。 */
     private static final String MONITOR_TARGET_NAME = "管理端定时并备份失败";
+
+    /** 等待 Kafka 投递确认的最长秒数。 */
+    private static final long SEND_WAIT_SECONDS = 20L;
 
     private final PvcService pvcService;
     private final KafkaProducer<String, String> kafkaProducer;
@@ -60,7 +65,7 @@ public class PvcFileBackupTasklet implements Tasklet {
             String errorMsg = e.getMessage();
             log.error("pvcFileBackup 备份失败：{}", errorMsg, e);
             pushMonitorErr(errorMsg, MONITOR_TARGET_NAME, UUID.randomUUID().toString());
-            throw new RuntimeException(e.getMessage());
+            throw new IllegalStateException("pvcFileBackup 备份失败: " + errorMsg, e);
         }
         pvcService.deleteFilePvcTow();
         log.info("pvcFileBackup 任务执行结束");
@@ -90,10 +95,17 @@ public class PvcFileBackupTasklet implements Tasklet {
 
             MessageDTO<MonitorCommonTargetErrDTO> message =
                     new MessageDTO<>(MonitorCommonTargetErrDTO.TABLE_NAME, dto);
-            kafkaProducer.send(new ProducerRecord<>(monitorTopic, JSON.toJSONString(message)));
-            log.info("监控消息已推送 Kafka topic={}, targetCode={}", monitorTopic, targetCode);
+            // 同步等待投递结果（受 delivery.timeout.ms 约束），避免 "已推送" 日志成为假阳性
+            RecordMetadata metadata = kafkaProducer
+                    .send(new ProducerRecord<>(monitorTopic, JsonUtil.toJson(message)))
+                    .get(SEND_WAIT_SECONDS, TimeUnit.SECONDS);
+            log.info("监控消息已推送 Kafka topic={}, partition={}, offset={}, targetCode={}",
+                    monitorTopic, metadata.partition(), metadata.offset(), targetCode);
         } catch (Exception ex) {
             log.error("推送监控消息到 Kafka topic={} 失败", monitorTopic, ex);
         }
     }
 }
+/*
+ * AICode End
+ */

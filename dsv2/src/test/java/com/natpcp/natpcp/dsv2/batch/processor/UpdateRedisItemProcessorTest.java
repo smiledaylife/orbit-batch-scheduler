@@ -75,9 +75,9 @@ class UpdateRedisItemProcessorTest {
         assertThat(result).isSameAs(item);
         assertThat(result.isNeedUpdate()).isTrue();
         // HashMap 序列化键序不保证，用 JSON 解析后比较
-        java.util.List<Map<String, Object>> parsed =
-                com.alibaba.fastjson.JSON.parseObject(result.getDataString(),
-                        new com.alibaba.fastjson.TypeReference<java.util.List<Map<String, Object>>>() {
+        java.util.List<Map<String, Object>> parsed = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readValue(result.getDataString(),
+                        new com.fasterxml.jackson.core.type.TypeReference<java.util.List<Map<String, Object>>>() {
                         });
         assertThat(parsed).hasSize(1);
         assertThat(parsed.get(0)).containsEntry("id", 1).containsEntry("name", "mac");
@@ -91,7 +91,7 @@ class UpdateRedisItemProcessorTest {
         List<Map<String, Object>> rows = rowsWith(row);
 
         when(genericDataAccessService.convertColumn(any())).thenReturn(rows);
-        // fastjson 序列化 '{"id":1}' 与 ObjectMapper 输出 '[{"id":1}]' 并不相同，
+        // 序列化输出为 '[{"id":1}]'，
         // 这里直接 mock redis 返回与 DB 序列化一致的字符串
         when(redisManager.get("inRoute")).thenReturn("[{\"id\":1}]");
 

@@ -14,9 +14,9 @@ import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.data.redis.serializer.RedisSerializer;
 
 import jakarta.annotation.PostConstruct;
-import java.util.Objects;
 import java.util.Set;
 import java.util.Map;
+import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -32,7 +32,7 @@ public class RedisManager {
      * 不得使用*?[]等能够触发通配判断的字符
      */
     @Value("${framework.cache.key.connector::}")
-    private String CACHE_KEY_CONNECTOR;
+    private String cacheKeyConnector;
 
     private DefaultScriptExecutor<String> defaultScriptExecutor = null;
 
@@ -49,7 +49,7 @@ public class RedisManager {
      * 指定前缀 + key 拼接提供给redis的key（可选）
      */
     public String buildCacheKey(String prefix, String cacheKey) {
-        return prefix + CACHE_KEY_CONNECTOR + cacheKey;
+        return prefix + cacheKeyConnector + cacheKey;
     }
 
     // -------------------- key操作 --------------------
@@ -87,7 +87,7 @@ public class RedisManager {
     }
 
     public Set<String> keysInPrefix(String prefix) {
-        return this.keys(prefix + CACHE_KEY_CONNECTOR + "*");
+        return this.keys(prefix + cacheKeyConnector + "*");
     }
 
     public Set<String> keys(String pattern) {
@@ -182,26 +182,29 @@ public class RedisManager {
         return redisTemplate.getStringSerializer();
     }
 
+    /**
+     * 集群各 master 节点 SCAN 匹配 key。
+     *
+     * <p>任何 Redis 访问异常都会向上抛出（而不是吞掉返回 null）：
+     * 调用方是巡检/同步任务，静默返回空会让任务显示 COMPLETED 但实际什么都没检查。</p>
+     *
+     * @throws IllegalStateException 未配置连接工厂或非集群模式
+     */
     public Set<String> scanKeys(String pattern) {
         Set<String> keys = new HashSet<>();
         RedisConnectionFactory factory = redisTemplate.getConnectionFactory();
-
-        try (RedisClusterConnection clusterConnection = Objects.requireNonNull(factory).getClusterConnection()) {
-            Iterable<RedisClusterNode> redisClusterNodes = clusterConnection.clusterGetNodes();
-            for (RedisClusterNode node : redisClusterNodes) {
+        if (factory == null) {
+            throw new IllegalStateException("RedisTemplate 未配置 RedisConnectionFactory");
+        }
+        ScanOptions options = ScanOptions.scanOptions().match(pattern).count(500).build();
+        try (RedisClusterConnection clusterConnection = factory.getClusterConnection()) {
+            for (RedisClusterNode node : clusterConnection.clusterGetNodes()) {
                 if (node.isMaster() && node.isConnected()) {
-                    ScanOptions options = ScanOptions.scanOptions().match(pattern).count(500).build();
                     try (Cursor<byte[]> cursor = clusterConnection.scan(node, options)) {
-                        cursor.forEachRemaining(key -> keys.add(new String(key)));
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                        return null;
+                        cursor.forEachRemaining(key -> keys.add(new String(key, StandardCharsets.UTF_8)));
                     }
                 }
             }
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
         }
         return keys;
     }

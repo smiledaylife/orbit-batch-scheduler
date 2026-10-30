@@ -1,11 +1,10 @@
 package com.natpcp.natpcp.dsv2.batch.tasklet;
 
-import com.alibaba.fastjson.JSON;
+import com.natpcp.natpcp.dsv2.util.JsonUtil;
 import com.natpcp.natpcp.dsv2.batch.tasklet.ConfigCheckTasklet;
 import com.natpcp.natpcp.dsv2.batch.util.JobParamsHelper;
 import com.natpcp.natpcp.dsv2.dao.mapper.ConnectionInfoMapper;
 import com.natpcp.natpcp.dsv2.dao.po.ConnectionInfoPO;
-import com.natpcp.natpcp.dsv2.dao.po.NoticePO;
 import com.natpcp.natpcp.dsv2.jobs.bo.ConfigBO;
 import com.natpcp.natpcp.dsv2.jobs.bo.ConfigCheckBO;
 import com.natpcp.natpcp.dsv2.service.NoticeService;
@@ -72,7 +71,7 @@ class ConfigCheckTaskletTest {
 
     private Map<String, Object> jobParamsWith(ConfigCheckBO bo) {
         Map<String, Object> params = new HashMap<>();
-        params.put(JobParamsHelper.KEY_JOB_PARAMS, JSON.toJSONString(bo));
+        params.put(JobParamsHelper.KEY_JOB_PARAMS, JsonUtil.toJson(bo));
         return params;
     }
 
@@ -164,7 +163,7 @@ class ConfigCheckTaskletTest {
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -196,7 +195,7 @@ class ConfigCheckTaskletTest {
 
             tasklet.execute(contribution, chunkContext);
 
-            verify(noticeService, never()).insert(any(NoticePO.class));
+            verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -225,6 +224,7 @@ class ConfigCheckTaskletTest {
         bo.setConfig("postgres");
         when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
         ConnectionInfoPO po = po();
+        po.setUrl("jdbc:postgresql://127.0.0.1:5432/db");
         when(connectionInfoMapper.selectById("c1")).thenReturn(po);
         // SQLException 构造内部会调用 DriverManager.getLogWriter，必须在 mockStatic 作用域之外构造
         java.sql.SQLException dbDown = new java.sql.SQLException("db down");
@@ -238,7 +238,53 @@ class ConfigCheckTaskletTest {
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+verify(noticeService).sendToAdminAndOps(anyString(), anyString());
+        }
+    }
+
+    @DisplayName("execute: POSTGRES 分支 JDBC URL 含危险参数时不建连，直接发通知")
+    @Test
+    void execute_shouldRejectDangerousJdbcUrl_whenPostgres() throws Exception {
+        ConfigCheckBO bo = new ConfigCheckBO();
+        bo.setConnectionJobId("c1");
+        bo.setConfig("postgres");
+        when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
+        ConnectionInfoPO po = po();
+        po.setUrl("jdbc:postgresql://127.0.0.1:5432/db?socketFactory=evil.Factory");
+        when(connectionInfoMapper.selectById("c1")).thenReturn(po);
+
+        try (MockedStatic<EncoderUtil> enc = mockStatic(EncoderUtil.class);
+             MockedStatic<java.sql.DriverManager> dm = mockStatic(java.sql.DriverManager.class)) {
+            enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
+
+            RepeatStatus status = tasklet.execute(contribution, chunkContext);
+
+            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
+            dm.verifyNoInteractions();
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
+        }
+    }
+
+    @DisplayName("execute: ROCKET_MQ 路径含 shell 元字符时不建连，直接发通知")
+    @Test
+    void execute_shouldRejectUnsafePath_whenRocketMq() throws Exception {
+        ConfigCheckBO bo = new ConfigCheckBO();
+        bo.setConnectionJobId("c1");
+        bo.setConfig("rocketMQ");
+        when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
+        ConnectionInfoPO po = po();
+        po.setPath("/etc/broker.conf; rm -rf /");
+        when(connectionInfoMapper.selectById("c1")).thenReturn(po);
+
+        try (MockedStatic<EncoderUtil> enc = mockStatic(EncoderUtil.class);
+             MockedConstruction<com.jcraft.jsch.JSch> js = mockConstruction(com.jcraft.jsch.JSch.class)) {
+            enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
+
+            RepeatStatus status = tasklet.execute(contribution, chunkContext);
+
+            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
+            assertThat(js.constructed()).isEmpty();
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -268,7 +314,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -327,7 +373,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
                     .isInstanceOf(RuntimeException.class)
                     .hasMessageContaining("redis down");
             // 失败时发送 redis 连接失败通知（2 条：0101/0104）
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -342,6 +388,8 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
         bo.setConfigs(configs);
         when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
         ConnectionInfoPO po = po();
+        // Postgres 分支要求合法 JDBC URL（ConnectionInfoValidator 白名单校验）
+        po.setUrl("jdbc:postgresql://127.0.0.1:5432/db");
         when(connectionInfoMapper.selectById("c1")).thenReturn(po);
 
         try (MockedStatic<EncoderUtil> enc = mockStatic(EncoderUtil.class);
@@ -361,7 +409,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
 
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-            verify(noticeService, org.mockito.Mockito.never()).insert(any(NoticePO.class));
+            verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -398,7 +446,7 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
             enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-            verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 }

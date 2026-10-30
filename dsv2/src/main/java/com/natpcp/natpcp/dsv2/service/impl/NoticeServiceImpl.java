@@ -17,6 +17,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.UUID;
 import java.util.List;
 
 /**
@@ -25,6 +27,12 @@ import java.util.List;
 @Service
 @Slf4j
 public class NoticeServiceImpl implements NoticeService {
+
+    /** 告警通知接收角色：0101 系统管理员、0104 运维员 */
+    private static final List<String> ALERT_RECEIVE_ROLES = List.of("0101", "0104");
+
+    /** 通知状态：未读 */
+    private static final String NOTICE_STATUS_UNREAD = "0";
 
     @Autowired
     private NoticeMapper noticeMapper;
@@ -41,6 +49,23 @@ public class NoticeServiceImpl implements NoticeService {
         }
         for (NoticePO noticePO : noticePOList) {
             noticeMapper.insert(noticePO);
+        }
+    }
+
+    @Override
+    public void sendToAdminAndOps(String title, String content) {
+        for (String role : ALERT_RECEIVE_ROLES) {
+            NoticePO po = new NoticePO();
+            po.setId(UUID.randomUUID().toString());
+            po.setBusinessId("");
+            po.setTitle(title);
+            po.setContent(content);
+            po.setStatus(NOTICE_STATUS_UNREAD);
+            po.setReceiveTellerNo("");
+            po.setTellerName("");
+            po.setReceiveRole(role);
+            po.setCreateTime(LocalDateTime.now());
+            noticeMapper.insert(po);
         }
     }
 

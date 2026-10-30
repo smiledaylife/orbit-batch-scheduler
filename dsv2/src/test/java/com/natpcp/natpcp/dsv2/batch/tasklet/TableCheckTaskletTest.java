@@ -1,10 +1,9 @@
 package com.natpcp.natpcp.dsv2.batch.tasklet;
 
-import com.alibaba.fastjson.JSON;
+import com.natpcp.natpcp.dsv2.util.JsonUtil;
 import com.natpcp.natpcp.dsv2.batch.tasklet.TableCheckTasklet;
 import com.natpcp.natpcp.dsv2.batch.util.JobParamsHelper;
 import com.natpcp.natpcp.dsv2.dao.mapper.ConnectionInfoMapper;
-import com.natpcp.natpcp.dsv2.dao.po.NoticePO;
 import com.natpcp.natpcp.dsv2.dao.po.ConnectionInfoPO;
 import com.natpcp.natpcp.dsv2.jobs.AdminJobClient;
 import com.natpcp.natpcp.dsv2.jobs.bo.TableCheckBO;
@@ -73,12 +72,13 @@ class TableCheckTaskletTest {
     @BeforeEach
     void setUp() {
         tasklet = new TableCheckTasklet(connectionInfoMapper, noticeService, adminJobClient);
-        when(chunkContext.getStepContext()).thenReturn(stepContext);
+        // normalizeIdentifier 系列用例不经过 execute()，该桩对其而言未使用，故 lenient
+        lenient().when(chunkContext.getStepContext()).thenReturn(stepContext);
     }
 
     private Map<String, Object> jobParamsWith(TableCheckBO bo) {
         Map<String, Object> params = new HashMap<>();
-        params.put(JobParamsHelper.KEY_JOB_PARAMS, JSON.toJSONString(bo));
+        params.put(JobParamsHelper.KEY_JOB_PARAMS, JsonUtil.toJson(bo));
         return params;
     }
 
@@ -136,12 +136,12 @@ class TableCheckTaskletTest {
             when(conn.getMetaData()).thenReturn(meta);
             ResultSet rs = mock(ResultSet.class);
 lenient().when(rs.next()).thenReturn(false);
-lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
+            lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
 
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -166,11 +166,12 @@ verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
             when(conn.getMetaData()).thenReturn(meta);
             ResultSet rs = mock(ResultSet.class);
             when(rs.next()).thenReturn(true);
-lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
+            when(rs.getString("TABLE_NAME")).thenReturn("t_exists");
+            lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
 
             tasklet.execute(contribution, chunkContext);
 
-            verify(noticeService, never()).insert(any(NoticePO.class));
+            verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
@@ -202,7 +203,7 @@ lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
             ResultSet rs = mock(ResultSet.class);
             when(rs.next()).thenReturn(true, false);
             when(rs.getString("TABLE_NAME")).thenReturn("t_part_20261014");
-lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
+            lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
 
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
@@ -236,13 +237,12 @@ lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
             when(conn.getMetaData()).thenReturn(meta);
             ResultSet rs = mock(ResultSet.class);
 lenient().when(rs.next()).thenReturn(false);
-lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
+            lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
 
             tasklet.execute(contribution, chunkContext);
 
             // sendNotice 内对 insert 调用 2 次（0101 + 0104 角色）
-            verify(noticeService, org.mockito.Mockito.times(2))
-                    .insert(any(NoticePO.class));
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
             verify(adminJobClient, never()).updateJobParam(anyString(), anyString(), any());
         }
     }
@@ -270,7 +270,65 @@ lenient().when(meta.getTables(any(), any(), any(), any())).thenReturn(rs);
             RepeatStatus status = tasklet.execute(contribution, chunkContext);
 
             assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-verify(noticeService, org.mockito.Mockito.times(2)).insert(any(NoticePO.class));
+verify(noticeService).sendToAdminAndOps(anyString(), anyString());
+        }
+    }
+    @DisplayName("normalizeIdentifier: 数据库存小写（PostgreSQL）-> 转小写")
+    @Test
+    void normalizeIdentifier_shouldLowerCase_whenDbStoresLowerCase() throws Exception {
+        DatabaseMetaData meta = mock(DatabaseMetaData.class);
+        when(meta.storesLowerCaseIdentifiers()).thenReturn(true);
+        assertThat(TableCheckTasklet.normalizeIdentifier(meta, "T_Order")).isEqualTo("t_order");
+    }
+
+    @DisplayName("normalizeIdentifier: 数据库存大写（Oracle）-> 转大写")
+    @Test
+    void normalizeIdentifier_shouldUpperCase_whenDbStoresUpperCase() throws Exception {
+        DatabaseMetaData meta = mock(DatabaseMetaData.class);
+        when(meta.storesLowerCaseIdentifiers()).thenReturn(false);
+        when(meta.storesUpperCaseIdentifiers()).thenReturn(true);
+        assertThat(TableCheckTasklet.normalizeIdentifier(meta, "t_order")).isEqualTo("T_ORDER");
+    }
+
+    @DisplayName("normalizeIdentifier: 数据库保持原样（MySQL）-> 不变")
+    @Test
+    void normalizeIdentifier_shouldKeep_whenDbStoresMixedCase() throws Exception {
+        DatabaseMetaData meta = mock(DatabaseMetaData.class);
+        when(meta.storesLowerCaseIdentifiers()).thenReturn(false);
+        when(meta.storesUpperCaseIdentifiers()).thenReturn(false);
+        assertThat(TableCheckTasklet.normalizeIdentifier(meta, "T_Order")).isEqualTo("T_Order");
+    }
+
+    @DisplayName("execute: 参数大小写与库内不一致（PostgreSQL 小写存储）-> 归一化后命中，不发通知")
+    @Test
+    void execute_shouldFindTable_whenCaseDiffersButDbStoresLowerCase() throws Exception {
+        TableCheckBO bo = new TableCheckBO();
+        bo.setConnectionJobId("conn1");
+        bo.setTableName("T_Exists");
+        bo.setOnlyExist(false);
+        when(stepContext.getJobParameters()).thenReturn(jobParamsWith(bo));
+        when(connectionInfoMapper.selectById("conn1")).thenReturn(po());
+
+        try (MockedStatic<EncoderUtil> enc = mockStatic(EncoderUtil.class);
+             MockedStatic<DriverManager> dm = mockStatic(DriverManager.class)) {
+            enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
+            Connection conn = mock(Connection.class);
+            DatabaseMetaData meta = mock(DatabaseMetaData.class);
+            dm.when(() -> DriverManager.getConnection(anyString(), anyString(), anyString())).thenReturn(conn);
+            when(conn.getMetaData()).thenReturn(meta);
+            when(meta.storesLowerCaseIdentifiers()).thenReturn(true);
+            ResultSet hit = mock(ResultSet.class);
+            when(hit.next()).thenReturn(true);
+            when(hit.getString("TABLE_NAME")).thenReturn("t_exists");
+            ResultSet miss = mock(ResultSet.class);
+            lenient().when(miss.next()).thenReturn(false);
+            when(meta.getTables(any(), any(), org.mockito.ArgumentMatchers.eq("t_exists"), any())).thenReturn(hit);
+            lenient().when(meta.getTables(any(), any(), org.mockito.ArgumentMatchers.eq("T_Exists"), any()))
+                    .thenReturn(miss);
+
+            tasklet.execute(contribution, chunkContext);
+
+            verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
         }
     }
 }

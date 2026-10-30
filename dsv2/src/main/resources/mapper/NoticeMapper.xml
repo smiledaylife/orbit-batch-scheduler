@@ -26,43 +26,8 @@
         last_mod_time,receive_role
     </sql>
 
-    <select id="listNoticePO" resultMap="noticePOMap">
-        select tpan.*,
-      (select role_name from tb_pmctl_auth_role tpaad where tpaad.role_code = tpan.receive_role) teller_name
-      from tb_pmctl_auth_notice tpan
-
-        where tpan.receive_role = #{receiveRole}
-        <if test="status != null and status !=''">
-          and tpan.status =  #{status}
-        </if>
-        order by tpan.create_time desc
-    </select>
-
-    <select id="listNoticePOByNumber"  resultMap="noticePOMap">
-      select
-      <include refid="notice_Column_List" />
-      from tb_pmctl_auth_notice
-      where status = '0' and
-        receive_role = #{receiveRole}
-      order by create_time desc  limit #{number}
-    </select>
-
-
-  <select id="numberUnReadNotice" resultType="java.lang.Integer">
-
-    select count(*)
-    from tb_pmctl_auth_notice
-    where status = '0' and
-        receive_role = #{receiveRole}
-  </select>
-
-    <update id="updateSetStatus" >
-        update tb_pmctl_auth_notice
-           set status='1'
-        where id=#{id}
-    </update>
-
-    <insert id="insert" keyColumn="id" keyProperty="id" parameterType="com.natpcp.natpcp.dsv2.dao.po.NoticePO" useGeneratedKeys="true">
+    <!-- 主键 id 由应用侧生成 UUID，不使用数据库自增 -->
+    <insert id="insert" parameterType="com.natpcp.natpcp.dsv2.dao.po.NoticePO">
         insert into tb_pmctl_auth_notice
         ( id,title,content
         ,receive_teller_no,status,business_id
@@ -73,10 +38,6 @@
         ,#{createTellerNo,jdbcType=VARCHAR},#{createTime,jdbcType=TIMESTAMP},#{lastModTellerNo,jdbcType=VARCHAR}
         ,#{lastModTime,jdbcType=TIMESTAMP},#{receiveRole ,jdbcType=VARCHAR})
     </insert>
-
-    <update id="oneClickReadNotice" >
-        update tb_pmctl_auth_notice  set status = '1'  where status = '0' and receive_role = #{receiveRole}
-    </update>
 
     <delete id="clearNotice" >
         delete from tb_pmctl_auth_notice where create_time <![CDATA[ <= ]]> #{localDate}

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -16,6 +17,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -80,7 +83,21 @@ class NoticeServiceImplTest {
         noticeService.clearNotice(date);
         verify(noticeMapper).clearNotice(date);
     }
+    @Test
+    void sendToAdminAndOps_shouldInsertOneNoticePerRole() {
+        noticeService.sendToAdminAndOps("标题", "内容");
+
+        ArgumentCaptor<NoticePO> captor = ArgumentCaptor.forClass(NoticePO.class);
+        verify(noticeMapper, times(2)).insert(captor.capture());
+        List<NoticePO> inserted = captor.getAllValues();
+        assertThat(inserted).extracting(NoticePO::getReceiveRole).containsExactly("0101", "0104");
+        assertThat(inserted).allSatisfy(po -> {
+            assertThat(po.getId()).isNotBlank();
+            assertThat(po.getTitle()).isEqualTo("标题");
+            assertThat(po.getContent()).isEqualTo("内容");
+            assertThat(po.getStatus()).isEqualTo("0");
+            assertThat(po.getCreateTime()).isNotNull();
+        });
+        assertThat(inserted.get(0).getId()).isNotEqualTo(inserted.get(1).getId());
+    }
 }
-/*
- * AICode End
- */
