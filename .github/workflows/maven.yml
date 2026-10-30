@@ -42,4 +42,32 @@ jobs:
       # -ntp: 关闭依赖下载进度条，日志更清爽
       # verify: 跑完各模块的单元测试与打包验证
       - name: Build with Maven
-        run: mvn -B -ntp verify --file pom.xml
+        shell: bash
+        run: |
+          set -o pipefail
+          mvn -B -ntp verify --file pom.xml 2>&1 | tee build.log
+
+      # 构建失败时，把编译错误 / 失败用例摘要以 annotation 形式贴到 Checks 页
+      - name: Summarize build errors
+        if: failure()
+        shell: bash
+        run: |
+          grep -E '\[ERROR\]|<<< (FAILURE|ERROR)!|Tests run:.*(Failures: [1-9]|Errors: [1-9])' build.log \
+            | grep -vE 'Re-run Maven|For more information|\[Help [0-9]+\]|^\[ERROR\] *$' \
+            | head -n 60 > errors.log || true
+          if [ -s errors.log ]; then
+            split -l 6 -d errors.log chunk_
+            for f in chunk_*; do
+              msg=$(sed ':a;N;$!ba;s/\n/%0A/g' "$f")
+              echo "::error title=Maven build failed::${msg}"
+            done
+          fi
+          { echo '## Maven 构建失败摘要'; echo '```'; cat errors.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maven-build-log
+          path: build.log
+          retention-days: 7
