@@ -137,13 +137,17 @@ public class DispatchExecutor implements DisposableBean {
                     // 不在这里兜住，异常会杀死工作线程并打到 stderr。
                     log.error("[orbit-admin] dispatch failed for job {}", jobName, e);
                     if (guard) {
-                        outstanding.releaseByJob(jobName);
+                        // 必须按 logId 释放（带所有权校验），不能用 releaseByJob：
+                        // 后者先读 logIdByJob.get(jobName) 再释放「当前」的 logId，
+                        // 而 retryIntervalSeconds=0 时触发级重试可能已经抢先占有新一轮的 logId，
+                        // 此时 releaseByJob 会把新一轮的槽位误删 → 后续 cron 可并发派发同一任务。
+                        outstanding.release(logId);
                     }
                 }
             });
         } catch (RejectedExecutionException saturated) {
             if (guard) {
-                outstanding.releaseByJob(jobName);
+                outstanding.release(logId);
             }
             rejectedCount.incrementAndGet();
             String reason = "scheduler saturated: trigger queue full (threads=" + pool.getMaximumPoolSize()
@@ -161,11 +165,16 @@ public class DispatchExecutor implements DisposableBean {
      * 受理成功时日志保持 RUNNING，槽位留到回传或孤儿回收时释放；
      * 触发同步失败（执行器不可达、饱和等）时日志已经是终态、不会有回传到达，
      * 槽位必须立刻释放，否则该任务会永久无法再被触发。
+     *
+     * 释放一律按本轮的 logId（{@link OutstandingDispatches#release(String)} 带所有权校验），
+     * 不能用按任务名的 releaseByJob —— 那会释放「当前」的槽位，而它可能已属于下一轮。
+     * 「结果未知」（accepted=true 但 success=false）时**不释放**：执行器可能正在执行，
+     * 守卫必须继续占着，否则下一轮 cron 会并发派发。
      */
     private void triggerAndTrack(JobInfo job, String jobName, boolean guard, String logId) {
         TriggerResult result = jobService.dispatch(job, null, logId);
         if (guard && (result == null || !result.isAccepted())) {
-            outstanding.releaseByJob(jobName);
+            outstanding.release(logId);
         }
     }
 

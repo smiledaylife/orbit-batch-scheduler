@@ -33,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -84,6 +85,11 @@ class JobServiceDispatchTest {
         alerts = new java.util.concurrent.CopyOnWriteArrayList<JobAlertEvent>();
         jobService = new JobService(scheduler, jobStore, registry, executorClient, properties, outstanding,
                 new AlertDispatcher(alerts::add));
+        // 收敛改走条件更新（finishLogFromRunning）。默认让「日志仍在 RUNNING」成立，
+        // 需要模拟「真实回传已抢先落库」的用例单独覆盖为 false。
+        org.mockito.Mockito.lenient()
+                .when(jobStore.finishLogFromRunning(anyString(), anyBoolean(), any(), anyLong(), any()))
+                .thenReturn(true);
     }
 
     private static JobInfo newJob(String name, String appName) {
@@ -121,8 +127,8 @@ class JobServiceDispatchTest {
         assertTrue(result.isAccepted());
         // 核心断言：单次派发只查一次候选列表
         verify(registry, times(1)).listByApp("app");
-        // 受理回执不代表任务跑完：日志必须保持 RUNNING，一次 finishLog 都不能有
-        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
+        // 受理回执不代表任务跑完：日志必须保持 RUNNING，任何形式的终态收敛都不能有
+        verify(jobStore, never()).finishLogFromRunning(any(), eq(false), any(), anyLong(), any());
     }
 
     @Test
@@ -144,7 +150,7 @@ class JobServiceDispatchTest {
         // 不可达节点被立即摘除（不等心跳超时）
         verify(registry, times(1)).remove("app", "http://10.0.0.1:8081");
         // 第二个节点受理成功，日志同样保持 RUNNING 等回传
-        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
+        verify(jobStore, never()).finishLogFromRunning(any(), eq(false), any(), anyLong(), any());
     }
 
     /**
@@ -232,17 +238,71 @@ class JobServiceDispatchTest {
         JobInfo job = newJob("jobRejected", "app");
         when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
         when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(null);
-        // 执行器同步失败（饱和、handler 不存在等）：accepted=false
+        // 执行器同步失败（饱和、handler 不存在等）：accepted=false，请求确定未被受理
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
                 TriggerResult.fail("log-r", 1L, "http://10.0.0.1:8081", 3L, "executor saturated"));
+        // 日志此刻仍是 RUNNING，条件收敛应当成功（logId 由 dispatch 内部生成，只能用 anyString 匹配）
+        when(jobStore.finishLogFromRunning(anyString(), eq(false),
+                eq("http://10.0.0.1:8081"), anyLong(), any())).thenReturn(true);
 
         TriggerResult result = jobService.dispatch(job, null);
 
         assertEquals(false, result.isSuccess());
         assertEquals(false, result.isAccepted());
         // 不会有回传到达，必须立刻收敛到 FAILED，不能留在 RUNNING 等孤儿回收
-        verify(jobStore, times(1)).finishLog(anyString(), eq("FAILED"),
+        verify(jobStore, times(1)).finishLogFromRunning(anyString(), eq(false),
                 eq("http://10.0.0.1:8081"), anyLong(), eq("executor saturated"));
+        // 关键回归：绝不能再走无 status 守卫的 finishLog（会把已 SUCCESS 的行改写成 FAILED）
+        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
+    }
+
+    /**
+     * 「结果未知」（读超时 / 连接重置）：请求可能已被执行器受理。
+     * 此时必须保持 RUNNING、不安排触发级重试、不释放串行槽位，
+     * 否则会覆盖真实回传（SUCCESS→FAILED）并真的再执行一遍（新 logId）。
+     */
+    @Test
+    void dispatchLeavesLogRunningWhenOutcomeUnknown() {
+        JobInfo job = newJob("jobUnknown", "app");
+        job.setRetryCount(2);
+        job.setRetryIntervalSeconds(0);
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(null);
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
+                TriggerResult.fail("log-u", 1L, "http://10.0.0.1:8081", 0, "read timed out: request cancelled"));
+
+        TriggerResult result = jobService.dispatch(job, null);
+
+        // 对调用方：既不是成功也不是干净的失败；accepted=true 表示「日志保持 RUNNING」
+        assertFalse(result.isSuccess());
+        assertTrue(result.isAccepted());
+        assertTrue(result.getMessage().contains("outcome unknown"), result.getMessage());
+        // 绝不许写终态：写下去就等于把随后的真实 SUCCESS 冲掉
+        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
+        verify(jobStore, never()).finishLogFromRunning(any(), anyBoolean(), any(), anyLong(), any());
+    }
+
+    /**
+     * 条件收敛返回 false（说明真实回传已抢先落库）时：
+     * 不得安排触发级重试、不得发 TRIGGER_FAILED 告警 —— 否则会把一次真实成功再跑一遍并误报失败。
+     */
+    @Test
+    void dispatchSkipsRetryAndAlertWhenLogAlreadyConverged() {
+        JobInfo job = newJob("jobConverged", "app");
+        job.setRetryCount(2);
+        job.setRetryIntervalSeconds(0);
+        when(registry.listByApp("app")).thenReturn(java.util.Arrays.asList(node("http://10.0.0.1:8081")));
+        when(registry.route(anyList(), eq("app"), anyString(), anyString())).thenReturn(null);
+        when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
+                TriggerResult.fail("log-cv", 1L, "http://10.0.0.1:8081", 0, "executor saturated"));
+        // 真实回传已经把日志收敛成 SUCCESS（logId 由 dispatch 内部生成，用 anyString 覆盖默认桩）
+        when(jobStore.finishLogFromRunning(anyString(), eq(false), any(), anyLong(), any())).thenReturn(false);
+
+        TriggerResult result = jobService.dispatch(job, null);
+
+        assertFalse(result.isSuccess());
+        assertTrue(result.getMessage().contains("superseded"), result.getMessage());
+        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
     }
 
     @Test
@@ -324,15 +384,17 @@ class JobServiceDispatchTest {
     void dispatchNoOnlineExecutor() {
         JobInfo job = newJob("jobC", "app");
         when(registry.listByApp("app")).thenReturn(Collections.<ExecutorNode>emptyList());
+        when(jobStore.finishLogFromRunning(anyString(), eq(false), any(), anyLong(), any())).thenReturn(true);
 
         TriggerResult result = jobService.dispatch(job, null);
 
         assertNotNull(result);
         assertEquals(false, result.isSuccess());
         assertTrue(result.getMessage().contains("no online executor"));
-        // 耗时为真实派发耗时（通常 0ms，偶尔 1ms），不能断言精确值
-        verify(jobStore, times(1)).finishLog(anyString(), eq("FAILED"),
+        // 请求确定没发出去（一个节点都没选中），可以安全收敛终态
+        verify(jobStore, times(1)).finishLogFromRunning(anyString(), eq(false),
                 eq((String) null), anyLong(), anyString());
+        verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
         verify(executorClient, never()).trigger(anyString(), any());
     }
 
@@ -482,7 +544,6 @@ class JobServiceDispatchTest {
         // 首次失败必须标注重试计划，且不告警（重试还有额度）
         assertTrue(first.getMessage().contains("trigger retry 2/3"), first.getMessage());
         assertTrue(alerts.isEmpty(), "no alert while retries remain");
-
         // 重试在定时器线程上异步执行：after() 最多等 5 秒，直到第二次派发发生
         verify(executorClient, org.mockito.Mockito.after(5000).times(2))
                 .trigger(eq("http://10.0.0.1:8081"), any());

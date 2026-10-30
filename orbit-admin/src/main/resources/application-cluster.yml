@@ -51,6 +51,20 @@ spring:
       org.quartz.jobStore.clusterCheckinInterval: 15000
       org.quartz.jobStore.misfireThreshold: 60000
 
+  # ---------------------------------------------------------------------------
+  # 生产必须关闭启动建表：DDL 由发布流程预先执行（deploy/sql/*.sql）。
+  # ---------------------------------------------------------------------------
+  # application.yml 默认是 mode: always（为了本地 H2 开箱即用），profile 配置是**叠加**而非替换，
+  # 不在 cluster 里显式覆盖的话它会继续生效，带来三个实际问题：
+  #   1. PostgreSQL 15+ 已从 PUBLIC 收回 public schema 的 CREATE 权限，
+  #      应用账号（通常只授予 DML）启动即 permission denied for schema public；
+  #   2. 多副本同时启动并发执行 CREATE TABLE IF NOT EXISTS 并不安全，
+  #      PG 会报 duplicate key value violates unique constraint "pg_type_typname_nsp_index"；
+  #   3. DDL 变更绕过发布审计，无法灰度、无法回滚。
+  sql:
+    init:
+      mode: never
+
 orbit:
   admin:
     # Redis Lease：同一 Job 在集群范围内同时只能存在一个有效派发占用。
@@ -77,6 +91,17 @@ management:
       # Kubernetes readiness/liveness 使用 Spring Boot health groups。
       probes:
         enabled: true
+      # readiness 组默认只含 readinessState（「进程启动完成」），不含 db / redis。
+      # 结果是：数据库或 Redis 挂掉时 Pod 仍然 Ready、Service 继续导流，
+      # 但每次派发都失败（Lease 模式下 Redis 不可用会直接拒绝派发）。
+      # 这里把外部依赖显式纳入 readiness —— 依赖不可用就摘掉副本，而不是继续接流量。
+      # liveness 仍然只保留 livenessState：依赖抖动不该触发 K8s 重启进程
+      # （重启治不好 Redis/DB，只会放大故障）。
+      group:
+        readiness:
+          include: readinessState,db,redis
+        liveness:
+          include: livenessState
   health:
     # cluster 模式强依赖 Redis（Lease / callback Stream / 对账锁），恢复 Redis 健康探针：
     # Redis 断连时 readiness 探针应及时反映，便于 K8s 摘除不健康副本。

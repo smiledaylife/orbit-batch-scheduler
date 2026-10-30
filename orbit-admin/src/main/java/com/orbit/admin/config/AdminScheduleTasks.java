@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import jakarta.annotation.PostConstruct;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -85,6 +86,28 @@ public class AdminScheduleTasks {
         } catch (Exception e) {
             log.error("[orbit-admin] failed to evict expired executors: {}", e.getMessage(), e);
         }
+    }
+
+    /**
+     * 注入 Lease 强制到期回调：**释放串行槽位之前先把日志收敛掉**。
+     *
+     * 这是修掉「守卫已放开、日志仍 RUNNING」空窗的关键一环（见 OutstandingDispatches
+     * 的 leaseMaxHoldMs 注释）：Lease 按每任务 timeoutSeconds+5min 到期，
+     * 而回收阈值按全局 max-timeout-seconds+5min，两者默认相差近一小时。
+     * 只要保证「到期即收敛」，就不存在「没守卫还能被再次派发」的中间态。
+     */
+    @PostConstruct
+    public void wireLeaseExpiryListener() {
+        outstanding.setLeaseExpiryListener((jobName, logId) -> {
+            boolean applied = jobStore.finishLogFromRunning(logId, false, null, 0L,
+                    "execution lease expired: no callback arrived within the per-job timeout + grace window");
+            if (applied) {
+                alertDispatcher.fire(new JobAlertEvent(JobAlertEvent.EXECUTION_LOST,
+                        jobName, null, null, logId, null, 0L,
+                        "execution lease expired before callback arrived", new Date()));
+            }
+            return applied;
+        });
     }
 
     /**

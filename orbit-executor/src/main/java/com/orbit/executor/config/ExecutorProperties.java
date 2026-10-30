@@ -23,6 +23,14 @@ public class ExecutorProperties {
     private int port = 0;
     /** 与 Admin 通信使用的访问令牌；生产环境必须通过 Secret 注入。 */
     private String accessToken = "";
+    /**
+     * 是否允许在**未配置 access-token** 时放行 {@code /orbit/executor/**}。
+     *
+     * 默认 false（fail-closed）：执行器端口通常就是业务应用端口，
+     * /orbit/executor/run 可以触发任意 {@code @OrbitJob}，等价于远程执行入口。
+     * 仅在本地开发、且执行器没有对外暴露时显式置 true。
+     */
+    private boolean allowAnonymous = false;
     /** Executor 向 Admin 发送心跳的周期（毫秒），保底不低于 5000。 */
     private long heartbeatIntervalMs = 20000;
     /** Executor 节点唯一标识；为空时取 POD_NAME / 主机名。 */
@@ -68,6 +76,8 @@ public class ExecutorProperties {
     public void setPort(int port) { this.port = port; }
     public String getAccessToken() { return accessToken; }
     public void setAccessToken(String accessToken) { this.accessToken = accessToken; }
+    public boolean isAllowAnonymous() { return allowAnonymous; }
+    public void setAllowAnonymous(boolean allowAnonymous) { this.allowAnonymous = allowAnonymous; }
     public long getHeartbeatIntervalMs() { return heartbeatIntervalMs; }
     public void setHeartbeatIntervalMs(long heartbeatIntervalMs) { this.heartbeatIntervalMs = heartbeatIntervalMs; }
     public String getNodeId() { return nodeId; }

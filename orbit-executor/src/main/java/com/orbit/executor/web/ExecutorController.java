@@ -133,13 +133,24 @@ public class ExecutorController {
     /**
      * 校验 Admin -> Executor 的共享令牌。
      * {@link OrbitProtocol#constantTimeEquals(String, String)} 用于降低令牌比较的时序侧信道风险。
+     *
+     * 令牌未配置时的行为由 {@code orbit.executor.allow-anonymous} 决定，默认 false（拒绝）：
+     * 执行器端口通常就是业务应用端口，/orbit/executor/run 能触发任意 @OrbitJob，
+     * 等价于远程执行入口。旧实现「未配置即放行」且没有任何启动告警，
+     * 默认配置上线就等于把这条入口完全敞开。
      */
     private void checkToken(String header) {
         String expect = properties.getAccessToken();
-        if (expect == null || expect.isEmpty()) {
-            return;
+        if (expect == null || expect.trim().isEmpty()) {
+            if (properties.isAllowAnonymous()) {
+                return;
+            }
+            throw new IllegalArgumentException("access token is not configured on this executor; "
+                    + "/orbit/executor/** is closed by default. Set orbit.executor.access-token "
+                    + "(same value as orbit.admin.access-token), or explicitly set "
+                    + "orbit.executor.allow-anonymous=true for local development only.");
         }
-        if (!OrbitProtocol.constantTimeEquals(expect, header)) {
+        if (!OrbitProtocol.constantTimeEquals(expect.trim(), header)) {
             throw new IllegalArgumentException("invalid access token");
         }
     }

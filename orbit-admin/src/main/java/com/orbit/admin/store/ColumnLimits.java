@@ -34,6 +34,17 @@ public final class ColumnLimits {
     /** {@code orbit_job_log.message} */
     public static final int LOG_MESSAGE = 2000;
 
+    /**
+     * {@code orbit_job_log.executor_address}
+     *
+     * 该列的值有两个来源：调度中心写入的节点 URL，以及执行器回传里的 workerNode
+     * （内容形如 {@code DESKTOP-XXX} / Pod 名，长度不受本服务控制）。
+     * 回传字段来自网络，必须与其他列一样在入库前截断 ——
+     * 否则一条超长的 workerNode 会让整批 callback 报 500，且每次重试都失败，
+     * 同批其它结果全部卡在 RUNNING。
+     */
+    public static final int LOG_ADDRESS = 256;
+
     // ==================== orbit_executor_registry ====================
 
     /** {@code orbit_executor_registry.app_name} */

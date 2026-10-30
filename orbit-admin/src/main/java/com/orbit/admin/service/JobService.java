@@ -216,6 +216,17 @@ public class JobService {
      * @return 持久化后的任务对象
      */
     public JobInfo create(JobInfo input) {
+        // 创建语义的强制不变量：主键与版本号只能由服务端产生。
+        //
+        // 请求体是客户端完全可控的反序列化结果，JobInfo 又暴露了 id / version 字段。
+        // 若不清空，JobStore.saveJob() 见到 id != null 会走 UPDATE 分支，配合请求体里的
+        // version 命中乐观锁 WHERE id=? AND version=?，从而把「新建」变成「按 id 覆盖任意已有任务」：
+        //   POST /jobs {"id":<别人的 id>,"version":<当前版本>,"jobName":"随便一个不存在的新名字"}
+        // 重名检查查的是新名字（不存在 → 通过），实际却改写了 id 指向的那一行。
+        // 唯一约束在这里帮不上忙，因为被写的那行 job_name 根本没被更新。
+        input.setId(null);
+        input.setVersion(0);
+
         // 参数合法性校验
         validate(input, true);
         if (jobStore.findJobByName(input.getJobName()).isPresent()) {
@@ -427,11 +438,22 @@ public class JobService {
      */
     public void resume(String jobName) {
         JobInfo job = require(jobName);
+        boolean previousEnabled = job.isEnabled();
         job.setEnabled(true);
         jobStore.saveJob(job);
         try {
             scheduleOrUpdate(job);
         } catch (SchedulerException e) {
+            // 与 create / update 对称回滚：否则库里 enabled=true 但 Quartz 里没有 Trigger，
+            // 单副本（memory JobStore）下没有对账器兜底 → 接口 500 却「看起来已恢复」，
+            // 任务直到下次进程重启才会真正调度。
+            try {
+                job.setEnabled(previousEnabled);
+                jobStore.saveJob(job);
+                log.warn("[orbit-admin] resume failed for {}, rolled back enabled={}", jobName, previousEnabled);
+            } catch (Exception rollbackFailed) {
+                log.error("[orbit-admin] failed to roll back resume for {}", jobName, rollbackFailed);
+            }
             throw new IllegalStateException(e.getMessage(), e);
         }
     }
@@ -492,13 +514,24 @@ public class JobService {
             return false;
         }
         String logId = result.getLogId().trim();
+        // 回传只携带 workerNode（Pod 名/主机名），不带派发目标 URL。
+        // 若本行因为「触发回执丢了」而 executor_address 仍为空，这里补上，
+        // 否则孤儿回收会把它当成「执行器离线」，误杀仍在正常执行的任务。
+        jobStore.fillAddressIfAbsent(logId, result.getWorkerNode());
+
         boolean applied;
         try {
             applied = jobStore.finishLogFromRunning(logId, result.isSuccess(), result.getWorkerNode(),
                     result.getCostMs(), result.getMessage());
-        } finally {
-            outstanding.release(logId);
+        } catch (RuntimeException e) {
+            // 收敛失败（DB 抖动）时**不要**释放串行槽位：日志仍是 RUNNING，
+            // 守卫必须继续占着，否则下一轮 cron 会并发派发同一任务。
+            // 槽位交给 renewLeases() 的绝对上限（timeout + 宽限）兜底释放。
+            log.error("[orbit-admin] callback persist failed, logId={} (keeping serial guard occupied)", logId, e);
+            throw e;
         }
+        // 只有确认日志已不在 RUNNING（本次收敛成功，或它早已被真实结果/回收收敛）才放槽位
+        outstanding.release(logId);
         if (applied) {
             log.info("[orbit-admin] callback logId={} job={} success={} {}ms",
                     logId, result.getJobId(), result.isSuccess(), result.getCostMs());
@@ -603,10 +636,26 @@ public class JobService {
                     + " (max " + MAX_CALLBACK_BATCH + "); split the batch and retry");
         }
         int applied = 0;
+        int failedToPersist = 0;
         for (TriggerResult result : results) {
-            if (handleCallback(result)) {
-                applied++;
+            // 逐条隔离：单条入库失败（例如超长字段、DB 瞬时不可用）不能拖垮整批。
+            // 旧实现让异常直接冒泡到全局处理器 → 整批 500 → 执行器整批重发 →
+            // 那条坏数据每次都失败，同批其它结果永远收敛不了。
+            try {
+                if (handleCallback(result)) {
+                    applied++;
+                }
+            } catch (RuntimeException e) {
+                failedToPersist++;
+                log.error("[orbit-admin] callback item failed, logId={} (batch continues)",
+                        result == null ? null : result.getLogId(), e);
             }
+        }
+        if (failedToPersist > 0) {
+            // 有未落库的条目：返回非 200 让执行器重发这批（幂等，已收敛的条目会被忽略），
+            // 而不是假装成功把结果丢掉。
+            throw new IllegalStateException("callback partially failed: " + failedToPersist
+                    + " item(s) not persisted out of " + results.size() + "; retry this batch");
         }
         if (results.size() > 1) {
             log.info("[orbit-admin] callback batch of {} item(s), {} applied", results.size(), applied);
@@ -686,14 +735,17 @@ public class JobService {
         jobStore.insertLog(running);
 
         // 3~6 全程包在 try/catch 中：无论路由寻址、参数合并还是落库环节抛异常，
-        // 都必须把日志从 RUNNING 收敛到终态，否则会留下永久 RUNNING 的僵尸记录
-        // （没有任何后台任务会回收它）。
+        // 都必须把日志收敛到终态，否则会留下永久 RUNNING 的僵尸记录
+        // （只有孤儿回收能在数十分钟后兜底，期间串行守卫一直占着）。
+        // 例外是「结果未知」：请求可能已被执行器受理，此时不能写终态（见下方 outcomeUnknown）。
         ExecutorNode node = null;
+        TriggerResult result = null;
         try {
             List<ExecutorNode> candidates = registry.listByApp(job.getAppName());
             if (candidates.isEmpty()) {
                 String msg = "no online executor for appName=" + job.getAppName();
-                return failTrigger(job, extraParams, logId, attempt, null, start, msg);
+                // 一个节点都没选中，请求确定没发出去 → outcomeUnknown=false，可以安全收敛终态
+                return failTrigger(job, extraParams, logId, attempt, null, start, msg, false);
             }
 
             // 先按路由策略选起点，再对剩余节点做故障转移：
@@ -725,44 +777,54 @@ public class JobService {
             }
             req.setParams(merged);
 
-            TriggerResult result = null;
+            // 「结果未知」标记：读超时/连接重置这类失败并不等于请求没被执行器受理，
+            // 请求很可能已经入队并正在执行。此时**绝不能**把日志收敛成终态：
+            // 既会覆盖随后到达的真实 SUCCESS（旧实现正是如此），
+            // 也会误发 TRIGGER_FAILED 告警。留 RUNNING 交给回传或孤儿回收收敛。
+            boolean outcomeUnknown = false;
             for (int i = 0; i < candidates.size(); i++) {
                 node = candidates.get(i);
                 result = executorClient.trigger(node.getAddress(), req);
                 if (result.isSuccess()) {
-                    break;
-                }
-                boolean last = i == candidates.size() - 1;
-                if (last) {
+                    outcomeUnknown = false;
                     break;
                 }
                 String failMsg = result.getMessage();
+
                 if (looksUnreachable(failMsg)) {
                     // 明确的连接级失败：节点大概率已不存在（Pod 重建后旧 IP 未过期），
                     // 立刻摘除并换下一个（对齐 XXL-JOB FAILOVER），不等心跳超时。
+                    //
+                    // 注意：摘除判断必须在「是否最后一个候选」之前 —— 旧实现先 break 后判定，
+                    // 导致单节点部署时死节点永远不会被摘除，只能等 90s 心跳超时；
+                    // 每次触发还要白等一次 connectTimeout，蚕食派发线程池。
                     registry.remove(job.getAppName(), node.getAddress());
                     log.warn("[orbit-admin] executor unreachable, evict and failover: {} @ {} ({})",
                             job.getAppName(), node.getAddress(), failMsg);
-                    continue;
-                }
-                if (failMsg != null && failMsg.contains("execution idempotency unavailable")) {
+                    outcomeUnknown = false;
+                } else if (failMsg != null && failMsg.contains("execution idempotency unavailable")) {
                     // 执行器因幂等后端（Redis）不可用而明确拒绝：请求确定未被受理，
                     // 换节点重试是安全的（新节点会重新预占同一 logId），但绝不摘除本节点 ——
                     // 它可能只是与 Redis 断连，执行能力本身完好，是否下线交由心跳判断。
                     log.warn("[orbit-admin] executor idempotency backend unavailable, failover without evicting: {} @ {} ({})",
                             job.getAppName(), node.getAddress(), failMsg);
-                    continue;
-                }
-                if (looksAmbiguous(failMsg)) {
+                    outcomeUnknown = false;
+                } else if (looksAmbiguous(failMsg)) {
                     // 模糊失败（connection reset / read timeout）：请求可能已被执行器受理。
                     // 换下一个节点重试（可用性优先），但绝不摘除本节点 —— 节点可能仍然健康，
-                    // 是否下线交由心跳/超时剔除判断；同 logId 的执行器本地幂等会拦住同节点重复入池。
+                    // 是否下线交由心跳/超时剔除判断；同 logId 的执行器侧幂等会拦住重复入池。
                     log.warn("[orbit-admin] trigger outcome unknown, failover without evicting: {} @ {} ({})",
                             job.getAppName(), node.getAddress(), failMsg);
-                    continue;
+                    outcomeUnknown = true;
+                } else {
+                    // 业务性拒绝（饱和、handler 不存在等）：执行器明确答复，换节点也不会成功，直接终止。
+                    outcomeUnknown = false;
+                    break;
                 }
-                // 业务性拒绝（饱和、handler 不存在等）：执行器明确答复，换节点也不会成功，直接终止。
-                break;
+
+                if (i == candidates.size() - 1) {
+                    break;
+                }
             }
 
             String address = node == null ? null : node.getAddress();
@@ -778,16 +840,21 @@ public class JobService {
                 return result;
             }
 
-            // 触发同步失败（执行器不可达、执行器饱和、路由失败等）：日志立刻收敛到 FAILED，
-            // 不会有回传到达，因此不能留在 RUNNING 等孤儿回收；
-            // 是否重试/告警由 failTrigger 统一裁决。
-            return failTrigger(job, extraParams, logId, attempt, address, start, result.getMessage());
+            // 触发同步失败（执行器不可达、执行器饱和、路由失败等）：
+            // 是否收敛终态 / 是否重试 / 是否告警由 failTrigger 统一裁决。
+            return failTrigger(job, extraParams, logId, attempt, address, start,
+                    result.getMessage(), outcomeUnknown);
         } catch (RuntimeException e) {
             String address = node == null ? null : node.getAddress();
-            long cost = System.currentTimeMillis() - start.getTime();
+            // 异常可能发生在派发链路的中途（例如 executorClient 内部异常已包装成结果，
+            // 但 jobStore.markDispatched 抛了 DB 异常）——此时执行器**可能已受理**，
+            // 按「结果未知」处理，绝不在此写终态。
             String msg = "dispatch failed: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             log.error("[orbit-admin] dispatch error for job={}", job.getJobName(), e);
-            return failTrigger(job, extraParams, logId, attempt, address, start, msg);
+            boolean mayHaveBeenAccepted = result == null || !result.isAccepted()
+                    ? (result != null && looksAmbiguous(result.getMessage()))
+                    : true;
+            return failTrigger(job, extraParams, logId, attempt, address, start, msg, mayHaveBeenAccepted);
         }
     }
 
@@ -801,38 +868,78 @@ public class JobService {
      *     （新 logId 新日志行），失败日志 message 标注重试计划，返回值 message 同步标注；
      *   - 已达上限：投递 {@code TRIGGER_FAILED} 告警（重试链路终局）。
      *
-     * @param job        任务元数据
-     * @param extraParams 原始覆盖参数（重试时透传）
-     * @param logId      本次失败尝试的日志 ID
-     * @param attempt    本次尝试轮次（1 起始）
-     * @param address    派发目标地址（可为空）
-     * @param start      本次尝试开始时间
-     * @param message    失败原因
+     * 收敛一律走 {@code finishLogFromRunning}（带 {@code status='RUNNING'} 条件），
+     * 不再用无守卫的 {@code finishLog}：执行器可能已经受理并抢先回传了真实结果，
+     * 无条件 UPDATE 会把 SUCCESS 改写成 FAILED，并连带发出假告警。
+     *
+     * @param job            任务元数据
+     * @param extraParams    原始覆盖参数（重试时透传）
+     * @param logId          本次失败尝试的日志 ID
+     * @param attempt        本次尝试轮次（1 起始）
+     * @param address        派发目标地址（可为空）
+     * @param start          本次尝试开始时间
+     * @param message        失败原因
+     * @param outcomeUnknown true 表示「请求可能已被执行器受理」（读超时 / 连接重置 /
+     *                       派发链路中途异常），此时不能写终态、不能安排触发级重试
      * @return 携带终局说明的失败结果
      */
     private TriggerResult failTrigger(JobInfo job, Map<String, Object> extraParams, String logId, int attempt,
-                                      String address, Date start, String message) {
-        int maxAttempts = Math.max(1, job.getRetryCount() + 1);
+                                      String address, Date start, String message, boolean outcomeUnknown) {
+        long jobId = job.getId() == null ? 0 : job.getId();
         long cost = System.currentTimeMillis() - start.getTime();
+
+        if (outcomeUnknown) {
+            // 「结果未知」是触发链路上唯一必须**什么都不做**的分支：
+            //   · 写终态 → 会覆盖随后到达的真实回传（SUCCESS 被改成 FAILED）；
+            //   · 触发级重试 → 换新 logId 会真的再执行一遍，非幂等任务直接数据错乱
+            //     （执行器侧幂等按 logId 去重，拦不住新 logId）；
+            //   · 释放串行槽位 → 守卫提前放开，下一轮 cron 可并发派发。
+            // 因此只告警 + 记日志，把收敛权完整交给回传或孤儿回收。
+            String msg = message + " (trigger outcome unknown: request may already be running on the executor; "
+                    + "log kept RUNNING to await callback, no trigger-level retry to avoid duplicate execution)";
+            alertDispatcher.fire(new JobAlertEvent(JobAlertEvent.TRIGGER_FAILED, job.getJobName(),
+                    job.getAppName(), job.getHandler(), logId, address, cost, msg, new Date()));
+            log.warn("[orbit-admin] job={} trigger outcome unknown (attempt {}/{}), log left RUNNING: {}",
+                    job.getJobName(), attempt, Math.max(1, job.getRetryCount() + 1), msg);
+            return TriggerResult.awaitingCallback(logId, jobId, address, cost, msg);
+        }
+
+        int maxAttempts = Math.max(1, job.getRetryCount() + 1);
         String finalMessage = message;
 
         if (attempt < maxAttempts) {
             long interval = Math.max(0, job.getRetryIntervalSeconds());
             finalMessage = message + " (trigger retry " + (attempt + 1) + "/" + maxAttempts
                     + " scheduled in " + interval + "s)";
-            scheduleTriggerRetry(job, extraParams, attempt + 1, maxAttempts, interval, logId);
+        } else if (attempt > 1) {
+            finalMessage = message + " (trigger failed after " + attempt + "/" + maxAttempts + " attempt(s))";
+        }
+
+        // 条件收敛：只有日志仍处于 RUNNING 才允许改写为 FAILED。
+        boolean applied = jobStore.finishLogFromRunning(logId, false, address, cost, finalMessage);
+        if (!applied) {
+            // 真实回传（或孤儿回收）已经抢先收敛了这条日志 —— 说明执行其实有结果了。
+            // 既不能覆盖，也不能安排重试/告警：那会把一次真实成功再跑一遍并误报失败。
+            log.info("[orbit-admin] job={} trigger failed but log {} is no longer RUNNING "
+                            + "(real result already recorded); skip retry and alert",
+                    job.getJobName(), logId);
+            return TriggerResult.fail(logId, jobId, address, cost,
+                    finalMessage + " (superseded by an already-recorded execution result)");
+        }
+
+        if (attempt < maxAttempts) {
+            // 先确认日志确实落成 FAILED，再安排重试：顺序反了会出现
+            // 「重试已排定、原日志却被别人收敛成 SUCCESS」的自相矛盾记录。
+            scheduleTriggerRetry(job, extraParams, attempt + 1, maxAttempts,
+                    Math.max(0, job.getRetryIntervalSeconds()), logId);
         } else {
-            if (attempt > 1) {
-                finalMessage = message + " (trigger failed after " + attempt + "/" + maxAttempts + " attempt(s))";
-            }
             alertDispatcher.fire(new JobAlertEvent(JobAlertEvent.TRIGGER_FAILED, job.getJobName(),
                     job.getAppName(), job.getHandler(), logId, address, cost, finalMessage, new Date()));
         }
 
-        jobStore.finishLog(logId, JobLogStatus.FAILED, address, cost, finalMessage);
         log.warn("[orbit-admin] job={} trigger failed (attempt {}/{}): {}",
                 job.getJobName(), attempt, maxAttempts, finalMessage);
-        return TriggerResult.fail(logId, job.getId() == null ? 0 : job.getId(), address, cost, finalMessage);
+        return TriggerResult.fail(logId, jobId, address, cost, finalMessage);
     }
 
     /**
@@ -918,8 +1025,12 @@ public class JobService {
     }
 
     /**
-     * 兜底写终态日志。自身异常只记录不外抛，避免在异常处理路径上二次抛出，
-     * 把原始的派发异常覆盖掉。
+     * 兜底写终态日志（带 RUNNING 条件）。自身异常只记录不外抛，
+     * 避免在异常处理路径上二次抛出，把原始的派发异常覆盖掉。
+     *
+     * 这里刻意用 {@code finishLogFromRunning} 而非 {@code finishLog}：
+     * 兜底路径最可能发生在「执行器其实已经受理并回传」之后，
+     * 无条件改写会把真实结果冲掉。
      *
      * @param logId   日志追踪 ID
      * @param address 执行器地址（可为空）
@@ -928,7 +1039,7 @@ public class JobService {
      */
     private void safeFinishLog(String logId, String address, long cost, String message) {
         try {
-            jobStore.finishLog(logId, JobLogStatus.FAILED, address, cost, message);
+            jobStore.finishLogFromRunning(logId, false, address, cost, message);
         } catch (Exception ex) {
             log.error("[orbit-admin] failed to finalize log {}: {}", logId, ex.getMessage(), ex);
         }
@@ -1116,12 +1227,18 @@ public class JobService {
         if (message == null) {
             return false;
         }
-        String m = message.toLowerCase();
+        String m = message.toLowerCase(Locale.ROOT);
+        // 注意 "network unreachable"：ExecutorClient.describeTriggerFailure 对 SocketException
+        // 归一化输出的是 "network unreachable: ..."（没有 "is"）。
+        // 旧实现匹配 "network is unreachable"，两者不相等 → 链路级故障既不被判定为「不可达」
+        // （不摘除），也不被判定为「结果未知」（不 failover），而是落到「业务拒绝 → break」，
+        // 只尝试第一个候选就放弃，其余健康节点完全用不上。
         return m.contains("connection refused")
                 || m.contains("connect timed out")
                 || m.contains("connectexception")
                 || m.contains("no route to host")
                 || m.contains("network is unreachable")
+                || m.contains("network unreachable")
                 || m.contains("failed to connect")
                 || m.contains("unknownhost");
     }
@@ -1135,10 +1252,11 @@ public class JobService {
         if (message == null) {
             return false;
         }
-        String m = message.toLowerCase();
+        String m = message.toLowerCase(Locale.ROOT);
         boolean genericTimeout = m.contains("timeout") && !m.contains("connect timed out");
         return m.contains("connection reset")
                 || m.contains("read timed out")
+                || m.contains("request cancelled")
                 || genericTimeout;
     }
 
@@ -1171,9 +1289,22 @@ public class JobService {
         if (job.getHandler() == null || job.getHandler().trim().isEmpty()) {
             throw new IllegalArgumentException("handler required");
         }
+        // 规范化并**回写**：appName / handler 是「跨系统标识」，两端必须逐字节相等才会命中。
+        // 执行器注册侧早已 trim（ExecutorRegistry.register），任务侧不 trim 会造成
+        // 「配置看起来完全正常、每次触发却永远 handler not found」的静默失效 ——
+        // 校验只判空不回写等于把问题留给运行期。
+        job.setAppName(job.getAppName().trim());
+        job.setHandler(job.getHandler().trim());
+        if (job.getCron() != null) {
+            job.setCron(job.getCron().trim());
+        }
+        if (job.getDescription() != null) {
+            job.setDescription(job.getDescription().trim());
+        }
         // 列宽前置校验：超长值在此以 400 拒绝，而不是等入库失败后只剩一句 internal error
         ColumnLimits.requireMaxLength("appName", job.getAppName(), ColumnLimits.JOB_APP_NAME);
         ColumnLimits.requireMaxLength("handler", job.getHandler(), ColumnLimits.JOB_HANDLER);
+        ColumnLimits.requireMaxLength("description", job.getDescription(), ColumnLimits.JOB_DESCRIPTION);
         if (job.getCron() != null && !job.getCron().trim().isEmpty()
                 && !CronExpression.isValidExpression(job.getCron())) {
             throw new IllegalArgumentException("invalid cron: " + job.getCron());

@@ -51,11 +51,21 @@ data:
           org.quartz.jobStore.isClustered: true
           org.quartz.jobStore.clusterCheckinInterval: 15000
           org.quartz.jobStore.misfireThreshold: 60000
+      # 生产由发布流程预先建表，禁止应用启动时执行 DDL。
+      # 不覆盖的话会继承 application.yml 的 mode: always，在 PG15+ 上因缺 CREATE 权限启动失败。
+      sql:
+        init:
+          mode: never
     orbit:
       admin:
         access-token: ${ORBIT_ADMIN_ACCESS_TOKEN}
         heartbeat-timeout-seconds: 90
         timezone: Asia/Shanghai
+        # 必填项（AdminProperties 在 cluster profile 下强制校验），缺了会直接启动失败。
+        # 与执行器实际上报的地址形态必须匹配：本清单里 executor 的 address 为空，
+        # 由 ExecutorBootstrap 解析成 http://${POD_IP}:8081，所以这里匹配 IP:PORT。
+        # 若改为使用 Service 域名注册，请同步收紧为域名白名单。
+        executor-address-allow-pattern: ${ORBIT_ADMIN_EXECUTOR_ALLOW_PATTERN:^https?://[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]{1,5})?$}
         execution-lease-enabled: true
         execution-lease-ttl-ms: 120000
         execution-lease-renew-interval-ms: 30000

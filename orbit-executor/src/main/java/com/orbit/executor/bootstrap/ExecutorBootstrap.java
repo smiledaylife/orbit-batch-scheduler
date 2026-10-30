@@ -59,13 +59,17 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
 
     /**
      * 运行时解析得到的执行器基础 HTTP 地址（例如：http://192.168.1.10:8081）
+     *
+     * volatile：在 SmartLifecycle.start() 中写入，由 Tomcat 请求线程读取（/orbit/executor/run
+     * 需要 getResolvedNodeId 回填 workerNode）。本类 phase 为 Integer.MAX_VALUE，
+     * 而内嵌容器在 MAX_VALUE-1 就已开始接收请求，两者存在真实并发窗口。
      */
-    private String resolvedAddress;
+    private volatile String resolvedAddress;
 
     /**
      * 运行时解析得到的节点标识（例如 Pod 名或主机名）
      */
-    private String resolvedNodeId;
+    private volatile String resolvedNodeId;
 
     /**
      * Spring 运行环境，用于自动读取 server.port
@@ -122,6 +126,26 @@ public class ExecutorBootstrap implements SmartLifecycle, EnvironmentAware, Appl
         // 解析执行器对外通信地址和节点 ID
         resolvedAddress = resolveAddress();
         resolvedNodeId = resolveNodeId();
+
+        // 鉴权状态自检：这部分与 admin 侧 AdminAuthInterceptor.warnIfInsecure() 对齐。
+        // 旧实现未配置 token 时静默放行，运维完全无从感知「执行器入口是敞开的」。
+        String token = properties.getAccessToken();
+        if (token == null || token.trim().isEmpty()) {
+            if (properties.isAllowAnonymous()) {
+                log.warn("==================================================================");
+                log.warn("[orbit-executor] orbit.executor.allow-anonymous=true：/orbit/executor/** 无需令牌即可访问，");
+                log.warn(" 任何能访问本端口的人都可以触发任意 @OrbitJob。仅限本地开发使用。");
+                log.warn("==================================================================");
+            } else {
+                log.error("==================================================================");
+                log.error("[orbit-executor] orbit.executor.access-token 未配置：/orbit/executor/** 已按 fail-closed 拒绝请求。");
+                log.error(" 调度中心将无法触发本节点（返回 403），请配置与 orbit.admin.access-token 相同的令牌，");
+                log.error(" 或仅在本地开发时显式设置 orbit.executor.allow-anonymous=true。");
+                log.error("==================================================================");
+            }
+        } else {
+            log.info("[orbit-executor] access token configured, /orbit/executor/** requires authentication");
+        }
 
         log.info("[orbit-executor] starting appName={} address={} admin={}",
                 properties.getAppName(), resolvedAddress, properties.getAdminAddresses());

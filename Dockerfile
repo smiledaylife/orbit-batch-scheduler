@@ -22,6 +22,19 @@ WORKDIR /app
 # 用通配符匹配产物名：版本号写死在这里的话，每次改 <version> 都要同步改 Dockerfile，
 # 漏改时构建会以 "not found" 失败。spring-boot repackage 生成的 *.jar.original 不会被匹配到。
 COPY --from=build /src/${MODULE}/target/${MODULE}-*.jar /app/app.jar
-ENV JAVA_OPTS=""
+
+# ---------------------------------------------------------------------------
+# 启动命令必须用 exec 形式（JSON 数组）直接调 java，不能包一层 `sh -c`。
+#
+# 旧写法 ENTRYPOINT ["sh","-c","java $JAVA_OPTS -jar /app/app.jar"] 配合 K8s 的
+#   args: ["--spring.config.additional-location=file:/app/config/admin.yml"]
+# 按 POSIX 语义 `sh -c string name [args...]`，第一个额外参数会变成 $0 而**不会**拼到命令末尾，
+# 结果 ConfigMap 里的整份配置被静默忽略、且没有任何报错 —— 典型表现为「改 ConfigMap 不生效」，
+# admin 用一个没人预期的数据源在跑。exec 形式则天然把 args 追加到 java 命令行。
+#
+# JAVA_OPTS 由 Spring Boot 的 JAVA_TOOL_OPTIONS 语义接管（镜像内空值时不影响）：
+# 需要 JVM 参数时请用 JAVA_TOOL_OPTIONS 或 _JAVA_OPTIONS 环境变量，或覆盖 args。
+# ---------------------------------------------------------------------------
+ENV JAVA_TOOL_OPTIONS=""
 EXPOSE 8080 8081
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

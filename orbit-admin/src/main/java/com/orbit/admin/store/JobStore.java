@@ -260,7 +260,8 @@ public class JobStore {
         LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
                 .eq(OrbitJobLogPO::getLogId, logId)
                 .set(OrbitJobLogPO::getStatus, status)
-                .set(OrbitJobLogPO::getExecutorAddress, address)
+                .set(OrbitJobLogPO::getExecutorAddress,
+                        ColumnLimits.abbreviate(address, ColumnLimits.LOG_ADDRESS))
                 .set(OrbitJobLogPO::getCostMs, costMs)
                 .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
                 .set(OrbitJobLogPO::getEndTime, new Date());
@@ -305,11 +306,38 @@ public class JobStore {
                 .eq(OrbitJobLogPO::getLogId, logId)
                 .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
                 .set(OrbitJobLogPO::getStatus, success ? JobLogStatus.SUCCESS : JobLogStatus.FAILED)
-                .set(OrbitJobLogPO::getExecutorAddress, address)
                 .set(OrbitJobLogPO::getCostMs, costMs)
                 .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
                 .set(OrbitJobLogPO::getEndTime, new Date());
+        // executor_address 不在这里写：该列是「调度中心派发目标」的语义（URL），
+        // 由 markDispatched / fillAddressIfAbsent 统一维护。
+        // 回传里的 workerNode 是节点标识（Pod 名 / 主机名），与 URL 不是同一口径；
+        // 旧实现直接覆盖会让孤儿回收的 liveAddresses.contains(address) 永远匹配不上，
+        // 把仍在正常执行的任务误判为「执行器离线」。
         return logMapper.update(null, uw) > 0;
+    }
+
+    /**
+     * 仅在 {@code executor_address} 为空时回填派发目标地址。
+     *
+     * 用于「结果未知」场景：触发回执没拿到（因此 {@link #markDispatched} 没执行），
+     * 但执行器其实已受理并回传了结果 —— 此时把它报上来的节点地址补进日志，
+     * 既不改写已有值，也补全了观测与回收判断所需的信息。
+     *
+     * @param logId   日志 ID
+     * @param address 节点地址/标识（入库前按列宽截断）
+     */
+    public void fillAddressIfAbsent(String logId, String address) {
+        if (address == null || address.trim().isEmpty()) {
+            return;
+        }
+        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
+                .eq(OrbitJobLogPO::getLogId, logId)
+                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
+                .isNull(OrbitJobLogPO::getExecutorAddress)
+                .set(OrbitJobLogPO::getExecutorAddress,
+                        ColumnLimits.abbreviate(address.trim(), ColumnLimits.LOG_ADDRESS));
+        logMapper.update(null, uw);
     }
 
     /**
@@ -352,10 +380,18 @@ public class JobStore {
         List<OrbitJobLogPO> executorGone = new ArrayList<OrbitJobLogPO>();
         for (OrbitJobLogPO row : rows) {
             String address = row.getExecutorAddress();
-            boolean alive = address != null && !address.trim().isEmpty() && liveAddresses.contains(address);
             if (row.getStartTime() != null && row.getStartTime().before(hardCap)) {
                 hardExpired.add(row);
-            } else if (!alive) {
+                continue;
+            }
+            // executor_address 为空 = 「不知道派发给了谁」，不是「执行器离线」。
+            // 典型来源：insertLog 之后、markDispatched 之前 admin 被 kill（滚动更新），
+            // 或者触发回执丢了但执行器其实在跑。这类行只能靠硬上界回收，
+            // 否则会把仍在正常执行的长任务误判为 FAILED 并发 EXECUTION_LOST 假告警。
+            if (address == null || address.trim().isEmpty()) {
+                continue;
+            }
+            if (!liveAddresses.contains(address)) {
                 executorGone.add(row);
             }
         }

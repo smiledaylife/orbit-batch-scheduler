@@ -208,13 +208,54 @@ public class OutstandingDispatches {
         return tryAcquire(jobName, logId, maxHoldMs, System.currentTimeMillis());
     }
 
-    /** 计算 Lease 绝对持有上限（毫秒）：任务超时 + 回传宽限，乘法溢出时饱和到长整型上限 */
+    /**
+     * Lease 绝对持有上限（毫秒）＝ 本任务超时 + 回传宽限。
+     *
+     * 取值必须与 {@code AdminScheduleTasks} 的孤儿回收阈值**一致地小于等于**日志被收敛的时刻，
+     * 否则会出现「守卫已放开、日志还 RUNNING」的空窗：同一任务在新一轮 cron 里被再次派发，
+     * 而上一轮其实还在执行（旧实现：本方法按每任务 timeoutSeconds 算（默认 300s→600s），
+     * 回收阈值却按全局 max-timeout-seconds 算（3600s→3900s），中间 55 分钟完全没有守卫）。
+     *
+     * 现在的做法是把这个差值彻底消除：**强制释放 Lease 的同时收敛日志**，
+     * 见 {@link #renewLeases()} 与 {@link LeaseExpiryListener}。这样无论两个阈值如何配置，
+     * 都不存在「没有守卫但日志仍 RUNNING」的中间态。
+     */
     private long leaseMaxHoldMs(int timeoutSeconds) {
         long seconds = timeoutSeconds > 0 ? timeoutSeconds : Math.max(1L, properties.getMaxTimeoutSeconds());
         long timeoutMs = seconds > (Long.MAX_VALUE - LEASE_CALLBACK_GRACE_MS) / 1000L
                 ? Long.MAX_VALUE - LEASE_CALLBACK_GRACE_MS
                 : seconds * 1000L;
         return timeoutMs + LEASE_CALLBACK_GRACE_MS;
+    }
+
+    /**
+     * Lease 强制到期回调：在释放串行槽位之前，先把对应日志收敛掉。
+     *
+     * 之所以做成外部注入的回调而不是直接依赖 JobStore：
+     * {@code OutstandingDispatches} 是 {@code JobService} 的构造依赖，
+     * 反向依赖会形成环。由 {@code AdminScheduleTasks}（已同时持有 JobStore / 告警 / 本类）
+     * 在启动时注入即可。
+     */
+    @FunctionalInterface
+    public interface LeaseExpiryListener {
+        /**
+         * @param jobName 任务名
+         * @param logId   被强制释放的日志 ID
+         * @return true 表示日志已被收敛为终态（可以安全释放槽位）
+         */
+        boolean onLeaseExpired(String jobName, String logId);
+    }
+
+    /** 强制到期回调，未注入时退化为「只释放槽位」并打 WARN */
+    private volatile LeaseExpiryListener leaseExpiryListener;
+
+    /**
+     * 注入强制到期回调（由 AdminScheduleTasks 在启动时调用）。
+     *
+     * @param listener 回调实现，传 null 表示取消
+     */
+    public void setLeaseExpiryListener(LeaseExpiryListener listener) {
+        this.leaseExpiryListener = listener;
     }
 
     /**
@@ -338,8 +379,12 @@ public class OutstandingDispatches {
             Long deadline = leaseDeadlineByLogId.get(logId);
             if (deadline != null && now >= deadline) {
                 leaseForcedExpirations.incrementAndGet();
-                log.warn("[orbit-admin] execution lease exceeded max hold time, force-releasing: "
-                        + "job={}, logId={} (callback never arrived; job will be schedulable again)", jobName, logId);
+                log.warn("[orbit-admin] execution lease exceeded max hold time: "
+                        + "job={}, logId={} (callback never arrived; converging log and releasing guard)", jobName, logId);
+                // 关键顺序：**先收敛日志，再释放槽位**。
+                // 只释放不收敛会留下「守卫已放开、日志仍 RUNNING」的空窗 ——
+                // 下一轮 cron 立刻能再派发一次，同一任务并行两轮（非幂等任务直接数据错乱）。
+                convergeExpiredLog(jobName, logId);
                 if (!release(logId)) {
                     // Redis 释放未生效（所有权已变更或 Redis 异常）：至少清本地登记停止续租，
                     // Redis 侧 Lease 会随 TTL 自然过期，不会再被本 JVM 续命。
@@ -373,6 +418,34 @@ public class OutstandingDispatches {
     /** 当前占用中的槽位数（即等待回传的任务数） */
     public int outstanding() {
         return logIdByJob.size();
+    }
+
+    /**
+     * 收敛一条「Lease 已到绝对上限」的日志。
+     *
+     * 未注入回调（例如单测里直接 new）时只打 WARN —— 此时行为退回旧语义，
+     * 但会明确记录「日志未收敛、守卫已放开」这一危险状态，便于告警与排查。
+     */
+    private void convergeExpiredLog(String jobName, String logId) {
+        LeaseExpiryListener listener = this.leaseExpiryListener;
+        if (listener == null) {
+            log.warn("[orbit-admin] no lease expiry listener installed; log {} may stay RUNNING "
+                    + "after the guard is released (job={})", logId, jobName);
+            return;
+        }
+        try {
+            boolean converged = listener.onLeaseExpired(jobName, logId);
+            if (!converged) {
+                // 收敛失败（日志已不是 RUNNING、或 DB 异常）：不是致命问题，
+                // 因为「已不是 RUNNING」恰恰说明有真实结果；DB 异常则下一轮回收兜底。
+                log.info("[orbit-admin] expired lease log {} was already converged or unreachable", logId);
+            }
+        } catch (RuntimeException e) {
+            // 收敛失败时**仍释放**槽位：否则守卫被永久占死，任务再也不触发。
+            // 日志留给孤儿回收兜底。
+            log.error("[orbit-admin] failed to converge expired lease log {}, releasing guard anyway",
+                    logId, e);
+        }
     }
 
     /** 累计跳过的触发次数 */

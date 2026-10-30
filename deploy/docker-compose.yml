@@ -9,9 +9,13 @@ services:
         RUNTIME_IMAGE: eclipse-temurin:21-jre
     image: orbit-admin:1.0.0
     ports:
-      - "8080:8080"
+      # 只绑回环：这是本地演示用的单机栈，不配置 token 时任何能访问到该端口的人
+      # 都能建/删/立即触发任务。要对外暴露请先配置 ORBIT_ADMIN_ACCESS_TOKEN 再改绑 0.0.0.0。
+      - "127.0.0.1:8080:8080"
     environment:
-      - JAVA_OPTS=-Xms256m -Xmx512m
+      - JAVA_TOOL_OPTIONS=-Xms256m -Xmx512m
+      # 与执行器保持同一枚令牌；留空则两端都按 fail-closed 拒绝（执行器侧更严格）。
+      - ORBIT_ADMIN_ACCESS_TOKEN=${ORBIT_ADMIN_ACCESS_TOKEN:-}
     volumes:
       - admin-data:/app/data
     restart: unless-stopped
@@ -31,14 +35,18 @@ services:
         MODULE: orbit-executor-sample
     image: orbit-executor-sample:1.0.0
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     environment:
-      - JAVA_OPTS=-Xms128m -Xmx256m
+      - JAVA_TOOL_OPTIONS=-Xms128m -Xmx256m
       - ORBIT_EXECUTOR_ADMIN_ADDRESSES=http://orbit-admin:8080
       - ORBIT_EXECUTOR_ADDRESS=http://orbit-executor:8081
-      # 单节点并发上限 + 超时强制中断（worker-threads: 0 = 内联模式）
+      # 必须与 admin 的令牌一致；未配置时 /orbit/executor/** 默认拒绝（fail-closed）。
+      - ORBIT_EXECUTOR_ACCESS_TOKEN=${ORBIT_ADMIN_ACCESS_TOKEN:-}
+      # 单节点并发上限 + 超时强制中断
       - ORBIT_EXECUTOR_WORKER_THREADS=8
       - ORBIT_EXECUTOR_QUEUE_CAPACITY=256
+      # 本地演示栈显式放行匿名调用（同时上面也注入了令牌，两者不冲突）。
+      - ORBIT_EXECUTOR_ALLOW_ANONYMOUS=${ORBIT_EXECUTOR_ALLOW_ANONYMOUS:-true}
     depends_on:
       orbit-admin:
         condition: service_healthy

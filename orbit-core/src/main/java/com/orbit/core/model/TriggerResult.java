@@ -116,6 +116,34 @@ public class TriggerResult implements Serializable {
     }
 
     /**
+     * 构造「结果未知」回执：请求已经发出，但调度中心没有拿到确定的答复
+     * （读超时 / 连接被重置），执行器可能已经受理并正在执行。
+     *
+     * 语义上与 {@link #accepted} 一致（都表示「日志必须留在 RUNNING，等回传收敛」），
+     * 但 {@code success=false}：调用方据此知道这不是一次干净的受理，
+     * 且调度中心**不应**安排触发级重试（换新 logId 会真的再执行一遍）。
+     *
+     * @param logId      日志 ID
+     * @param jobId      任务 ID
+     * @param workerNode 尝试派发的节点地址
+     * @param costMs     本次触发往返耗时
+     * @param message    说明
+     * @return 结果未知回执
+     */
+    public static TriggerResult awaitingCallback(String logId, long jobId, String workerNode,
+                                                 long costMs, String message) {
+        TriggerResult r = new TriggerResult();
+        r.logId = logId;
+        r.jobId = jobId;
+        r.success = false;
+        r.accepted = true;
+        r.workerNode = workerNode;
+        r.costMs = costMs;
+        r.message = message;
+        return r;
+    }
+
+    /**
      * 构造失败结果（{@code success=false}、{@code accepted=false}）。
      *
      * 两个方向都用它：执行器受理失败（线程池饱和、handler 不存在、令牌不符）时作为触发回执同步返回；

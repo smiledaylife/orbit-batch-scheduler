@@ -10,6 +10,7 @@ import com.orbit.executor.handler.JobHandlerRegistry;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -27,6 +28,63 @@ import static org.mockito.Mockito.when;
  */
 class ExecutorControllerTest {
 
+    /** 未配置令牌时的默认执行器：用于验证 fail-closed 与「显式 allow-anonymous 才放行」两条路径。 */
+    private static ExecutorProperties anonymousProps() {
+        ExecutorProperties props = new ExecutorProperties();
+        props.setAllowAnonymous(true);
+        return props;
+    }
+
+    /** 鉴权默认关闭（fail-closed）：未配置 token 且未显式放行时，/run 必须被拒绝。 */
+    @Test
+    void runIsRejectedWhenTokenMissingAndAnonymousNotAllowed() {
+        JobHandlerRegistry registry = mock(JobHandlerRegistry.class);
+        when(registry.has("demo")).thenReturn(true);
+        ExecutorBootstrap bootstrap = mock(ExecutorBootstrap.class);
+        when(bootstrap.getResolvedNodeId()).thenReturn("node-1");
+        JobExecutionService executionService = mock(JobExecutionService.class);
+
+        // 默认 ExecutorProperties：accessToken="" 且 allowAnonymous=false
+        ExecutorController controller = new ExecutorController(registry, new ExecutorProperties(),
+                bootstrap, executionService, mock(ExecutionIdempotency.class));
+
+        TriggerRequest request = new TriggerRequest();
+        request.setHandler("demo");
+        request.setLogId("log-1");
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> controller.run(request, null));
+        assertTrue(ex.getMessage().contains("access token is not configured"), ex.getMessage());
+        // 关键：请求绝不能进入执行链路
+        verify(executionService, never()).submit(any(), any(), anyString());
+    }
+
+    /** 配置了 token 时：错误令牌被拒绝，正确令牌放行。 */
+    @Test
+    void runValidatesTokenWhenConfigured() {
+        JobHandlerRegistry registry = mock(JobHandlerRegistry.class);
+        when(registry.has("demo")).thenReturn(true);
+        ExecutorBootstrap bootstrap = mock(ExecutorBootstrap.class);
+        when(bootstrap.getResolvedNodeId()).thenReturn("node-1");
+        JobExecutionService executionService = mock(JobExecutionService.class);
+        when(executionService.submit(any(), any(), anyString()))
+                .thenReturn(TriggerResult.accepted("log-1", 7L, "node-1", "accepted"));
+        ExecutionIdempotency idempotency = mock(ExecutionIdempotency.class);
+        when(idempotency.tryReserve(anyString())).thenReturn(true);
+
+        ExecutorProperties props = new ExecutorProperties();
+        props.setAccessToken("s3cret");
+        ExecutorController controller = new ExecutorController(registry, props, bootstrap,
+                executionService, idempotency);
+
+        TriggerRequest request = new TriggerRequest();
+        request.setHandler("demo");
+        request.setLogId("log-1");
+
+        assertThrows(IllegalArgumentException.class, () -> controller.run(request, "wrong"));
+        assertTrue(controller.run(request, "s3cret").isAccepted());
+    }
+
     @Test
     void redisIdempotencyUnavailableReturnsStructuredRefusalInsteadOfThrowing() {
         JobHandlerRegistry registry = mock(JobHandlerRegistry.class);
@@ -38,7 +96,7 @@ class ExecutorControllerTest {
         when(idempotency.tryReserve(anyString()))
                 .thenThrow(new IllegalStateException("redis execution idempotency unavailable; request refused"));
 
-        ExecutorController controller = new ExecutorController(registry, new ExecutorProperties(),
+        ExecutorController controller = new ExecutorController(registry, anonymousProps(),
                 bootstrap, executionService, idempotency);
 
         TriggerRequest request = new TriggerRequest();
