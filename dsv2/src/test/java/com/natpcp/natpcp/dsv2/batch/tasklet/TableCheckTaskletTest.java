@@ -72,7 +72,8 @@ class TableCheckTaskletTest {
     @BeforeEach
     void setUp() {
         tasklet = new TableCheckTasklet(connectionInfoMapper, noticeService, adminJobClient);
-        when(chunkContext.getStepContext()).thenReturn(stepContext);
+        // normalizeIdentifier 系列用例不经过 execute()，该桩对其而言未使用，故 lenient
+        lenient().when(chunkContext.getStepContext()).thenReturn(stepContext);
     }
 
     private Map<String, Object> jobParamsWith(TableCheckBO bo) {
