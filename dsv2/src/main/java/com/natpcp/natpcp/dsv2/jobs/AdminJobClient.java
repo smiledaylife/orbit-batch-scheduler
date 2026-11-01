@@ -140,7 +140,15 @@ public class AdminJobClient {
 
     /**
      * 从 admin 详情接口返回体提取 JobInfo。
-     * <p>接口返回 {code,msg,data:{job:{...},quartz:{...}}}，提取 data.job。</p>
+     *
+     * 接口返回 {code,msg,data:{job:{...},quartz:{...}}}，提取 data.job。
+     *
+     * 解析失败抛出而不是返回 null：返回 null 会让调用方误诊为「任务不存在」——
+     * 把「响应体形状变化 / JSON 损坏」与「任务真被删除」混淆，排障方向被带偏。
+     * 让异常向上走，与网络失败的报错口径区分。
+     *
+     * @return JobInfo，data.job 缺失时返回 null（此时才真正可能是任务被删除）
+     * @throws IllegalStateException 响应体不是合法 JSON 或形状异常
      */
     private JobInfo extractJobInfo(Map body) {
         if (body == null) {
@@ -157,9 +165,10 @@ public class AdminJobClient {
                 return null;
             }
             return objectMapper.treeToValue(jobNode, JobInfo.class);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("任务详情响应体形状异常（非 JSON 对象）: " + e.getMessage(), e);
         } catch (Exception e) {
-            log.warn("解析任务详情失败，将按空任务处理: {}", e.getMessage());
-            return null;
+            throw new IllegalStateException("任务详情解析失败，请检查 admin 返回体: " + e.getMessage(), e);
         }
     }
 

@@ -82,7 +82,7 @@ class JobStoreTest {
 
         // 用过期版本号更新 -> 乐观锁冲突
         JobInfo stale = jobStore.findJobByName("jobB").get();
-        stale.setVersion(version); // 故意回退到旧版本
+        stale.setVersion(version); // 故意写回更小的 version，模拟并发更新冲突
         stale.setDescription("stale write");
         assertThrows(IllegalStateException.class, () -> jobStore.saveJob(stale));
     }
@@ -329,6 +329,24 @@ class JobStoreTest {
     @Test
     void finishLogFromRunningIgnoresUnknownLogId() {
         assertEquals(false, jobStore.finishLogFromRunning("log-absent", true, "n", 1L, "x"));
+    }
+
+    @Test
+    void finishLogFromRunningPersistsWorkerNodeWithoutTouchingDispatchAddress() {
+        insertRunningLog("log-wn", new java.util.Date(), "http://10.0.0.1:8081");
+
+        // 回传里的 workerNode 是节点标识（K8s Pod 名 / 主机名），长度不受本服务控制
+        String workerNode = "pod-" + repeat('x', 200);
+        assertTrue(jobStore.finishLogFromRunning("log-wn", true, workerNode, 88L, "done"));
+
+        JobLog row = findByLogId("log-wn");
+        assertEquals("SUCCESS", row.getStatus());
+        assertNotNull(row.getWorkerNode());
+        // 入库前必须截断：超长 workerNode 会让整批 callback 报 500 并卡住同批其它结果
+        assertEquals(ColumnLimits.LOG_WORKER_NODE, row.getWorkerNode().length());
+        assertTrue(row.getWorkerNode().endsWith("..."));
+        // 地址列语义不变：仍是派发目标 URL，不被回传的节点标识覆盖
+        assertEquals("http://10.0.0.1:8081", row.getExecutorAddress());
     }
 
     @Test

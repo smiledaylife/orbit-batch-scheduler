@@ -61,7 +61,11 @@ public class DurableCallbackClient extends CallbackClient {
                                 .in(properties().getCallbackStreamKey()).ofMap(fields));
                         streamCount.incrementAndGet();
                     }
-                    // 与旧实现语义一致：stream 写入成功同时计入总成功数（stats[1]）
+                    // 近似裁剪：XACK 只把消息从 Pending Entries List 移除，消息体仍留在 Stream 里，
+                    // 不裁剪就是只增不减（长跑必然撑爆 Redis 内存）。这里按 MAXLEN ~ N 做整节点裁剪，
+                    // 代价是一次额外命令、实际长度可能略微超过上限。
+                    trimStream();
+                    // stream 写入成功同时计入总成功数（stats[1]），与 HTTP 通道口径一致
                     sentCount.addAndGet(batch.size());
                     return true;
                 } catch (RuntimeException e) {
@@ -73,6 +77,25 @@ public class DurableCallbackClient extends CallbackClient {
             }
         }
         return super.deliver(batch);
+    }
+
+    /**
+     * 按 {@code orbit.executor.callback-stream-max-len} 对 Stream 做近似裁剪。
+     *
+     * 裁剪只是内存治理，不是投递语义的一部分：失败时只告警，绝不能把已经写进 Stream 的
+     * 结果降级成 HTTP 重发（会造成重复投递）。上限配成 0 或负数表示显式关闭裁剪。
+     */
+    private void trimStream() {
+        long maxLen = properties().getCallbackStreamMaxLen();
+        if (maxLen <= 0) {
+            return;
+        }
+        try {
+            redis.opsForStream().trim(properties().getCallbackStreamKey(), maxLen, true);
+        } catch (RuntimeException e) {
+            log.warn("[orbit-executor] redis callback stream trim failed (delivery unaffected): {}",
+                    e.getMessage());
+        }
     }
 
     /** 持久化回传配置与 Redis 客户端缺失的矛盾只告警一次，提示修正配置或补齐依赖。 */

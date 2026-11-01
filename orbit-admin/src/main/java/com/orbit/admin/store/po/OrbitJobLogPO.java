@@ -40,6 +40,9 @@ public class OrbitJobLogPO implements Serializable {
     /** 实际派发的执行器地址 */
     private String executorAddress;
 
+    /** 执行该任务的执行器节点标识（Pod 名 / 主机名），由回传写入 */
+    private String workerNode;
+
     /** 执行状态：RUNNING / SUCCESS / FAILED */
     private String status;
 
@@ -109,6 +112,14 @@ public class OrbitJobLogPO implements Serializable {
 
     public void setExecutorAddress(String executorAddress) {
         this.executorAddress = executorAddress;
+    }
+
+    public String getWorkerNode() {
+        return workerNode;
+    }
+
+    public void setWorkerNode(String workerNode) {
+        this.workerNode = workerNode;
     }
 
     public String getStatus() {

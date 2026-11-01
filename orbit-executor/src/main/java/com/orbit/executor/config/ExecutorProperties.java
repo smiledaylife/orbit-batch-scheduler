@@ -55,14 +55,21 @@ public class ExecutorProperties {
     /** callback 重试之间的退避间隔（毫秒）。 */
     private long callbackRetryIntervalMs = 2000;
 
-    /** Redis 执行幂等保护开关：开启后同 logId 在 TTL 内最多进入一次执行线程池。 */
-    private boolean executionIdempotencyEnabled = false;
+    /** Redis 执行幂等保护开关：开启后同 logId 在 TTL 内最多进入一次执行线程池。
+     * 金融/生产环境必须开启（默认 true）：admin 的 failover 换节点重试会重发同一 logId，
+     * 关闭时两个节点都会执行同一任务，造成数据错乱。
+     * 仅在明确无多副本、无 failover 的测试环境才应显式关闭。 */
+    private boolean executionIdempotencyEnabled = true;
     /** Redis 幂等 key 保留时间（秒）；应覆盖最大任务耗时及 callback 重试窗口。 */
     private long executionIdempotencyTtlSeconds = 86400;
     /** 是否启用 Redis Stream 持久化 callback；cluster 生产模式建议开启。 */
     private boolean durableCallbackEnabled = false;
     /** Executor 写入、Admin 消费的 Redis Stream key，两端必须一致。 */
     private String callbackStreamKey = "orbit:callback:stream";
+    /** Stream 长度近似上限：每次写入后按 MAXLEN ~ N 裁剪，给 Redis 内存一个宽松封顶。
+     *  XACK 只清 Pending Entries List、不删消息体，不裁剪的话 Stream 只增不减。
+     *  默认 10 万条（约 40 MB）。设为 0 或负数表示不裁剪（不推荐：会无界增长）。 */
+    private long callbackStreamMaxLen = 100000;
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -102,4 +109,6 @@ public class ExecutorProperties {
     public void setDurableCallbackEnabled(boolean value) { this.durableCallbackEnabled = value; }
     public String getCallbackStreamKey() { return callbackStreamKey; }
     public void setCallbackStreamKey(String value) { this.callbackStreamKey = value; }
+    public long getCallbackStreamMaxLen() { return callbackStreamMaxLen; }
+    public void setCallbackStreamMaxLen(long value) { this.callbackStreamMaxLen = value; }
 }

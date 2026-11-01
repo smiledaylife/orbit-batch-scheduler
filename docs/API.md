@@ -470,6 +470,7 @@ curl 'http://localhost:8080/orbit/admin/logs?jobName=dailyReportJob&from=2026-09
   "appName": "demo-executor",
   "handler": "dailyReport",
   "executorAddress": "http://10.0.1.5:8081",
+  "workerNode": "orbit-executor-7d9f8c5b6-x2n4q",
   "status": "SUCCESS",
   "message": "report done, bizDate=2026-09-15, orders=9213",
   "costMs": 743,
@@ -676,6 +677,7 @@ curl http://localhost:8081/orbit/executor/handlers -H 'X-Orbit-Token: <token>'
 | `logId` | string | 32 位无连字符 UUID，**单次调度全链路唯一**，也是回传幂等键（库上唯一索引） |
 | `jobId` / `jobName` / `appName` / `handler` | — | 触发时刻的任务快照 |
 | `executorAddress` | string | 实际派发的目标地址（受理成功后立刻写入；未派发成功时可能为 `null`） |
+| `workerNode` | string | 执行该任务的执行器节点标识（K8s Pod 名 / 主机名，≤128 字符超长截断），由回传写入；与 `executorAddress` 不同口径：前者是「派给了谁」，后者是「哪台机器跑的」。触发阶段就失败的日志该列为 `null` |
 | `status` | string | `RUNNING` / `SUCCESS` / `FAILED`（状态机：`RUNNING → SUCCESS|FAILED`，终态不可再改） |
 | `message` | string | 执行结果文本 / 失败原因，≤2000 字符（超长尾部 `...` 截断）；重试轮次在此标注 `attempt i/N` |
 | `costMs` | long | 执行器本地计时，覆盖该 `logId` 的全部重试轮次 |

@@ -141,7 +141,10 @@ orbit:
     worker-threads: 8                # 单节点并发上限 + 超时强制中断，下限为 1
     queue-capacity: 256              # 排队上限，满则快速失败
     worker-virtual-threads: false    # 可选：工作线程改虚拟线程（IO 密集任务收益明显）
-    access-token: ""                 # 与 admin 一致时可开启
+    access-token: ""                 # 与 admin 的 orbit.admin.access-token 保持同值
+    # 执行器默认 fail-closed：access-token 为空且未显式放行时，/orbit/executor/** 一律 403，
+    # 调度中心将无法触发任何任务。本地开发（执行器未对外暴露）显式放行：
+    allow-anonymous: true
 ```
 
 ```java
@@ -262,6 +265,8 @@ Cron 到点 / 手动触发
 - **可选持久化回传（cluster 模式）**：执行器配置 `orbit.executor.durable-callback-enabled=true` 后，
   结果优先写入 Redis Stream（跨进程重启不丢），Admin 侧由消费组异步落库
   （`orbit.admin.durable-callback-enabled=true`）；Redis 不可用时自动降级回 HTTP 回传（接入流程见 §4.4）。
+  写入侧按 `callback-stream-max-len`（默认 10 万条）做 `MAXLEN ~ N` 近似裁剪 ——
+  **XACK 只清 Pending Entries List、不删消息体**，不裁剪的话 Stream 只增不减。
 - **串行守卫的登记是派发前完成的**：定时触发在向执行器发起请求**之前**就把本次 logId 预登记进
   同名任务串行守卫，而不是拿到受理回执后再登记。否则执行器毫秒级跑完并回传时，
   回传可能与登记动作竞态，守卫被永久占用，任务从此不再被触发（且孤儿回收只扫 RUNNING 日志，
@@ -386,6 +391,7 @@ orbit:
     execution-idempotency-ttl-seconds: 86400   # 幂等 key TTL，需覆盖最大任务耗时 + 回传窗口
     durable-callback-enabled: true             # 结果先写 Redis Stream
     callback-stream-key: orbit:callback:stream # 与 admin 侧一致
+    callback-stream-max-len: 100000            # Stream 近似长度上限，写入侧按 MAXLEN ~ N 裁剪
 ```
 
 **调度中心侧**（`orbit-admin` 自带 Redis starter，无需加依赖）：
@@ -586,10 +592,11 @@ spring:
 | `access-token` | 空 | 令牌，随 `X-Orbit-Token` 请求头发出（双向常量时间比对） |
 | `callback-retry-times` | 3 | 结果回传失败的重试次数（不含首次）。回传失败会让日志停在 RUNNING 直到被回收 |
 | `callback-retry-interval-ms` | 2000 | 回传重试的退避间隔 |
-| `execution-idempotency-enabled` | false | 执行幂等：同 logId 在 TTL 内最多进入一次执行线程池（防 HTTP 超时重试重复执行）。有 Redis 时跨副本生效，Redis 不可用直接拒绝触发；无 Redis 时自动降级为 JVM 本地 Caffeine 缓存（仅保护本节点，TTL 上限 300 秒 + 容量 65536 自动淘汰，见 `ExecutionIdempotency` 类注释）。接入流程见 §4.4 |
+| `execution-idempotency-enabled` | true | 执行幂等：同 logId 在 TTL 内最多进入一次执行线程池（防 HTTP 超时重试重复执行）。有 Redis 时跨副本生效，Redis 不可用直接拒绝触发；无 Redis 时自动降级为 JVM 本地 Caffeine 缓存（仅保护本节点，TTL 上限 300 秒 + 容量 65536 自动淘汰，见 `ExecutionIdempotency` 类注释）。接入流程见 §4.4。金融/多副本生产必须保持开启；仅单节点测试环境可显式关闭 |
 | `execution-idempotency-ttl-seconds` | 86400 | 幂等 key 保留时间，应覆盖最大任务耗时及回传重试窗口；本地兜底模式按 300 秒封顶 |
 | `durable-callback-enabled` | false | 结果先写 Redis Stream（跨进程重启不丢），写入失败自动降级 HTTP 回传；与 admin 侧同名开关配合使用 |
 | `callback-stream-key` | orbit:callback:stream | 执行器写入的 Stream key，与 admin 侧一致 |
+| `callback-stream-max-len` | 100000 | Stream 近似长度上限：每次写入后按 `MAXLEN ~ N` 裁剪（约 40 MB）。**XACK 只清 Pending Entries List、不删消息体**，不裁剪 Stream 只增不减；`0`/负数 = 关闭裁剪（不推荐）。裁剪失败只告警，不影响投递 |
 
 ---
 

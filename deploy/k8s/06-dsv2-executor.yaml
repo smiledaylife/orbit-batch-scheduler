@@ -1,4 +1,4 @@
-# DS-V2 执行器（plt-mgmt 定时任务迁移）部署示例。
+# DS-V2 执行器部署示例。
 #
 # 配置注入方式与 orbit-executor 保持一致：K8s 原生 envFrom，
 #   - ConfigMap dsv2-config  → 非敏感配置（JDBC URL、Redis 节点、Kafka 地址、路径等）
@@ -23,6 +23,11 @@ data:
   PLT_LOCALFILEDIRROOT: /data/files
   ORBIT_EXECUTOR_ADMIN_ADDRESSES: http://orbit-admin:8080
   ORBIT_EXECUTOR_APP_NAME: dsv2
+  # 执行幂等（金融/多副本生产必须开启）：同 logId 在 TTL 内最多进入一次执行线程池。
+  # admin 的 failover 换节点重试会重发同一 logId，不开幂等时两个 Pod 都会执行同一任务。
+  # 代码默认已改为 true，此处显式声明防止被上游 base 镜像/全局 ConfigMap 覆盖。
+  ORBIT_EXECUTOR_EXECUTION_IDEMPOTENCY_ENABLED: "true"
+  ORBIT_EXECUTOR_EXECUTION_IDEMPOTENCY_TTL_SECONDS: "86400"
   DSV2_BATCH_METADATA_RETENTION_DAYS: "180"
   # 生产配好 known_hosts 后改为 "yes"
   DSV2_SSH_STRICT_HOST_KEY_CHECKING: "no"

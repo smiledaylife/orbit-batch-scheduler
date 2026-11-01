@@ -74,6 +74,19 @@ public class JobExecutionService implements DisposableBean {
     /** 单次任务等待下限（毫秒）：防止超时配置被误配成 0/负数导致所有任务瞬间「超时」 */
     private static final long MIN_WAIT_MS = 1000L;
 
+    /**
+     * 请求体可被受理的重试次数上限，与调度中心 {@code JobService.MAX_RETRY_COUNT} 对齐。
+     * 执行器侧必须自己再钳一次：{@code /orbit/executor/run} 是直接可调的入口，
+     * 不能假定调用方（或令牌持有者）会遵守调度中心的校验。
+     */
+    private static final int MAX_ACCEPTED_RETRY_COUNT = 10;
+
+    /**
+     * 请求体可被受理的重试间隔上限（秒），与调度中心
+     * {@code JobService.MAX_RETRY_INTERVAL_SECONDS} 对齐。
+     */
+    private static final int MAX_ACCEPTED_RETRY_INTERVAL_SECONDS = 3600;
+
     private final ExecutorProperties properties;
     private final CallbackClient callbackClient;
 
@@ -173,6 +186,8 @@ public class JobExecutionService implements DisposableBean {
      */
     public TriggerResult submit(TriggerRequest request, JobHandlerRegistry registry, String workerNode,
                                 int attempt) {
+        // 先把重试策略钳制到受理上限，再进入任何调度路径。
+        clampRetryPolicy(request);
         final String handler = request.getHandler();
         final long start = System.currentTimeMillis();
         final long waitMs = resolveWaitMs(request.getTimeoutSeconds());
@@ -369,14 +384,49 @@ public class JobExecutionService implements DisposableBean {
     }
 
     /**
-     * 计算本次执行的等待上限（毫秒）：{@code timeoutSeconds > 0} 用之；否则用兜底最大值。
+     * 把请求体里的重试策略钳制到本节点的受理上限。
      *
-     * 结果保证不小于 {@link #MIN_WAIT_MS}：{@code orbit.executor.max-job-wait-seconds}
-     * 被误配成 0 或负数时看门狗会立刻触发 ——
-     * 表现为「所有任务都在 0ms 超时失败」，和「任务真的跑不完」几乎无法区分。
+     * {@code retryCount} / {@code retryIntervalSeconds} 来自触发请求体，是**外部输入**。
+     * 调度中心创建任务时已校验到 {@code [0,10]} / {@code [0,3600]}，但
+     * {@code /orbit/executor/run} 可被直接调用（本地开发 {@code allow-anonymous=true}
+     * 时甚至不需要令牌）：不钳制时 {@code retryCount=1000000000} 配合
+     * {@code retryIntervalSeconds=0} 会让工作线程陷入无限重试 —— 日志永不收敛，
+     * 调度中心的串行守卫被永久占用，该任务再也无法触发（工作线程数是硬上限，
+     * 钉死几个就等于整节点不可用）。
+     *
+     * @param request 待执行的触发请求（原地修改）
      */
+    private static void clampRetryPolicy(TriggerRequest request) {
+        int retryCount = request.getRetryCount();
+        int interval = request.getRetryIntervalSeconds();
+        if (retryCount < 0 || retryCount > MAX_ACCEPTED_RETRY_COUNT) {
+            request.setRetryCount(Math.max(0, Math.min(retryCount, MAX_ACCEPTED_RETRY_COUNT)));
+        }
+        if (interval < 0 || interval > MAX_ACCEPTED_RETRY_INTERVAL_SECONDS) {
+            request.setRetryIntervalSeconds(Math.max(0, Math.min(interval, MAX_ACCEPTED_RETRY_INTERVAL_SECONDS)));
+        }
+    }
+
     private long resolveWaitMs(int timeoutSeconds) {
-        int seconds = timeoutSeconds > 0 ? timeoutSeconds : properties.getMaxJobWaitSeconds();
+        // timeoutSeconds 来自触发请求体，是**外部输入**：调度中心会按任务配置下发，
+        // 但 /orbit/executor/run 本身可被直接调用（本地开发 allow-anonymous=true 时甚至无需令牌）。
+        // 若不做上限钳制，一个 timeoutSeconds=2147483647 的请求就能把这个工作线程钉住 68 年
+        // —— 工作线程数是硬上限，被钉死几个就等于整节点不可用，且看门狗永远不会触发。
+        // 因此以本节点的 max-job-wait-seconds 作为受理上限（它同时也是缺省兜底值）。
+        // 兜底值还保证结果不小于 MIN_WAIT_MS：max-job-wait-seconds 配成 0 或负数时
+        // 看门狗会立刻触发，表现为「所有任务都在 0ms 超时失败」，和「任务真的跑不完」
+        // 几乎无法区分。
+        int cap = properties.getMaxJobWaitSeconds();
+        int seconds;
+        if (timeoutSeconds <= 0) {
+            seconds = cap;
+        } else if (cap > 0 && timeoutSeconds > cap) {
+            log.warn("[orbit-executor] timeoutSeconds={} exceeds this node's max-job-wait-seconds={}, clamped",
+                    timeoutSeconds, cap);
+            seconds = cap;
+        } else {
+            seconds = timeoutSeconds;
+        }
         long ms = seconds * 1000L;
         return ms < MIN_WAIT_MS ? MIN_WAIT_MS : ms;
     }

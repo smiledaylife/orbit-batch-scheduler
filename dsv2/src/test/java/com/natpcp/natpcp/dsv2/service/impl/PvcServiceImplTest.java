@@ -119,6 +119,53 @@ class PvcServiceImplTest {
         // 目录已创建且为空
         service.deleteFilePvcTow();
     }
+
+    /**
+     * 上一轮已成功压缩、但删除源文件时中断：本轮禁止重压覆盖，只继续清理源文件。
+     * 否则源目录只剩残余文件，重压会用残缺内容覆盖完整备份 → 数据永久丢失。
+     */
+    @DisplayName("backupPvcFile: zip 已存在时禁止重压覆盖（只继续清理源文件）")
+    @Test
+    void backupPvcFile_shouldNotOverwriteExistingZip() throws Exception {
+        Path zip = backupDir.resolve("202601.zip");
+        byte[] original = "previously-completed-backup".getBytes();
+        Files.write(zip, original);
+
+        Path oldDir = pvcRoot.resolve("20260110");
+        Files.createDirectories(oldDir);
+        Files.write(oldDir.resolve("residual.txt"), "residual".getBytes());
+
+        service.backupPvcFile();
+
+        // 备份内容必须保持原样（不能被残余文件重压覆盖）
+        assertThat(Files.readAllBytes(zip)).isEqualTo(original);
+        // 源目录仍被清理
+        assertThat(oldDir).doesNotExist();
+    }
+
+    /**
+     * 上一轮崩溃留下 0 字节 zip：必须能正常重压并替换。
+     * {@code File.renameTo} 在 Windows 上目标已存在时直接失败，
+     * 会把该月份的备份永久卡在「重命名失败」上。
+     */
+    @DisplayName("backupPvcFile: 0 字节残留 zip 能被重压替换（Windows renameTo 兼容）")
+    @Test
+    void backupPvcFile_shouldReplaceZeroLengthZip() throws Exception {
+        Path zip = backupDir.resolve("202601.zip");
+        Files.write(zip, new byte[0]);
+
+        Path oldDir = pvcRoot.resolve("20260110");
+        Files.createDirectories(oldDir);
+        Files.write(oldDir.resolve("a.txt"), "hello".getBytes());
+
+        service.backupPvcFile();
+
+        assertThat(zip).exists();
+        assertThat(Files.size(zip)).isGreaterThan(0L);
+        assertThat(oldDir).doesNotExist();
+        // 临时文件不残留
+        assertThat(backupDir.resolve("202601.zip.tmp")).doesNotExist();
+    }
 }
 /*
  * AICode End

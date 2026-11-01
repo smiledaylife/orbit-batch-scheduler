@@ -247,7 +247,7 @@ lenient().when(rs.next()).thenReturn(false);
         }
     }
 
-    @DisplayName("execute: connection failure -> notice, no exception")
+    @DisplayName("execute: connection failure -> notice + FAILED (不再吞成 COMPLETED)")
     @Test
     void execute_shouldSendDbFailNotice_whenConnectionFails() throws Exception {
         TableCheckBO bo = new TableCheckBO();
@@ -267,10 +267,11 @@ lenient().when(rs.next()).thenReturn(false);
             dm.when(() -> DriverManager.getConnection(anyString(), anyString(), anyString()))
                     .thenThrow(connRefused);
 
-            RepeatStatus status = tasklet.execute(contribution, chunkContext);
-
-            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-verify(noticeService).sendToAdminAndOps(anyString(), anyString());
+            // 新语义：连接失败让任务 FAILED（触发执行级重试与失败统计），通知照发
+            assertThatThrownBy(() -> tasklet.execute(contribution, chunkContext))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("数据库连接/元数据查询失败");
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
     @DisplayName("normalizeIdentifier: 数据库存小写（PostgreSQL）-> 转小写")

@@ -38,6 +38,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -242,8 +243,9 @@ class JobServiceDispatchTest {
         when(executorClient.trigger(eq("http://10.0.0.1:8081"), any())).thenReturn(
                 TriggerResult.fail("log-r", 1L, "http://10.0.0.1:8081", 3L, "executor saturated"));
         // 日志此刻仍是 RUNNING，条件收敛应当成功（logId 由 dispatch 内部生成，只能用 anyString 匹配）
+        // 第三个参数是 worker_node：触发侧没有回传，节点标识必须留空（URL 走 executor_address）
         when(jobStore.finishLogFromRunning(anyString(), eq(false),
-                eq("http://10.0.0.1:8081"), anyLong(), any())).thenReturn(true);
+                isNull(), anyLong(), any())).thenReturn(true);
 
         TriggerResult result = jobService.dispatch(job, null);
 
@@ -251,7 +253,10 @@ class JobServiceDispatchTest {
         assertEquals(false, result.isAccepted());
         // 不会有回传到达，必须立刻收敛到 FAILED，不能留在 RUNNING 等孤儿回收
         verify(jobStore, times(1)).finishLogFromRunning(anyString(), eq(false),
-                eq("http://10.0.0.1:8081"), anyLong(), eq("executor saturated"));
+                isNull(), anyLong(), eq("executor saturated"));
+        // 同步失败也必须留下派发目标地址：finishLogFromRunning 不再写地址列，
+        // 若不在这里补，FAILED 日志的 executor_address 会永远是 NULL（日志页看不到失败节点）。
+        verify(jobStore, times(1)).markDispatched(anyString(), eq("http://10.0.0.1:8081"));
         // 关键回归：绝不能再走无 status 守卫的 finishLog（会把已 SUCCESS 的行改写成 FAILED）
         verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
     }
@@ -280,6 +285,10 @@ class JobServiceDispatchTest {
         // 绝不许写终态：写下去就等于把随后的真实 SUCCESS 冲掉
         verify(jobStore, never()).finishLog(any(), any(), any(), anyLong(), any());
         verify(jobStore, never()).finishLogFromRunning(any(), anyBoolean(), any(), anyLong(), any());
+        // 但必须补记真实的派发目标 URL（而不是 workerNode 标识）：
+        // 这是孤儿回收判断「承接节点是否还在线」的唯一依据，且该列语义必须与
+        // liveAddresses（ExecutorNode.getAddress()）同口径。
+        verify(jobStore, times(1)).markDispatched(anyString(), eq("http://10.0.0.1:8081"));
     }
 
     /**

@@ -9,6 +9,7 @@ import com.fasterxml.jackson.datatype.jsr310.ser.LocalDateTimeSerializer;
 import com.natpcp.natpcp.dsv2.dao.PageInfo;
 import com.natpcp.natpcp.dsv2.dao.mapper.GenericMapper;
 import com.natpcp.natpcp.dsv2.redis.manager.RedisManager;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
@@ -21,6 +22,7 @@ import java.util.*;
 /**
  * 通用的操作数据类，访问数据库和redis，保持数据库和redis的一致
  */
+@Slf4j
 @Service
 public class GenericDataAccessService {
 
@@ -68,8 +70,17 @@ public class GenericDataAccessService {
             }
             List<Map<String, Object>> forwardInfoMap = convertColumn(genericMapper.query(clazz, entityMap, conditionsMap, null, null));
             for (Map<String, Object> map : forwardInfoMap) {
-                String key = String.valueOf(map.get("key"));
-                String value = String.valueOf(map.get("value"));
+                Object rawKey = map.get("key");
+                Object rawValue = map.get("value");
+                // NULL 行跳过并告警：String.valueOf(null)="null" 会把字面量 "null" 写入 Redis
+                // 并广播给订阅端（网关），且与 redisValue(null) 永不相等 → 每轮重复写+发布。
+                if (rawKey == null || String.valueOf(rawKey).isBlank()
+                        || rawValue == null || String.valueOf(rawValue).isBlank()) {
+                    log.warn("forward 规则行存在 NULL key/value，已跳过同步: key={}, value={}", rawKey, rawValue);
+                    continue;
+                }
+                String key = String.valueOf(rawKey);
+                String value = String.valueOf(rawValue);
                 String redisValue = redisTemplate.opsForValue().get(key);
                 if (!value.equals(redisValue)){
                     redisTemplate.opsForValue().set(key, value);

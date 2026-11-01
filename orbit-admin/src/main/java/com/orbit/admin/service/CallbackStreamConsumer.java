@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -137,8 +138,7 @@ public class CallbackStreamConsumer implements DisposableBean {
                 ops.createGroup(properties.getCallbackStreamKey(), ReadOffset.from("0-0"),
                         properties.getCallbackStreamGroup());
             } catch (Exception first) {
-                String message = first.getMessage();
-                if (isBusyGroup(message)) {
+                if (isBusyGroup(first)) {
                     return true;
                 }
                 // Redis XGROUP CREATE 要求 Stream 已存在；写 marker 建立 Stream 后重试。
@@ -148,7 +148,7 @@ public class CallbackStreamConsumer implements DisposableBean {
                     ops.createGroup(properties.getCallbackStreamKey(), ReadOffset.from("0-0"),
                             properties.getCallbackStreamGroup());
                 } catch (Exception second) {
-                    if (isBusyGroup(second.getMessage())) {
+                    if (isBusyGroup(second)) {
                         return true;
                     }
                     throw second;
@@ -161,13 +161,31 @@ public class CallbackStreamConsumer implements DisposableBean {
         }
     }
 
-    /** 判断 Redis 返回的异常是否表示 Consumer Group 已经存在。 */
-    private static boolean isBusyGroup(String message) {
-        if (message == null) {
-            return false;
+    /**
+     * 判断异常链上是否存在「Consumer Group 已经存在」（BUSYGROUP）。
+     *
+     * 必须遍历整条 cause 链：Spring Data Redis 把真实的 Redis 错误包在
+     * {@code RedisSystemException} 里，顶层 {@code getMessage()} 只有一句
+     * {@code "Error in execution"}，真正的
+     * {@code "BUSYGROUP Consumer Group name already exists"} 挂在 cause 上。
+     * 只看顶层消息就永远判不出「组已存在」，每轮都会走这条失败路径：
+     * 建组抛错 → 判不出 BUSYGROUP → 写一条 __orbit_init marker 建流 →
+     * 再建组再抛 → 退出返回 false → 消费线程 sleep 2s 后重来。
+     * 后果是消费线程永远不消费（durable callback 全部丢失、日志停在 RUNNING），
+     * 同时每 2 秒往业务流里灌一条垃圾记录，Redis 内存无界增长。
+     */
+    private static boolean isBusyGroup(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            String message = current.getMessage();
+            if (message == null || message.isEmpty()) {
+                continue;
+            }
+            String m = message.toLowerCase(Locale.ROOT);
+            if (m.contains("busygroup") || m.contains("group name already exists")) {
+                return true;
+            }
         }
-        String m = message.toLowerCase();
-        return m.contains("busygroup") || m.contains("group name already exists");
+        return false;
     }
 
     /**
