@@ -49,6 +49,13 @@ public class JobLog implements Serializable {
     private String executorAddress;
 
     /**
+     * 执行该任务的执行器节点标识（K8s 下通常是 Pod 名，本地为主机名）。
+     * 由执行器回传时带上；与 {@link #executorAddress}（派发目标 URL）不是同一口径：
+     * 地址列用于判断节点是否在线，节点标识用于人看「到底哪台机器跑的」。
+     */
+    private String workerNode;
+
+    /**
      * 执行状态：RUNNING（执行中）、SUCCESS（执行成功）、FAILED（执行失败）
      */
     private String status;
@@ -127,6 +134,14 @@ public class JobLog implements Serializable {
 
     public void setExecutorAddress(String executorAddress) {
         this.executorAddress = executorAddress;
+    }
+
+    public String getWorkerNode() {
+        return workerNode;
+    }
+
+    public void setWorkerNode(String workerNode) {
+        this.workerNode = workerNode;
     }
 
     public String getStatus() {

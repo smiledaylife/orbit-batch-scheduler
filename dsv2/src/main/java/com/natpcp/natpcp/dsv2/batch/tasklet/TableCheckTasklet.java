@@ -2,7 +2,7 @@
  * AICode Begin
  * TableCheckTasklet：TableCheck 任务（外部数据库表巡检）。
  *
- * 迁移自 plt-mgmt TableCheckJob，业务语义保持不变：
+ * 任务语义：
  *   1. 任务参数（TableCheckBO，由调度中心下发、经 JobParameters.jobParams 传入）指定连接信息 id 与表名；
  *   2. 用 tb_connection_info 中的 JDBC URL / 账号 / 加密密码直连目标库；
  *   3. onlyExist=false：仅检测表是否存在；
@@ -96,8 +96,12 @@ public class TableCheckTasklet implements Tasklet {
                 checkNextPartitionTable(metaData, conn, bo, String.valueOf(jobParameters.get("handlerName")));
             }
         } catch (SQLException e) {
+            // 连接失败必须让任务 FAILED：否则调度中心视角「巡检成功」，
+            // 执行级重试与失败统计全部失效，巡检可靠性退化为依赖通知系统本身。
+            // 通知照发（告知运维具体是哪个连接失败），随后抛出让 Batch 记 FAILED。
             log.warn("{}，数据库连接/元数据查询失败，已发送通知: {}", conn.getName(), e.getMessage(), e);
             notify(conn, "数据库连接失败，请确认配置是否正确");
+            throw new IllegalStateException("数据库连接/元数据查询失败: " + conn.getName(), e);
         }
         return RepeatStatus.FINISHED;
     }
@@ -226,7 +230,7 @@ public class TableCheckTasklet implements Tasklet {
 
     /**
      * 按名称查表，返回数据库元数据中的真实表名；不存在返回 null。
-     * <p>
+     *
      * {@link DatabaseMetaData#getTables} 对表名大小写敏感，而各数据库对未加引号标识符的存储习惯不同
      * （PostgreSQL 转小写、Oracle 转大写、MySQL 保持原样）。为避免运维填参大小写与库内不一致导致误报，
      * 先按数据库声明的存储习惯归一化表名；若仍未命中，再以原始写法兜底查询一次。

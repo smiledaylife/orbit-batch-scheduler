@@ -235,14 +235,15 @@ class ConfigCheckTaskletTest {
             dm.when(() -> java.sql.DriverManager.getConnection(anyString(), anyString(), anyString()))
                     .thenThrow(dbDown);
 
-            RepeatStatus status = tasklet.execute(contribution, chunkContext);
-
-            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
-verify(noticeService).sendToAdminAndOps(anyString(), anyString());
+            // 新语义：连接失败让任务 FAILED（触发执行级重试与失败统计），通知照发
+            assertThatThrownBy(() -> tasklet.execute(contribution, chunkContext))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("PostgreSQL 配置检测失败");
+            verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
-    @DisplayName("execute: POSTGRES 分支 JDBC URL 含危险参数时不建连，直接发通知")
+    @DisplayName("execute: POSTGRES 分支 JDBC URL 含危险参数时不建连，直接发通知并 FAILED")
     @Test
     void execute_shouldRejectDangerousJdbcUrl_whenPostgres() throws Exception {
         ConfigCheckBO bo = new ConfigCheckBO();
@@ -257,15 +258,16 @@ verify(noticeService).sendToAdminAndOps(anyString(), anyString());
              MockedStatic<java.sql.DriverManager> dm = mockStatic(java.sql.DriverManager.class)) {
             enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
 
-            RepeatStatus status = tasklet.execute(contribution, chunkContext);
-
-            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
+            // URL 白名单拒绝发生在 try 块内 → 被 catch(Exception) 包装成 ISE（通知照发）
+            assertThatThrownBy(() -> tasklet.execute(contribution, chunkContext))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("PostgreSQL 配置检测失败");
             dm.verifyNoInteractions();
             verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
-    @DisplayName("execute: ROCKET_MQ 路径含 shell 元字符时不建连，直接发通知")
+    @DisplayName("execute: ROCKET_MQ 路径含 shell 元字符时路径校验拒绝，向传播 FAILED")
     @Test
     void execute_shouldRejectUnsafePath_whenRocketMq() throws Exception {
         ConfigCheckBO bo = new ConfigCheckBO();
@@ -280,15 +282,16 @@ verify(noticeService).sendToAdminAndOps(anyString(), anyString());
              MockedConstruction<com.jcraft.jsch.JSch> js = mockConstruction(com.jcraft.jsch.JSch.class)) {
             enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
 
-            RepeatStatus status = tasklet.execute(contribution, chunkContext);
-
-            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
+            // 路径白名单拒绝发生在 try 块内 → 被 catch(Exception) 包装成 ISE（通知照发）
+            assertThatThrownBy(() -> tasklet.execute(contribution, chunkContext))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("RocketMQ 配置检测失败");
             assertThat(js.constructed()).isEmpty();
             verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }
 
-    @DisplayName("execute: ROCKET_MQ 分支创建连接失败发通知且不抛")
+    @DisplayName("execute: ROCKET_MQ 分支创建连接失败 → 通知照发并 FAILED（与 REDIS 语义对齐）")
     @Test
     void execute_shouldSendNotice_whenMqConnectionFails() throws Exception {
         ConfigCheckBO bo = new ConfigCheckBO();
@@ -311,9 +314,10 @@ verify(noticeService).sendToAdminAndOps(anyString(), anyString());
                      })) {
             enc.when(() -> EncoderUtil.decrypt("ENC(x)")).thenReturn("pwd");
 
-            RepeatStatus status = tasklet.execute(contribution, chunkContext);
-
-            assertThat(status).isEqualTo(RepeatStatus.FINISHED);
+            // 新语义：连接失败让任务 FAILED（与 REDIS 分支对齐），通知照发
+            assertThatThrownBy(() -> tasklet.execute(contribution, chunkContext))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("RocketMQ 配置检测失败");
             verify(noticeService).sendToAdminAndOps(anyString(), anyString());
         }
     }

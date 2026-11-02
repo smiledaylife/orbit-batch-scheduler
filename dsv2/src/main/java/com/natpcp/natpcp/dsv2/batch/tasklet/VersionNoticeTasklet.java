@@ -2,13 +2,13 @@
  * AICode Begin
  * VersionNoticeTasklet：versionNotice 任务（配置版本一致性巡检）。
  *
- * 迁移自 plt-mgmt TaskSchedulingNoticeJobs.versionNotice()，业务语义保持不变：
+ * 任务语义：
  *   1. 普通实例：Redis 中 key 形如 "instance:<serviceId>/<version>/<host>/<port>/<center>"，
  *      value 为 JSON {配置名: 版本}；逐项与 tb_configuration_version 比对，不一致则通知。
  *   2. 大网关实例：Redis 中 key 形如 "<location>_<center>_ng:<n>"，
  *      value 形如 "<ip信息>:<forwardObj版本>,<forwardRule版本>"；两项分别与库内比对，不一致则通知。
  *
- * 说明：本任务原为 1 分钟周期热更新任务，迁移后由调度中心 cron 触发；
+ * 说明：本任务由调度中心按 1 分钟周期 cron 触发；
  *       实例遍历基于 Redis SCAN，逻辑为"比对 + 插库通知"，无数据量放大。
  */
 package com.natpcp.natpcp.dsv2.batch.tasklet;
@@ -88,27 +88,47 @@ public class VersionNoticeTasklet implements Tasklet {
         if (instances == null || instances.isEmpty()) {
             return;
         }
+        // 逐 key 隔离：一条脏 key（非 JSON、格式异常）不应中断整轮巡检，
+        // 否则本轮所有实例的比对都不会执行。做法：跳过该 key + 计数告警。
+        int badKeys = 0;
         for (String instanceKey : instances) {
-            Object value = redisManager.get(instanceKey);
-            String json = value == null ? "" : value.toString();
-            // 与原实现一致：value 是 key 的一部分时视为无需比对
-            if (instanceKey.contains(json)) {
-                continue;
-            }
-            Map<String, Object> instanceVersions;
             try {
-                instanceVersions = JsonUtil.parseMap(json);
-            } catch (IllegalArgumentException e) {
-                throw new BizException(ExceptionCodeMsg.TRADE_NOTICE_ERROR,
-                        "实例配置版本数据非JSON: " + instanceKey + "，" + e.getMessage());
+                checkInstanceKey(instanceKey, dbVersions);
+            } catch (BizException e) {
+                badKeys++;
+                log.error("实例版本数据异常，跳过该 key: {}", instanceKey, e);
             }
-            for (Map.Entry<String, Object> entry : instanceVersions.entrySet()) {
-                String configName = entry.getKey();
-                String instanceVersion = entry.getValue() == null ? null : String.valueOf(entry.getValue());
-                String dbVersion = dbVersions.get(configName);
-                if (!StringUtils.equals(instanceVersion, dbVersion)) {
-                    notifyInstanceOutdated(InstanceKey.parse(instanceKey), configName, instanceVersion, dbVersion);
-                }
+        }
+        if (badKeys > 0) {
+            log.warn("versionNotice 本轮共跳过 {} 条异常实例数据（请检查网关注册写入的数据格式）", badKeys);
+        }
+    }
+
+    /** 比对单个实例 key 的配置版本（从 checkInstanceVersions 拆出，便于 per-key 异常隔离）。 */
+    private void checkInstanceKey(String instanceKey, Map<String, String> dbVersions) {
+        Object value = redisManager.get(instanceKey);
+        String json = value == null ? "" : value.toString();
+        // value 是 key 的一部分时视为无需比对
+        if (instanceKey.contains(json)) {
+            return;
+        }
+        Map<String, Object> instanceVersions;
+        try {
+            instanceVersions = JsonUtil.parseMap(json);
+        } catch (IllegalArgumentException e) {
+            throw new BizException(ExceptionCodeMsg.TRADE_NOTICE_ERROR,
+                    "实例配置版本数据非JSON: " + instanceKey + "，" + e.getMessage());
+        }
+        if (instanceVersions.isEmpty() && json.isBlank()) {
+            // 空 value 的实例没有任何可比对数据，静默跳过
+            return;
+        }
+        for (Map.Entry<String, Object> entry : instanceVersions.entrySet()) {
+            String configName = entry.getKey();
+            String instanceVersion = entry.getValue() == null ? null : String.valueOf(entry.getValue());
+            String dbVersion = dbVersions.get(configName);
+            if (!StringUtils.equals(instanceVersion, dbVersion)) {
+                notifyInstanceOutdated(InstanceKey.parse(instanceKey), configName, instanceVersion, dbVersion);
             }
         }
     }

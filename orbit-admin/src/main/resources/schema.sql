@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS orbit_job_log (
     app_name          VARCHAR(64),
     handler           VARCHAR(128),
     executor_address  VARCHAR(256),
+    worker_node       VARCHAR(128),
     status            VARCHAR(16),
     message           VARCHAR(2000),
     cost_ms           BIGINT,

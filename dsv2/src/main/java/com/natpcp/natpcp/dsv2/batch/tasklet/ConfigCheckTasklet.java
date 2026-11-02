@@ -2,13 +2,13 @@
  * AICode Begin
  * ConfigCheckTasklet：ConfigCheck 任务（外部中间件配置项巡检）。
  *
- * 迁移自 plt-mgmt ConfigCheckJob，业务语义保持不变：
+ * 任务语义：
  *   1. 任务参数（ConfigCheckBO）指定连接信息 id、检测类型（ConfigEnum）与期望配置项列表；
  *   2. 按类型获取目标系统的实际配置：
  *        REDIS     → Jedis CONFIG GET *
  *        POSTGRES  → select name,setting from pg_settings
  *        ROCKET_MQ → SSH 到目标机 cat 配置文件（key=value / key: value）
- *        LOG_LEVEL / JVM_MEMORY / JVM_THREAD → 原系统即未实现，仅记录日志
+ *        LOG_LEVEL / JVM_MEMORY / JVM_THREAD → 仅记录日志，不做实际检测
  *   3. 期望值与实际值不一致 → 发送"配置异常"通知；连接失败 → 发送"连接失败"通知。
  *
  * 安全：JDBC URL / SSH 路径 / 端口均来自库表录入，统一经 ConnectionInfoValidator 白名单校验。
@@ -122,11 +122,11 @@ public class ConfigCheckTasklet implements Tasklet {
 
     /**
      * Redis：CONFIG GET * 返回 [k1, v1, k2, v2, ...]。
-     * 与原实现一致：连接失败发通知后仍抛出异常（任务 FAILED）。
+     * 连接失败时先发通知，再抛出异常让任务 FAILED。
      */
     private void checkRedis(ConnectionInfoPO conn, String password, List<ConfigBO> expected) {
         Map<String, String> actual;
-        // try-with-resources：历史实现从不 close()，每次巡检泄露一条 Redis 连接
+        // try-with-resources：确保连接在方法返回前关闭，避免连接泄漏
         try (Jedis jedis = new Jedis(conn.getUrl(), ConnectionInfoValidator.requirePort(conn.getPort()),
                 REDIS_TIMEOUT_MS)) {
             jedis.auth(password);
@@ -154,9 +154,11 @@ public class ConfigCheckTasklet implements Tasklet {
                 actual.put(rs.getString("name"), rs.getString("setting"));
             }
         } catch (Exception e) {
+            // 与 REDIS 分支语义对齐：连接失败让任务 FAILED（触发执行级重试/失败统计），
+            // 通知照发——巡检失败必须在调度层可见，不能落成 COMPLETED。
             log.warn("{}，数据库连接/检测失败，已发送通知: {}", conn.getName(), e.getMessage(), e);
             notify(conn, "数据库连接失败", "数据库连接失败，请确认配置是否正确");
-            return;
+            throw new IllegalStateException("PostgreSQL 配置检测失败: " + conn.getName(), e);
         }
         reportDifferences(conn, "Postgres配置异常：", expected, actual);
     }
@@ -167,9 +169,10 @@ public class ConfigCheckTasklet implements Tasklet {
         try {
             actual = parseKeyValueText(readRemoteFile(conn, password));
         } catch (Exception e) {
+            // 与 REDIS 分支语义对齐：见 checkPostgres 注释
             log.warn("{}，RocketMQ连接/检测失败，已发送通知: {}", conn.getName(), e.getMessage(), e);
             notify(conn, "RocketMQ连接失败", "RocketMQ连接失败，请确认配置是否正确");
-            return;
+            throw new IllegalStateException("RocketMQ 配置检测失败: " + conn.getName(), e);
         }
         reportDifferences(conn, "RocketMQ配置异常：", expected, actual);
     }
@@ -210,7 +213,7 @@ public class ConfigCheckTasklet implements Tasklet {
                     ConnectionInfoValidator.requirePort(conn.getPort()));
             session.setPassword(password);
             Properties config = new Properties();
-            // 默认 "no" 与原实现兼容；生产配好 known_hosts 后建议通过 dsv2.ssh.strict-host-key-checking 改为 "yes"
+            // 默认 "no"；生产配好 known_hosts 后建议通过 dsv2.ssh.strict-host-key-checking 改为 "yes"
             config.put("StrictHostKeyChecking", strictHostKeyChecking);
             session.setConfig(config);
             session.setTimeout(SSH_TIMEOUT_MS);

@@ -134,7 +134,7 @@ class VersionNoticeTaskletTest {
         verify(noticeService).sendToAdminAndOps(anyString(), anyString());
     }
 
-    @DisplayName("execute: instance value not json -> BizException")
+    @DisplayName("execute: instance value not json -> per-key 隔离跳过，不中断整轮巡检")
     @Test
     void execute_shouldThrowBizException_whenInstanceValueNotJson() {
         stubConfigVersions(Collections.singletonList(po("cfg1", "v1")));
@@ -143,9 +143,10 @@ class VersionNoticeTaskletTest {
                 .thenReturn(new HashSet<>(Collections.singletonList(instanceKey)));
         lenient().when(redisManager.get(instanceKey)).thenReturn("not-json{{{");
 
-        // execute 在 checkVersionAndSendNotice 阶段即抛 BizException，scanKeys 不会被调用
-        assertThatThrownBy(() -> tasklet.execute(contribution, chunkContext))
-                .isInstanceOf(BizException.class);
+        // 新语义：脏 key 被 per-key 隔离（跳过 + 计数告警），不再中断整轮巡检。
+        // 其它实例的比对照常执行；网关分支（scanKeys）仍会被调用。
+        tasklet.execute(contribution, chunkContext);
+        verify(noticeService, never()).sendToAdminAndOps(anyString(), anyString());
     }
 
     @DisplayName("execute: ng version same -> no notice")

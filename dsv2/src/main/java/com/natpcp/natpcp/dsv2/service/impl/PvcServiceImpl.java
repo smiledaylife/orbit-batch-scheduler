@@ -1,11 +1,9 @@
 /*
  * AICode Begin
- * PvcServiceImpl 精简版（仅保留 pvcFileBackup 任务能力）。
+ * PvcServiceImpl：PVC 文件备份与过期清理能力。
  *
- * 原实现 554 行，依赖 PvcMapper / FileRecordPO / SM4Utils / DateUtils / Convert /
- * jsch（ChannelSftp）等；迁移版仅保留 backupPvcFile() 与 deleteFilePvcTow() 及
- * 其私有辅助方法（groupByFile / compressFolder），
- * 去除全部数据库与页面相关依赖，满足「零外部二方 jar」约束。
+ * 只提供 backupPvcFile() 与 deleteFilePvcTow() 及其私有辅助方法
+ * （groupByFile / compressFolder），不依赖任何外部二方 jar。
  */
 package com.natpcp.natpcp.dsv2.service.impl;
 
@@ -23,6 +21,7 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -81,18 +80,45 @@ public class PvcServiceImpl implements PvcService {
                 if (backupDir != null && !backupDir.isDirectory() && !backupDir.mkdirs()) {
                     throw new IllegalStateException("备份目录不存在且无法创建: " + backupDir);
                 }
-                log.info("开始压缩");
-                try (FileOutputStream fos = new FileOutputStream(zipFile);
-                     ZipOutputStream zos = new ZipOutputStream(fos)) {
-                    for (PvcfileDTO dto : value) {
-                        File fileSource = new File(dto.getFilePath(), dto.getFileName());
-                        compressFolder(fileSource, zos, fileSource.getName());
-                        log.info(fileSource.getName() + "压缩完成！");
+                // 关键防线：如果 zip 已存在（上一轮压缩成功但删除原文件时中断后重跑），
+                // 此时源目录只剩残余文件，直接重压会用残缺内容覆盖完整备份 → 数据永久丢失。
+                // 正确语义：zip 已存在说明备份已成功，本轮只应继续完成删除，禁止重压。
+                if (zipFile.exists() && zipFile.length() > 0) {
+                    log.warn("备份文件 {} 已存在（上一轮可能已完成压缩但删除中断），跳过重新压缩，仅继续清理源文件",
+                            zipFile.getName());
+                } else {
+                    log.info("开始压缩");
+                    // 先写临时文件再原子替换，避免压缩中途失败留下半截 zip 被下轮误判为「完整备份」
+                    File tmpZip = new File(backupDir, zipFileName + ".tmp");
+                    try (FileOutputStream fos = new FileOutputStream(tmpZip);
+                         ZipOutputStream zos = new ZipOutputStream(fos)) {
+                        for (PvcfileDTO dto : value) {
+                            File fileSource = new File(dto.getFilePath(), dto.getFileName());
+                            compressFolder(fileSource, zos, fileSource.getName());
+                            log.info(fileSource.getName() + "压缩完成！");
+                        }
+                        log.info("完成压缩{}", key);
+                    } catch (IOException e) {
+                        log.error("{} 文件夹压缩失败", key, e);
+                        // 清理半截临时文件，避免下轮误判
+                        if (!tmpZip.delete()) {
+                            log.warn("临时文件清理失败: {}", tmpZip);
+                        }
+                        throw new IllegalStateException(key + "文件夹压缩失败", e);
                     }
-                    log.info("完成压缩{}", key);
-                } catch (IOException e) {
-                    log.error("{} 文件夹压缩失败", key, e);
-                    throw new IllegalStateException(key + "文件夹压缩失败", e);
+                    // 用 Files.move(REPLACE_EXISTING) 而不是 File.renameTo：
+                    // Windows 上 renameTo 在目标文件已存在时直接失败，而本分支恰好可能遇到
+                    // 上一轮崩溃留下的 0 字节 zip（只有 zipFile.length() == 0 才会走到这里），
+                    // 那样每次重跑都会抛「重命名失败」，备份永远做不完。
+                    try {
+                        Files.move(tmpZip.toPath(), zipFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                    } catch (IOException e) {
+                        log.error("{} 临时备份文件落盘失败", key, e);
+                        if (!tmpZip.delete()) {
+                            log.warn("临时文件清理失败: {}", tmpZip);
+                        }
+                        throw new IllegalStateException("临时备份文件重命名失败: " + tmpZip + " -> " + zipFile, e);
+                    }
                 }
                 // 删除原文件夹（Files.walk 返回的 Stream 必须关闭，否则泄露目录句柄）
                 for (PvcfileDTO dto : value) {
@@ -124,7 +150,7 @@ public class PvcServiceImpl implements PvcService {
                 LocalDateTime localDateTime = fileTime.toInstant().atZone(ZoneId.systemDefault())
                         .toLocalDateTime().plusMonths(3);
                 if (localDateTime.isBefore(LocalDateTime.now())) {
-                    // 与原实现语义一致：仅删除文件/空目录（不递归）；但不再静默忽略失败结果
+                    // 仅删除文件/空目录（不递归）；删除失败不静默忽略
                     try {
                         Files.delete(file);
                         log.info("已清理过期临时文件: {}", file);

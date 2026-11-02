@@ -514,11 +514,17 @@ public class JobService {
             return false;
         }
         String logId = result.getLogId().trim();
-        // 回传只携带 workerNode（Pod 名/主机名），不带派发目标 URL。
-        // 若本行因为「触发回执丢了」而 executor_address 仍为空，这里补上，
-        // 否则孤儿回收会把它当成「执行器离线」，误杀仍在正常执行的任务。
-        jobStore.fillAddressIfAbsent(logId, result.getWorkerNode());
-
+        // 这里**刻意不**回填 executor_address。
+        //
+        // 该列的语义是「调度中心派发目标 URL」，而回传只携带 workerNode（Pod 名 / 主机名）。
+        // 把标识写进 URL 列会让孤儿回收的 liveAddresses.contains(address) 永远匹配不上
+        // —— liveAddresses 装的是 ExecutorNode.getAddress()，形如 http://ip:port ——
+        // 于是仍在正常执行的记录会被误判成「执行器离线」：错误收敛成 FAILED 并误发
+        // EXECUTION_LOST 告警。这正是 finishLogFromRunning 不再覆盖该列要避免的问题。
+        //
+        // 两种「地址为空」的场景都已各自被正确处理：
+        //   · 回执丢失 → 孤儿回收对空地址直接跳过（只能靠硬上界回收）；
+        //   · 结果未知 → failTrigger 用真实的派发 URL 调 markDispatched 补全。
         boolean applied;
         try {
             applied = jobStore.finishLogFromRunning(logId, result.isSuccess(), result.getWorkerNode(),
@@ -639,7 +645,7 @@ public class JobService {
         int failedToPersist = 0;
         for (TriggerResult result : results) {
             // 逐条隔离：单条入库失败（例如超长字段、DB 瞬时不可用）不能拖垮整批。
-            // 旧实现让异常直接冒泡到全局处理器 → 整批 500 → 执行器整批重发 →
+            // 异常冒泡到全局处理器会让整批返回 500，执行器据此整批重发；
             // 那条坏数据每次都失败，同批其它结果永远收敛不了。
             try {
                 if (handleCallback(result)) {
@@ -779,14 +785,17 @@ public class JobService {
 
             // 「结果未知」标记：读超时/连接重置这类失败并不等于请求没被执行器受理，
             // 请求很可能已经入队并正在执行。此时**绝不能**把日志收敛成终态：
-            // 既会覆盖随后到达的真实 SUCCESS（旧实现正是如此），
+            // 既会覆盖随后到达的真实 SUCCESS，
             // 也会误发 TRIGGER_FAILED 告警。留 RUNNING 交给回传或孤儿回收收敛。
             boolean outcomeUnknown = false;
             for (int i = 0; i < candidates.size(); i++) {
                 node = candidates.get(i);
                 result = executorClient.trigger(node.getAddress(), req);
                 if (result.isSuccess()) {
-                    outcomeUnknown = false;
+                    // 受理成功。注意：若此前已有节点返回过模糊失败（请求可能已被该节点受理），
+                    // 即使本节点也受理了，两个节点都可能各自执行 —— outcomeUnknown 必须保持 true，
+                    // 让调用方走「结果未知」分支（不写终态、不触发级重试），
+                    // 而不是按普通受理处理（否则触发级重试会用新 logId 造成双执行）。
                     break;
                 }
                 String failMsg = result.getMessage();
@@ -795,30 +804,33 @@ public class JobService {
                     // 明确的连接级失败：节点大概率已不存在（Pod 重建后旧 IP 未过期），
                     // 立刻摘除并换下一个（对齐 XXL-JOB FAILOVER），不等心跳超时。
                     //
-                    // 注意：摘除判断必须在「是否最后一个候选」之前 —— 旧实现先 break 后判定，
-                    // 导致单节点部署时死节点永远不会被摘除，只能等 90s 心跳超时；
+                    // 注意：摘除判断必须在「是否最后一个候选」之前 —— 若先 break 后判定，
+                    // 单节点部署时死节点永远不会被摘除，只能等 90s 心跳超时；
                     // 每次触发还要白等一次 connectTimeout，蚕食派发线程池。
                     registry.remove(job.getAppName(), node.getAddress());
                     log.warn("[orbit-admin] executor unreachable, evict and failover: {} @ {} ({})",
                             job.getAppName(), node.getAddress(), failMsg);
-                    outcomeUnknown = false;
                 } else if (failMsg != null && failMsg.contains("execution idempotency unavailable")) {
                     // 执行器因幂等后端（Redis）不可用而明确拒绝：请求确定未被受理，
                     // 换节点重试是安全的（新节点会重新预占同一 logId），但绝不摘除本节点 ——
                     // 它可能只是与 Redis 断连，执行能力本身完好，是否下线交由心跳判断。
                     log.warn("[orbit-admin] executor idempotency backend unavailable, failover without evicting: {} @ {} ({})",
                             job.getAppName(), node.getAddress(), failMsg);
-                    outcomeUnknown = false;
                 } else if (looksAmbiguous(failMsg)) {
                     // 模糊失败（connection reset / read timeout）：请求可能已被执行器受理。
                     // 换下一个节点重试（可用性优先），但绝不摘除本节点 —— 节点可能仍然健康，
                     // 是否下线交由心跳/超时剔除判断；同 logId 的执行器侧幂等会拦住重复入池。
+                    //
+                    // 粘性语义（金融场景关键）：一旦出现过模糊失败，「本轮结果未知」就不可逆 ——
+                    // 即使后续节点的失败看起来是明确失败（connection refused 等），
+                    // 也不能证明先前那个节点没受理。若在此处重置为 false，
+                    // 会在「节点1 read timeout + 节点2 refused」的链路里把可能已执行的任务
+                    // 判成确定失败 → 触发级重试（新 logId）→ 同一任务双执行。
                     log.warn("[orbit-admin] trigger outcome unknown, failover without evicting: {} @ {} ({})",
                             job.getAppName(), node.getAddress(), failMsg);
                     outcomeUnknown = true;
                 } else {
                     // 业务性拒绝（饱和、handler 不存在等）：执行器明确答复，换节点也不会成功，直接终止。
-                    outcomeUnknown = false;
                     break;
                 }
 
@@ -888,6 +900,22 @@ public class JobService {
         long jobId = job.getId() == null ? 0 : job.getId();
         long cost = System.currentTimeMillis() - start.getTime();
 
+        // 先把本次尝试的派发目标 URL 记进日志，再分派到下面两个出口。
+        // 两条出口都需要它，而 finishLogFromRunning 特意不写地址列（避免把回传里的
+        // workerNode 标识写进 URL 列），所以必须在收敛之前统一补：
+        //   · 结果未知 → 不写终态，但地址必须留下，否则运维不知道发给了谁；
+        //   · 确定失败 → 若不补，FAILED 记录的 executor_address 会永远是 NULL，
+        //     日志页看不到失败目标节点。
+        // 只写地址列、不写状态，语义与受理回执路径的 markDispatched 完全一致。
+        if (address != null && !address.trim().isEmpty()) {
+            try {
+                jobStore.markDispatched(logId, address);
+            } catch (RuntimeException e) {
+                log.warn("[orbit-admin] failed to record dispatch address {} for logId={}: {}",
+                        address, logId, e.getMessage());
+            }
+        }
+
         if (outcomeUnknown) {
             // 「结果未知」是触发链路上唯一必须**什么都不做**的分支：
             //   · 写终态 → 会覆盖随后到达的真实回传（SUCCESS 被改成 FAILED）；
@@ -916,7 +944,9 @@ public class JobService {
         }
 
         // 条件收敛：只有日志仍处于 RUNNING 才允许改写为 FAILED。
-        boolean applied = jobStore.finishLogFromRunning(logId, false, address, cost, finalMessage);
+        // 第三个参数是 worker_node（执行器节点标识），触发链路本身没有执行器回传，节点未知 → null；
+        // 派发目标 URL 已由上面的 markDispatched 写进 executor_address，信息不丢。
+        boolean applied = jobStore.finishLogFromRunning(logId, false, null, cost, finalMessage);
         if (!applied) {
             // 真实回传（或孤儿回收）已经抢先收敛了这条日志 —— 说明执行其实有结果了。
             // 既不能覆盖，也不能安排重试/告警：那会把一次真实成功再跑一遍并误报失败。
@@ -1032,14 +1062,14 @@ public class JobService {
      * 兜底路径最可能发生在「执行器其实已经受理并回传」之后，
      * 无条件改写会把真实结果冲掉。
      *
-     * @param logId   日志追踪 ID
-     * @param address 执行器地址（可为空）
-     * @param cost    耗时毫秒
-     * @param message 失败原因
+     * @param logId      日志追踪 ID
+     * @param workerNode 执行器节点标识（回传才有值，触发侧兜底收敛时为 null）
+     * @param cost       耗时毫秒
+     * @param message    失败原因
      */
-    private void safeFinishLog(String logId, String address, long cost, String message) {
+    private void safeFinishLog(String logId, String workerNode, long cost, String message) {
         try {
-            jobStore.finishLogFromRunning(logId, false, address, cost, message);
+            jobStore.finishLogFromRunning(logId, false, workerNode, cost, message);
         } catch (Exception ex) {
             log.error("[orbit-admin] failed to finalize log {}: {}", logId, ex.getMessage(), ex);
         }
@@ -1229,10 +1259,9 @@ public class JobService {
         }
         String m = message.toLowerCase(Locale.ROOT);
         // 注意 "network unreachable"：ExecutorClient.describeTriggerFailure 对 SocketException
-        // 归一化输出的是 "network unreachable: ..."（没有 "is"）。
-        // 旧实现匹配 "network is unreachable"，两者不相等 → 链路级故障既不被判定为「不可达」
-        // （不摘除），也不被判定为「结果未知」（不 failover），而是落到「业务拒绝 → break」，
-        // 只尝试第一个候选就放弃，其余健康节点完全用不上。
+        // 归一化输出的是 "network unreachable: ..."（没有 "is"），两种写法都要匹配；
+        // 否则链路级故障既不被判定为「不可达」（不摘除），也不被判定为「结果未知」（不 failover），
+        // 而是落到「业务拒绝 → break」，只尝试第一个候选就放弃，其余健康节点完全用不上。
         return m.contains("connection refused")
                 || m.contains("connect timed out")
                 || m.contains("connectexception")

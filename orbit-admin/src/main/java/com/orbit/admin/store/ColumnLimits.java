@@ -37,13 +37,20 @@ public final class ColumnLimits {
     /**
      * {@code orbit_job_log.executor_address}
      *
-     * 该列的值有两个来源：调度中心写入的节点 URL，以及执行器回传里的 workerNode
-     * （内容形如 {@code DESKTOP-XXX} / Pod 名，长度不受本服务控制）。
-     * 回传字段来自网络，必须与其他列一样在入库前截断 ——
-     * 否则一条超长的 workerNode 会让整批 callback 报 500，且每次重试都失败，
-     * 同批其它结果全部卡在 RUNNING。
+     * 语义是「调度中心把任务派给了哪个 URL」，只由 {@code JobStore.markDispatched} 写入，
+     * 孤儿回收正是拿这一列去比对在线执行器地址集合。执行器回传的 workerNode 不再写这里
+     * （两者口径不同：Pod 名永远匹配不上 URL 集合），改由 {@link #LOG_WORKER_NODE} 承载。
      */
     public static final int LOG_ADDRESS = 256;
+
+    /**
+     * {@code orbit_job_log.worker_node}
+     *
+     * 执行器回传的节点标识（K8s Pod 名 / 主机名）。回传字段来自网络，
+     * 必须与其他列一样在入库前截断 —— 否则一条超长的 workerNode 会让整批 callback 报 500，
+     * 且每次重试都失败，同批其它结果全部卡在 RUNNING。
+     */
+    public static final int LOG_WORKER_NODE = 128;
 
     // ==================== orbit_executor_registry ====================
 

@@ -165,7 +165,7 @@ public class JobStore {
         }
 
         // 2. 更新：走实体式更新（updateById），由 @Version 乐观锁插件自动补全
-        //    「SET version = 旧版本 + 1」与「WHERE id = ? AND version = 旧版本」。
+        //    「SET version = version + 1」与「WHERE id = ? AND version = 读取时的值」。
         //
         //    注意：这里不能改用 update(entity, updateWrapper) 再对同一批列做 .set(...)。
         //    MyBatis-Plus 的 update(et, ew) 会把「实体的 SET 片段」与「wrapper 的 SET 片段」拼接，
@@ -294,50 +294,29 @@ public class JobStore {
      * 只允许从 RUNNING 出发的一次转换可以让这些情况天然幂等 ——
      * 第二次更新匹配不到行，返回 false，日志保持第一次写入的真实结果。
      *
-     * @param logId   日志 ID
-     * @param success 执行是否成功
-     * @param address 执行节点地址
-     * @param costMs  耗时（毫秒）
-     * @param message 结果或失败原因
+     * @param logId      日志 ID
+     * @param success    执行是否成功
+     * @param workerNode 执行节点标识（Pod 名 / 主机名）；写 {@code worker_node} 列，供人排查「哪台机器跑的」
+     * @param costMs     耗时（毫秒）
+     * @param message    结果或失败原因
      * @return 是否真的发生了状态转换（false 表示该日志已不是 RUNNING，本次回传被忽略）
      */
-    public boolean finishLogFromRunning(String logId, boolean success, String address, long costMs, String message) {
+    public boolean finishLogFromRunning(String logId, boolean success, String workerNode, long costMs, String message) {
         LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
                 .eq(OrbitJobLogPO::getLogId, logId)
                 .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
                 .set(OrbitJobLogPO::getStatus, success ? JobLogStatus.SUCCESS : JobLogStatus.FAILED)
                 .set(OrbitJobLogPO::getCostMs, costMs)
+                .set(OrbitJobLogPO::getWorkerNode,
+                        ColumnLimits.abbreviate(workerNode, ColumnLimits.LOG_WORKER_NODE))
                 .set(OrbitJobLogPO::getMessage, ColumnLimits.abbreviate(message, ColumnLimits.LOG_MESSAGE))
                 .set(OrbitJobLogPO::getEndTime, new Date());
         // executor_address 不在这里写：该列是「调度中心派发目标」的语义（URL），
-        // 由 markDispatched / fillAddressIfAbsent 统一维护。
-        // 回传里的 workerNode 是节点标识（Pod 名 / 主机名），与 URL 不是同一口径；
-        // 旧实现直接覆盖会让孤儿回收的 liveAddresses.contains(address) 永远匹配不上，
-        // 把仍在正常执行的任务误判为「执行器离线」。
+        // 只由 markDispatched 维护（受理回执 / 结果未知两条路径各写一次真实的派发 URL）。
+        // 回传里的 workerNode 是节点标识（Pod 名 / 主机名），与 URL 不是同一口径，
+        // 写进地址列会让孤儿回收的 liveAddresses.contains(address) 永远匹配不上，
+        // 把仍在正常执行的任务误判为「执行器离线」；它改由独立的 worker_node 列承载。
         return logMapper.update(null, uw) > 0;
-    }
-
-    /**
-     * 仅在 {@code executor_address} 为空时回填派发目标地址。
-     *
-     * 用于「结果未知」场景：触发回执没拿到（因此 {@link #markDispatched} 没执行），
-     * 但执行器其实已受理并回传了结果 —— 此时把它报上来的节点地址补进日志，
-     * 既不改写已有值，也补全了观测与回收判断所需的信息。
-     *
-     * @param logId   日志 ID
-     * @param address 节点地址/标识（入库前按列宽截断）
-     */
-    public void fillAddressIfAbsent(String logId, String address) {
-        if (address == null || address.trim().isEmpty()) {
-            return;
-        }
-        LambdaUpdateWrapper<OrbitJobLogPO> uw = new LambdaUpdateWrapper<OrbitJobLogPO>()
-                .eq(OrbitJobLogPO::getLogId, logId)
-                .eq(OrbitJobLogPO::getStatus, JobLogStatus.RUNNING)
-                .isNull(OrbitJobLogPO::getExecutorAddress)
-                .set(OrbitJobLogPO::getExecutorAddress,
-                        ColumnLimits.abbreviate(address.trim(), ColumnLimits.LOG_ADDRESS));
-        logMapper.update(null, uw);
     }
 
     /**
@@ -590,6 +569,7 @@ public class JobStore {
         l.setAppName(po.getAppName());
         l.setHandler(po.getHandler());
         l.setExecutorAddress(po.getExecutorAddress());
+        l.setWorkerNode(po.getWorkerNode());
         l.setStatus(po.getStatus());
         l.setMessage(po.getMessage());
         l.setCostMs(po.getCostMs() == null ? 0L : po.getCostMs());
